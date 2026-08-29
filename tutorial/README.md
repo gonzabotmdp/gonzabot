@@ -5,19 +5,30 @@ usamos para levantar gonzabot en nuestro cluster, para que otro admin de
 HPC pueda replicar el criterio (no necesariamente cada comando literal,
 que va a depender de su propia infraestructura).
 
-Nota sobre rutas: vas a ver `/data/gpu/...` en algunos scripts y
-`/mnt/gpu-data/...` en otros para el mismo directorio — no es un error de
-tipeo. Es el mismo NFS montado con nombres distintos según el nodo, y no
-es un simple "login vs cómputo": el nodo de login (por donde entran los
-usuarios) y los nodos de cómputo (CPU y GPU) usan el mismo esquema,
-`/mnt/cpu-data/` y `/mnt/gpu-data/`. El que queda aparte es un nodo de
-administración separado (no es por donde entran los usuarios normales),
-que monta el mismo NFS como `/data/cpu/` y `/data/gpu/`. `gonzabot-
-watcher.sh` corre vía cron en ese nodo de administración (por eso
-`/data/gpu/...`); `vllm-service.sbatch` corre dentro de un job en un nodo
-de cómputo (por eso `/mnt/gpu-data/...`, mismo esquema que el login).
+Nota sobre rutas — dos reglas separadas, no las mezcles:
+
+1. **Nombre del mount, según el nodo.** El nodo de login (por donde entran
+   los usuarios) y los nodos de cómputo (CPU y GPU) montan el NFS como
+   `/mnt/cpu-data/` y `/mnt/gpu-data/`. Un nodo de administración aparte
+   (no es por donde entran los usuarios normales) monta el mismo NFS como
+   `/data/cpu/` y `/data/gpu/`. Por eso vas a ver ambos estilos en
+   distintos scripts de este repo: `gonzabot-watcher.sh` corre vía cron en
+   el nodo de administración (`/data/gpu/...`); `vllm-service.sbatch`
+   corre dentro de un job en un nodo de cómputo (`/mnt/gpu-data/...`).
+
+2. **Cuál de los dos (cpu-data / gpu-data) existe en cada nodo, aparte del
+   nombre.** Los nodos de cómputo GPU solo tienen montado `gpu-data` —
+   `cpu-data` no existe ahí. Los nodos de cómputo CPU es al revés: solo
+   `cpu-data`, no `gpu-data`. Solo el nodo de login tiene ambos montados
+   a la vez. Un `sbatch` a la partición GPU con un WorkDir en
+   `.../cpu-data/...` falla instantáneo (Slurm no puede hacer `chdir`),
+   y viceversa — antes de mandar un job, verificar que el path exista en
+   la partición de destino, no asumir que "es el mismo NFS" significa que
+   está todo visible desde todos lados.
+
 Adaptalo al esquema de mounts real de tu propio cluster — y si tenés más
-de dos categorías de nodo, no asumas que el patrón es binario.
+de dos categorías de nodo, no asumas que ninguno de estos dos patrones es
+binario.
 
 ## 1. Servir el modelo con vLLM
 
