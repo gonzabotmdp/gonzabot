@@ -80,16 +80,13 @@ except ImportError:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 VLLM_BASE    = os.environ.get("GONZABOT_URL",     "http://gpu-01:8000/v1")
-_DEV_MODE    = VLLM_BASE != "http://gpu-01:8000/v1"
 MODEL        = os.environ.get("GONZABOT_MODEL",   "qwen25-72b")
 _SCRIPT_DIR  = Path(__file__).resolve().parent
 CONTEXT_FILE = os.environ.get("GONZABOT_CONTEXT", str(_SCRIPT_DIR / "context" / "core.txt"))
 CONTEXT_DIR  = Path(os.environ.get("GONZABOT_CONTEXT_DIR", str(_SCRIPT_DIR / "context")))
 SERVICE_SBATCH  = Path("/mnt/gpu-data/shared/ifimar-ai/vllm-service.sbatch")
 START_REQUEST   = Path("/mnt/gpu-data/shared/ifimar-ai/run/.gonzabot-start-request")
-HEARTBEAT       = (Path("/mnt/gpu-data/gonzalo/ifimar-ai/run/.vllm-dev-heartbeat")
-                   if _DEV_MODE
-                   else Path("/mnt/gpu-data/shared/ifimar-ai/run/.gonzabot-heartbeat"))
+HEARTBEAT       = Path("/mnt/gpu-data/shared/ifimar-ai/run/.gonzabot-heartbeat")
 STATS_LOG       = Path("/mnt/gpu-data/shared/ifimar-ai/stats/usage.log")
 DB_DIR       = Path.home() / ".gonzabot"
 DB_PATH      = DB_DIR / "history.db"
@@ -323,6 +320,7 @@ def _raw_input(prompt: str) -> str:
             _sb_draw()
         if _is_sbatch and extra.lower() == "s":
             import tempfile as _tf
+            # Reconstruir desde lines para evitar artefactos del .strip()
             sb_text = "\n".join(lines)
             if not sb_text.startswith("#!"):
                 sb_text = "#!/bin/bash\n" + sb_text.lstrip("\n")
@@ -412,7 +410,6 @@ def _raw_input(prompt: str) -> str:
                         seq, esc = esc, ""
                         if seq == "\x1b[200~":
                             # ── Bracketed paste ─────────────────────────────
-                            # Chars que llegaron en el mismo chunk que el start marker
                             _bp_leftover = ch[_ci + 1:]
                             pbuf: list[str] = []
                             pesc = ""   # ventana deslizante últimos 6 chars
@@ -1302,6 +1299,7 @@ def _fix_sbatch(text: str) -> str:
         real que necesita expansión — quotearlo deja literales "${N}" sin resolver
         en los N archivos generados. Ahí no se toca."""
         _CODE_EXT = r'\.(in|lmp|lammps|tex|py|jl|m|R|C|cpp|f90|f95|pwi|fdf|mdin)\b'
+
         assigned = set(_re.findall(r'^\s*([A-Za-z_]\w*)\s*=[^=]', block, _re.M))
         assigned |= set(_re.findall(r'\bfor\s+(\w+)\s+in\b', block))
 
@@ -1868,10 +1866,6 @@ def _touch_heartbeat():
 def _auto_start_service() -> bool:
     """Drop a start-request flag and wait for the cron to bring the service up."""
     import itertools, time
-    if _DEV_MODE:
-        print(_c(YEL, f"\n▶ Servicio dev offline. Lanzar a mano:"))
-        print(_c(DIM,  f"  sbatch /mnt/gpu-data/gonzalo/ifimar-ai/vllm-service-dev-8001.sbatch"))
-        return False
     fuera = _fuera_de_horario()
     if fuera:
         print(_c(YEL, f"\n▶ {fuera}"))
@@ -1965,18 +1959,16 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                 try:
                     ready = _sel_esc.select([sys.stdin], [], [], 0.05)[0]
                 except OSError:
-                    continue  # SIGWINCH u otra señal → reintentar select
+                    continue
                 if not ready:
                     continue
                 ch = os.read(fd, 1).decode("utf-8", errors="replace")
                 if ch == "\x1b":
-                    # Distinguir ESC solo (cancelar) de secuencia de escape (flechas, etc.)
                     try:
                         has_more = _sel_esc.select([sys.stdin], [], [], 0.08)[0]
                     except OSError:
                         has_more = False
                     if has_more:
-                        # Es flecha u otra secuencia CSI → consumir y seguir
                         rest = os.read(fd, 1).decode("utf-8", errors="replace")
                         if rest in ("[", "O"):
                             seq_tail = ""
@@ -2001,7 +1993,6 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                                 except OSError:
                                     pass
                         continue
-                    # Sin bytes a continuación → ESC solo → cancelar respuesta
                     user_aborted.set()
                     stop.set()
                     break
@@ -2294,7 +2285,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
         stop.set()
         first_token.set()
         resp.close()
-        esc_thread.join(timeout=0.3)   # esperar restauración del terminal antes de continuar
+        esc_thread.join(timeout=0.3)
         if _prose_acc:   # flush prosa dentro del Live (transient) — evita double-print con post-render
             _emit(" ".join(_prose_acc) + "\n")
             _prose_acc.clear()
@@ -2618,7 +2609,6 @@ def repl(new_session: bool = False):
 
             elif cmd == "/model":
                 print(f"  Endpoint: {VLLM_BASE}")
-                print(f"  Modo:     {'dev' if _DEV_MODE else 'prod'}")
                 print(f"  Modelo:   {MODEL}")
                 print(f"  Ctx dir:  {CONTEXT_DIR}")
                 for _seg in ("core", "hpc", "python"):

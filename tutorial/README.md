@@ -64,6 +64,28 @@ es simple igual: WireGuard corriendo directo en el firewall perimetral, un
 peer por colaborador externo, `AllowedIPs` acotado solo al nodo de login
 (nunca `0.0.0.0/0`) para no romper la red del usuario.
 
+## 5. Cómo iterar sin romper lo que ya usan tus investigadores
+
+No es parte del código ni es obligatorio, pero es la recomendación más
+práctica que tenemos: correr **dos instancias** de gonzabot — una "dev"
+(puerto propio, para vos) donde probás cambios de código o de `context/`,
+y una "prod" (la que usan tus usuarios reales) que solo se actualiza
+después de validar el cambio en dev. `context/*.txt` se puede editar en
+caliente (efecto inmediato, sin reiniciar nada); cambios al *código* de
+`gonzabot` necesitan que cada usuario reabra su sesión para tomar el
+binario nuevo. Nosotros aprendimos esto de la mala manera: probando
+cambios de código directo contra la instancia real, un bug a mitad de
+prueba podía haberle afectado a alguien con un job real corriendo en ese
+momento.
+
+Si adoptás algo parecido: cuidado con que la instancia "dev" no termine
+con lógica o rutas hardcodeadas específicas de tu propia sesión de
+pruebas (nos pasó — nuestro dev tenía una detección de modo con una ruta
+a un directorio personal, que casi terminamos publicando en este mismo
+repo). Antes de copiar de dev a un release público, comparar los dos
+archivos y confirmar que las únicas diferencias sean cosas realmente
+específicas de desarrollo, no accidentes.
+
 ## Cómo se relaciona con el "conocimiento" del cluster
 
 Todo lo de arriba es infraestructura — se configura una vez. El
