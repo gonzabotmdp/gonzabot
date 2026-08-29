@@ -7,12 +7,17 @@ que va a depender de su propia infraestructura).
 
 Nota sobre rutas: vas a ver `/data/gpu/...` en algunos scripts y
 `/mnt/gpu-data/...` en otros para el mismo directorio — no es un error de
-tipeo. Es el mismo NFS montado con nombres distintos según el nodo: los
-nodos de login usan `/data/cpu/` y `/data/gpu/`, los nodos de cómputo usan
-`/mnt/cpu-data/` y `/mnt/gpu-data/`. `gonzabot-watcher.sh` corre en un nodo
-de login (por eso `/data/gpu/...`); `vllm-service.sbatch` corre dentro de
-un job en un nodo de cómputo (por eso `/mnt/gpu-data/...`). Adaptalo al
-esquema de mounts real de tu propio cluster.
+tipeo. Es el mismo NFS montado con nombres distintos según el nodo, y no
+es un simple "login vs cómputo": el nodo de login (por donde entran los
+usuarios) y los nodos de cómputo (CPU y GPU) usan el mismo esquema,
+`/mnt/cpu-data/` y `/mnt/gpu-data/`. El que queda aparte es un nodo de
+administración separado (no es por donde entran los usuarios normales),
+que monta el mismo NFS como `/data/cpu/` y `/data/gpu/`. `gonzabot-
+watcher.sh` corre vía cron en ese nodo de administración (por eso
+`/data/gpu/...`); `vllm-service.sbatch` corre dentro de un job en un nodo
+de cómputo (por eso `/mnt/gpu-data/...`, mismo esquema que el login).
+Adaptalo al esquema de mounts real de tu propio cluster — y si tenés más
+de dos categorías de nodo, no asumas que el patrón es binario.
 
 ## 1. Servir el modelo con vLLM
 
