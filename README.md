@@ -30,25 +30,30 @@ Casos reales de usuarios del cluster, comparando tiempo de ejecución antes y
 después de aplicar la sugerencia de gonzabot (mismo nodo, mismos datos):
 
 - LAMMPS (barrido de parámetro secuencial → job array): **~2.7x** más rápido.
-- Quantum ESPRESSO (`--ntasks` no proporcional a `-nimage`/`-npool`): **~1.3x**
-  más rápido.
+- Quantum ESPRESSO/`ph.x` (fonones, `--ntasks` no escalado con `-nimage`):
+  validado real, subir `-nimage` sin escalar `--ntasks` en proporción llegó
+  a ser **44% más lento**, no más rápido (nimage 4 → 27.1 min, nimage 8,
+  mismo `--ntasks` → 39.2 min).
 
-Ejemplo real del caso Quantum ESPRESSO — el usuario pedía paralelismo por
-imágenes/pools sin escalar `--ntasks`, así que casi todo el paralelismo
-pedido quedaba sin usarse:
+Ejemplo real — le pedimos a gonzabot en vivo (sesión nueva, sin editar la
+respuesta) cómo paralelizar un cálculo de fonones con `ph.x -nimage 4`.
+Esto es lo que generó, tal cual, el 29/8/2026:
 
 ```diff
  #SBATCH --nodes=1
--#SBATCH --ntasks=1
-+#SBATCH --ntasks=4
+-#SBATCH --ntasks=16
++#SBATCH --ntasks=64
  #SBATCH --cpus-per-task=1
 
- pw.x -nimage 4 -npool 1 -in input.pwi
+-mpirun -np 16 ph.x -nimage 4 -in input.in
++mpirun -np 64 --bind-to core --map-by core ph.x -nimage 4 -in input.in
 ```
 
-`-nimage 4` le pide a QE que reparta el trabajo en 4 imágenes independientes,
-pero con `--ntasks=1` Slurm solo le da un proceso MPI para repartir entre las
-4 — se serializan. Con `--ntasks=4` cada imagen corre en su propio proceso.
+(la línea `-` es la forma naive de pedirlo — mismo `--ntasks` que sin
+`-nimage` — la `+` es la respuesta real de gonzabot: escala `--ntasks` a
+64 para que cada una de las 4 imágenes tenga sus propios 16 procesos MPI,
+en vez de repartir 16 procesos entre las 4 imágenes). Script completo real
+en [`tutorial/ph_x_fonones_real.sbatch`](tutorial/ph_x_fonones_real.sbatch).
 
 ## Arquitectura
 
