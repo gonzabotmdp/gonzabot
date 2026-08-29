@@ -43,8 +43,7 @@ pedido quedaba sin usarse:
 +#SBATCH --ntasks=4
  #SBATCH --cpus-per-task=1
 
--pw.x -nimage 4 -npool 1 -in input.pwi
-+pw.x -nimage 4 -npool 1 -in input.pwi
+ pw.x -nimage 4 -npool 1 -in input.pwi
 ```
 
 `-nimage 4` le pide a QE que reparta el trabajo en 4 imágenes independientes,
