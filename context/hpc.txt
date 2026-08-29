@@ -1,0 +1,319 @@
+# MANTENIMIENTO DE ESTE ARCHIVO:
+# Formato: hechos compactos, una línea por regla. SIN prosa, SIN condicionales "si el usuario...".
+# SIN narrativa histórica (fechas, job IDs, "antes vs después") — eso vive en spack-rebuild-progress.txt.
+# Para rutas spack de 1 nodo: usar SPACK=/usr/share/spack/root/bin/spack; $SPACK --no-locks location -i /hash7c
+# Para multi-nodo (PATRÓN B): usar $SPACK --no-locks location -i /hash (NO paths largos — el modelo los alucina).
+# Mantener < 15KB. Agregar software nuevo: solo paths + flags críticos, sin ejemplos completos.
+# Editar SIEMPRE hpc-dev.txt → testear → \cp a shared/.../hpc.txt
+
+⚠⚠ REGLAS CRÍTICAS (leer primero, aplican a TODO software) ⚠⚠
+  MEM en job serial (--ntasks=1 --cpus-per-task=1) con --mem>16G: NUNCA validar "parece
+  suficiente" sin más — preguntar si está medido (seff/sstat de una corrida anterior) o es
+  estimación, y decir explícitamente si parece alto para 1 core. Bug real 27/8: --mem=64G
+  serial validado sin cuestionar, bloqueó nodos enteros a otros usuarios.
+  N INSTANCIAS SERIALES en paralelo (usuario ya lanza N submits, o pide "correr varias en
+  paralelo" de un binario de 1 core): SIEMPRE job array real (#SBATCH --array=1-N +
+  $SLURM_ARRAY_TASK_ID en el WORKDIR). NUNCA subir --ntasks=N dejando el body sin loop/srun —
+  eso reserva N tasks y ejecuta 1 sola vez. Bug real 27/8: gonzabot sugirió --ntasks=4 sin tocar
+  el body, desperdiciando 3 de 4 tasks. No mezclar --array con --ntasks en la misma respuesta.
+  NIMAGE/NPOOL (QE): subir sin escalar --ntasks en la misma proporción puede EMPEORAR el tiempo,
+  no mejorarlo (validado real: nimage 4→8 mismo ntasks = 44% más lento). Ver detalle en QE abajo.
+
+HARDWARE: 16 nodos CPU (quad-11/12/33/34-n01..n04) — TODOS IDÉNTICOS: 256 cores AMD EPYC 9754
+  (Zen4), misma RAM/nodo, InfiniBand. NO hace falta pinear --nodelist a un nodo específico por
+  rendimiento — cualquier nodo de la partición cpu da el mismo resultado. Si un --nodelist
+  puntual está lleno/ocupado (ver squeue), sugerir sacar el --nodelist o cambiar a otro nodo
+  cpu cualquiera, no hay pérdida de performance por el cambio.
+
+RECONOCIMIENTO DE HERRAMIENTAS:
+  pw.x / pw.x -in → QUANTUM ESPRESSO (QE). NO LAMMPS. Aplicar reglas QE.
+  lmp / lmp -in   → LAMMPS.
+  gmx / gmx_mpi   → GROMACS.
+  cp2k.psmp       → CP2K.
+
+NUNCA "module load/avail/spider" en ningún sbatch — este cluster NO tiene Lmod, "module" no es un comando válido en los nodos. SIEMPRE spack: $SPACK --no-locks location -i /hash (ver hash por software abajo).
+
+MEMORIA: DefMemPerCPU=1024 MB. Sin --mem explícito el job tiene 1 GB × cpus → OOM kill.
+  QE: --mem=100G (superceldas necesitan 5-15+ GB). LAMMPS 256 MPI: --mem=256G.
+  GROMACS/CP2K: --mem=100G. NUNCA --mem=0 si el nodo puede tener otros jobs.
+
+WORKDIR: ver patrón obligatorio en core.txt (aplica a todo software, no se repite acá).
+
+SPACK en sbatch: los jobs batch NO heredan funciones de shell.
+  SIEMPRE agregar antes de spack load, EN ESTE ORDEN:
+  source /usr/share/spack/root/share/spack/setup-env.sh
+  source /apps/local/spack/site/spack-load-wrapper.sh
+  ⚠ NUNCA "source $SPACK/share/spack/setup-env.sh": $SPACK es el BINARIO (/bin/spack), no el root.
+  ⚠ Sin la segunda línea, "spack load pkg" con múltiples builds instaladas tira error de ambigüedad — la wrapper resuelve el hash canónico vía /apps/local/spack/site/preferred-hashes.conf.
+
+STORE NUEVO (spack-2026b): store default para todos los usuarios (el viejo queda legacy/respaldo). VTK y paraview: SACADOS a propósito — NO ofrecerlos, no están en ningún store. Octave: sin GUI/gnuplot todavía.
+  "spack load lammps/gromacs/fftw/netcdf-c/openblas/
+  py-pandas" (sin hash, nombre pelado) ya resuelven solos vía preferred-hashes.conf —
+  probado exit 0 en los 6. "spack load gnuplot/hdf5" también resuelven solos.
+  ÚNICA EXCEPCIÓN A PROPÓSITO: "spack load py-numpy" sigue dando "matches multiple
+  packages" — es intencional (yppb4ug %aocc y anidz7n %gcc14 son 2 ecosistemas reales
+  distintos, pandas+performance vs numba/scipy), hay que pedirle al usuario que especifique
+  versión/hash/compilador para py-numpy puntualmente, no para el resto. Solución nativa
+  de vista (spack view) en evaluación, no aplicada todavía.
+  En sbatch (el job NO hereda funciones de shell, hay que sourcear todo esto, EN ESTE ORDEN):
+    export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config
+    source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
+    spack env activate /apps/local/spack/spack-2026b/spack/var/spack/environments/rebuild-full
+    eval $(spack load --sh <paquete>)   # ej: lammps, gromacs, cp2k, r, root, quantum-espresso, openfoam, julia — sin hash, resuelve solo
+  ⚠ NUNCA mezclar con rutas del store viejo (/usr/share/spack). NUNCA inventar el path si el paquete no está en la lista de arriba — avisar que no está validado ahí todavía.
+
+SPACK LOAD — DESAMBIGUACIÓN:
+  Si falla un spack load con "Permission denied": problema de permisos puntual, no del wrapper ni del hash — avisar al usuario, no adivinar workaround.
+  PROBADO Y FUNCIONA spack load pkg (sin hash), test funcional real: fftw, r, octave, julia (rama
+    especial), wannier90, elk, cuda (12.6.2, A100),
+    valgrind, py-pandas, py-numpy, gdal, hdf5, netcdf-c, proj, py-sympy, py-matplotlib.
+    py-torch y texlive NO DISPONIBLES desde el 1/8 (ver notas en sus secciones) — no incluir en spack load.
+  Resuelven sin ambigüedad pero sin test funcional todavía (binario/lib no probado en caso real):
+    casa, cp2k, cudnn, arrow, py-tensorflow, py-tensorboard, netlib-scalapack. (nccl YA NO ESTÁ instalado, sacado 22/8)
+  NO usar spack load pkg sin hash (motivo real, no capricho):
+    lammps: sacado del wrapper a propósito (22/8) — CPU/GPU es bifurcación real, usar hash de la sección LAMMPS.
+    openmpi: openmpi único ahora (/2cgnkug) sirve para todo el store actual — igual usar el hash
+      explícito en vez de bare (más claro, y evita sorpresas si vuelve a haber más de un build).
+    gromacs, quantum-espresso: variante CPU/+cuda distinta, no están en la lista de desambiguación
+      del wrapper → usar hash de la sección correspondiente.
+    python: usar matplotlib.env (spack load --sh tiene DB lock con jobs concurrentes).
+  Build +cuda (lammps/gromacs/openmpi) en partición cpu (sin GPU): NO crashea ni falla al arrancar,
+    solo warnings ignorados de openmpi por libcuda.so.1 ausente. No recomendar compilar sin CUDA
+    por miedo a fallo — el motivo real para usar la build CPU-only es tamaño/dependencias.
+  Paquetes NO en conf con múltiples builds sin ganador claro: incluir versión%compilador: spack load py-scipy@1.16.3%gcc@14.2.0
+
+--- LAMMPS CPU ---
+
+lammps@20250722.4 (/3xvrevx, AOCC, ~cuda) — recomendado, MPI puro. NUNCA "spack load lammps" a
+  secas — salió del wrapper de desambiguación a propósito (decisión softadm 22/8: CPU/GPU es
+  bifurcación real, no debe resolverse en silencio), usar el hash explícito:
+  SPACK=/apps/local/spack/spack-2026b/spack/bin/spack
+  LAMMPS_DIR=$($SPACK location -i /3xvrevx 2>/dev/null)
+  OMPI_DIR=$($SPACK location -i /2cgnkug 2>/dev/null)
+  export PATH=${LAMMPS_DIR}/bin:${OMPI_DIR}/bin:$PATH
+  POT=${LAMMPS_DIR}/share/lammps/potentials   # 256 potenciales ya incluidos, ej: pair_coeff * * ${POT}/Al_jnp.eam
+  #SBATCH --ntasks=256 --cpus-per-task=1
+  ${OMPI_DIR}/bin/mpirun -np 256 --map-by core --bind-to core --mca btl ^openib,uct lmp -in $INPUT
+  NUNCA -sf omp, NUNCA ppr:1:l3cache, NUNCA cpus-per-task>1 — hybrid MPI+OMP más lento en Zen4.
+  ntasks SEGÚN TAMAÑO: <10k átomos → --ntasks=8-32 (o 1-2 serial p/ cadenas sueltas); 256 SOLO >100k átomos.
+
+LAMMPS input: NUNCA create_atoms random → átomos solapados → "Lost atoms". SIEMPRE lattice fcc.
+NUNCA thermo después de run — va ANTES.
+NUNCA inventar ruta de potencial (pair_coeff) tipo "/mnt/cpu-data/shared/lammps_potentials/" —
+  NO EXISTE. Los potenciales YA VIENEN con LAMMPS: $LAMMPS_DIR/share/lammps/potentials/
+  (256 archivos, ej: Al_jnp.eam, AlCu.eam.alloy). Si no está ahí, avisar y sugerir NIST/openkim.org.
+units lj: parámetros adimensionales. Si el usuario pide K o Å → usar units real/metal.
+units lj: pe/ke del log ya son POR ÁTOMO (norm yes default) — NUNCA dividir por N en el análisis.
+Difusión D por MSD: promediar ≥10 semillas (-var seed N, ${seed} en input quoteado) — 1 trayectoria da error ~100%. msd NO es keyword de thermo_style: compute msd_all all msd (SIN com yes) + c_msd_all[4].
+Bug CUDA error 34: export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1
+
+--- LAMMPS GPU ---
+
+lammps@20250722.4 (/ung45dg, GCC14+cuda) ⚠ build GPU actual quedó en GCC14, no AOCC+cuda como
+  antes (regresión reportada a softadm 22/8, sin fecha de fix confirmada):
+  LAMMPS_DIR=$($SPACK location -i /ung45dg 2>/dev/null)
+  CUDA_DIR=$($SPACK location -i /okkjtu2 2>/dev/null)
+  export PATH=${LAMMPS_DIR}/bin:${CUDA_DIR}/bin:$PATH
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1
+  mpirun -np $NGPU --map-by node:PE=12 --mca btl ^openib,uct lmp -sf gpu -pk gpu $NGPU -in $INPUT
+  Checkpoint: restart 1000 sim.restart → al reanudar: read_restart (sin create_atoms/create_box)
+  Scavenger GPU: usar --partition=gpu --qos=scavenger, trap SIGTERM para guardar checkpoint
+
+--- GROMACS 2024.3 ---
+
+⚠ Build actual SOLO %gcc@14.2.0, sin AOCC (regresión reportada a softadm 22/8 — el benchmark
+  +43% CPU validado 17-20/8 fue con AOCC, rendimiento actual puede ser menor).
+  Hashes: /humbjkf (CPU, ~cuda), /vg5odaz (+cuda). openmpi único ahora: /2cgnkug.
+  GROMACS_DIR=$($SPACK location -i /humbjkf 2>/dev/null)
+  OMPI_DIR=$($SPACK location -i /2cgnkug 2>/dev/null)
+  export PATH=${GROMACS_DIR}/bin:${OMPI_DIR}/bin:$PATH
+  export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+  mpirun -np $SLURM_NTASKS gmx_mpi mdrun -ntomp $SLURM_CPUS_PER_TASK -s topol.tpr -deffnm output
+  Óptimo CPU: --ntasks-per-node=32 --cpus-per-task=8.
+  CRÍTICO: NUNCA -ntmpi (es para builds sin MPI). Este build usa MPI real → mpirun -np controla los ranks.
+
+--- AMBER 25 ---
+
+⚠ ROTO desde el 22/8 (detectado en vivo) — pmemd.MPI no encuentra sus libs de MPI (el openmpi al
+  que estaba linkeado, gcc-13.3.0/openmpi-5.0.8, ya no existe en disco, reportado a softadm).
+  NO ofrecer AMBER hasta nueva validación: avisar al usuario que está temporalmente fuera de
+  servicio y que contacte a Gonzalo, no generar el sbatch como si funcionara.
+
+--- QUANTUM ESPRESSO (QE 7.4.1) ---
+
+⚠ Build actual SOLO %gcc@14.2.0, sin AOCC (regresión reportada a softadm 22/8 — el benchmark
+  ~3% más rápido validado 17-20/8 fue con AOCC).
+QE corre en PARTICIÓN CPU (NO GPU, NO --gres).
+"spack load quantum-espresso" bare YA RESUELVE SOLO ahora mismo (22/8, un solo build instalado,
+  hash /oic6c4o) — PERO esto puede volver a romperse si softadm reinstala AOCC (2 builds =
+  ambiguo de nuevo). Si "spack load quantum-espresso" da "matches multiple": usar el hash
+  explícito /oic6c4o en su lugar y avisar que hay que revisar esta nota.
+
+  SPACK=/apps/local/spack/spack-2026b/spack/bin/spack
+  export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config
+  eval $(spack load --sh quantum-espresso 2>/dev/null)
+  OMPI_DIR=$($SPACK location -i /2cgnkug 2>/dev/null)
+  export PATH=${OMPI_DIR}/bin:$PATH; export LD_LIBRARY_PATH=${OMPI_DIR}/lib
+
+Sbatch QE: --partition=cpu --nodes=1 --ntasks=240 --cpus-per-task=1 --mem=100G (ajustar ntasks según npool)
+mpirun QE: mpirun -np ${SLURM_NTASKS} --bind-to core --map-by core pw.x -npool N -in input.in
+  Serial (benchmark t1): mpirun -np 1 pw.x -in input.in (sin npool)
+  NUNCA --map-by ppr:32:node (es para LAMMPS).
+
+REGLA npool (CRÍTICA — npool incorrecto = crash):
+  DOS condiciones: (1) k_irr % npool == 0; (2) (ntasks/npool) % FFT_z == 0
+  Superceldas (nat>50, pocas k-pts): npool=k_irr, tasks/pool = FFT_z / target_slabs (6-12 slabs/task). 240 MPI → 120x speedup vs 1 core.
+  Ejemplo: 35 k-pts, FFT 90×90×90, ntasks=35 → npool=7 (90/5=18 ✓); npool=5 crash (90/7 no entero).
+  Preferir ≥2 tasks/pool. Sin conocer k-pts: npool=1 (seguro). Sistemas pequeños (nat<10): 8-32 MPI óptimo; más MPI = overhead.
+
+REGLA nimage (ph.x, cálculos de FONONES — distinta de npool de pw.x, MISMO PRINCIPIO):
+  ph.x -nimage N divide el cálculo en N grupos de imágenes/representaciones que corren EN
+  PARALELO, cada grupo con ntasks/N tareas MPI. Igual que npool: subir nimage SIN escalar
+  --ntasks en la misma proporción reduce las tareas por imagen y puede EMPEORAR el tiempo
+  total en vez de mejorarlo — no es automático que más nimage = más rápido.
+  VALIDADO CON BENCHMARK REAL (27/8, caso Fe2CrGa fonones, mismo --ntasks=32 en ambos):
+  nimage 4 → 27.1 min. nimage 8 → 39.2 min (44% MÁS LENTO, no más rápido).
+  Al sugerir subir nimage, SIEMPRE subir --ntasks en la misma proporción (ej. nimage 4→8
+  manteniendo 8 tasks/imagen = ntasks 32→64). Si el usuario no puede pedir más recursos (cupo,
+  cola, etc.), NO sugerir subir nimage con --ntasks fijo — puede ser contraproducente. Mismo
+  criterio aplica a cualquier flag de paralelización por grupos (nimage, npool, replicas): el
+  total de tasks tiene que crecer con el número de grupos, no quedar fijo.
+
+QE nodo completo: --ntasks-per-node=32 --cpus-per-task=8 (256 cores); --mem=0 o --mem=100G mínimo.
+QE Checkpoint: CHECKPOINT=${OUTDIR}/${PREFIX}.save/charge-density.dat; if [[ -f $CHECKPOINT ]]; then RESTART_MODE="restart"; else RESTART_MODE="from_scratch"; fi
+QE Pseudopotenciales: /mnt/cpu-data/usuario1/qe-7.5/pseudo/ (Si.pz-vbc.UPF, etc.)
+QE scavenger: PreemptMode=GANG+SUSPEND → SIGSTOP (proceso congelado, tiempo Slurm se congela). Checkpoint NO necesario para preemption, solo para fallo de nodo.
+
+--- CUDA/GPU CUSTOM ---
+
+SPACK=/apps/local/spack/spack-2026b/spack/bin/spack
+CUDA_DIR=$($SPACK location -i /okkjtu2 2>/dev/null)
+export PATH=$CUDA_DIR/bin:$PATH; export LD_LIBRARY_PATH=$CUDA_DIR/lib64:$LD_LIBRARY_PATH
+nvcc --expt-extended-lambda -lcufft -std=c++17 -arch=sm_80
+CUDA con nvcc: hash /okkjtu2 (12.6.2, canónica A100, spack-2026b — actualizado 22/8, el hash viejo /yziqg5b del store legacy ya no existe). Usar el hash explícito en compilación.
+CRÍTICO -arch=sm_80 (o -gencode arch=compute_80,code=sm_80) en TODO nvcc: sin el flag, COMPILA SIN ERROR pero el kernel FALLA AL LANZARSE en la A100 ("the provided PTX was compiled with an unsupported toolchain").
+CRÍTICO jobs paralelos compilando: compilar en dir aislado por job (TMP=/tmp/build_${SLURM_JOB_ID}; cp fuentes $TMP; cd $TMP; make)
+gres correcto A100: --gres=gpu:1 (shorthand) o --gres=gpu:nvidia-a100-80gb-pcie:N
+CRÍTICO rutas NFS en sbatch GPU: nodos GPU NO montan /mnt/cpu-data/. Sí tienen /mnt/gpu-data/ y /data/home/ (visible desde todos los nodos). WORKDIR=/mnt/gpu-data/$USER/nombre_$SLURM_JOB_ID en el script body (NUNCA #SBATCH --chdir). --output/--error a /data/home/%u/ funciona correctamente en GPU.
+
+NVHPC 26.5 (actualizado 22/8, hash /qpe3nuq — la 24.9 vieja ya no existe): NVHPC_DIR=$($SPACK location -i /qpe3nuq 2>/dev/null); nvc/nvc++/nvfortran; OpenACC: nvc -acc -gpu=cc80; CUDA: nvcc -arch=sm_80
+
+--- JULIA ---
+
+CPU (partition=cpu) Y GPU (partition=gpu): mismo binario oficial para ambas — JULIA_BIN=/apps/local/spack/opt/julia/bin/julia.
+GPU (partition=gpu) CON CUDA: incluye su propia LLVM parcheada — LLVM_JL NO existe/NO hace falta.
+  CUDA_DIR=$($SPACK location -i /okkjtu2 2>/dev/null); export PATH=$CUDA_DIR/bin:$PATH; export LD_LIBRARY_PATH=$CUDA_DIR/lib64:$LD_LIBRARY_PATH
+  CRÍTICO — requisito de una sola vez por usuario: si $HOME/.julia/environments/v1.11/LocalPreferences.toml NO tiene "[CUDA_Runtime_jll]\nlocal = true", CUDA.jl intenta bajar el runtime de internet y el nodo GPU NO tiene salida a internet → el job se CUELGA EN SILENCIO (sin error, sin output) hasta agotar el time limit. Incluir siempre en el sbatch, antes de correr Julia:
+    mkdir -p $HOME/.julia/environments/v1.11
+    grep -q "CUDA_Runtime_jll" $HOME/.julia/environments/v1.11/LocalPreferences.toml 2>/dev/null || printf '[CUDA_Runtime_jll]\nlocal = true\n' >> $HOME/.julia/environments/v1.11/LocalPreferences.toml
+  Julia SIN CUDA en nodo GPU (CPU-only dentro de un job GPU) si hace falta: mismo patrón pero sin CUDA_DIR ni el bloque LocalPreferences.
+  ${JULIA_BIN} --threads=12 script.jl
+  @cuda: SIEMPRE función separada, NO begin...end inline. Alternativa simple: c = a .+ b; CUDA.synchronize()
+  Multi-GPU: MPI.jl + CUDA.device!(rank % 4)
+
+--- OTROS CÓDIGOS ---
+
+CRÍTICO MPI CPU: SIEMPRE usar mpirun -np $SLURM_NTASKS, NUNCA srun (se cuelga), NUNCA srun --mpi=pmix (también se cuelga). OpenMPI requiere mpirun o mpiexec para lanzar procesos MPI.
+  Sin spack load: no está en PATH → usar OMPI_DIR hardcodeado y ${OMPI_DIR}/bin/mpirun.
+  eval $(spack load --sh openmpi@5.0.5 2>/dev/null) || true  # alternativa con spack
+  Error de red IB a escala grande (ConnectX-6+UCX, 21/8): si un job MPI con MUCHOS ranks simultáneos (cientos/miles, ej. full-cluster) falla con "transport retry counter exceeded" / conexión reseteada / socket closed, es un bug conocido de hardware+UCX a esa escala, no de la app. Fix puntual en el mpirun: --mca pml ob1 --mca btl ^uct --mca btl_tcp_if_include ib0 --mca oob_tcp_if_include ib0 (fuerza TCP sobre ib0 en vez de UCX/RDMA nativo). NO es default del cluster (mataría RDMA para jobs normales) — agregarlo SOLO si aparece ese error puntual.
+MPI+OMP híbrido: --ntasks=N --cpus-per-task=M + export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+
+Fortran: gfortran /usr/bin. OpenMP: gfortran -O2 -fopenmp + --ntasks=1 --cpus-per-task=N. integer default 32 bits → overflow silencioso → usar integer(8).
+R 4.5.2: spack load r (wrapper); Rscript script.R. Gráficos: ggsave() o png()/dev.off(). NUNCA install.packages() en sbatch.
+Octave 9.1.0: spack load octave (wrapper); octave --no-gui script.m. Partición cpu.
+  ⚠ Paraview y VTK: NO ESTÁN INSTALADOS. Sacados de spack-2026b por decisión explícita del usuario (13/8/2026), no están disponibles en NINGÚN store del cluster. Si piden esto, avisar que no está instalado y no hay fecha de reinstalación — NUNCA generar sbatch ni inventar un hash de spack para paraview/VTK.
+Julia: script .jl con heredoc en $WORKDIR. NO $JULIA_BIN -e '...' (comillas anidadas).
+Geant4 11.3.2 (simulación de física de partículas, spack-2026b): spack load geant4 — resuelve solo, sin hash. Los 14 datasets de física (G4LEDATA, G4NEUTRONHPDATA, etc.) quedan seteados automáticamente, apuntando a directorios reales — NO hace falta bajarlos a mano ni compilar Geant4 desde cero. Si piden version más nueva (ej. 11.4.2): avisar que la instalada es 11.3.2 antes de sugerir compilar a mano.
+  ⚠ RUTA REAL de los ejemplos (ej. B1) — NO INVENTAR "/mnt/cpu-data/shared/geant4_examples/" ni ningún path separado, ese directorio NO EXISTE: los ejemplos vienen empaquetados DENTRO de la propia instalación. Después de "spack load geant4", el path real es $(geant4-config --prefix)/share/Geant4/examples/basic/B1 (y basic/B2, B3, B4, B5 para otros ejemplos oficiales). Compilar con: mkdir build && cd build && cmake -DGeant4_DIR=$(geant4-config --prefix)/lib/Geant4-11.3.2 $(geant4-config --prefix)/share/Geant4/examples/basic/B1 && make -j4 && ./exampleB1 run1.mac (run1.mac ya viene en el directorio del ejemplo, no hace falta crearlo).
+
+ROOT 6.36.04 (CERN ROOT, análisis de datos de física de partículas):
+  ROOT_DIR=$($SPACK location -i /qiwxnch 2>/dev/null)  # hash actualizado 22/8, el viejo /3xri6vd ya no existe
+  source ${ROOT_DIR}/bin/thisroot.sh  # OBLIGATORIO — configura ROOTSYS, PATH, LD_LIBRARY_PATH
+  root -b -q script.C                 # -b headless (sin X11); -q sale al terminar
+  root -b -q 'script.C("arg1")'       # con argumentos
+  Macros: .x script.C (interactivo); compilado: root -b -q 'script.C+()' (más rápido).
+  Batch: crear sbatch con source thisroot.sh + root -b -q script.C. Partición cpu.
+
+Abinit 10.4.7: ABINIT_DIR=$($SPACK location -i /gvs6ncj 2>/dev/null); OMPI_DIR=$($SPACK location -i /2cgnkug 2>/dev/null); mpirun --map-by ppr:32:node:PE=8. Sin pseudopotenciales en spack → descargar .psp8 de pseudo-dojo.org.
+  Hash y openmpi actualizados 22/8 (los viejos /cr35ykl y /5qsncbu ya no existen).
+Elk 10.2.4: ⚠ %gcc@14.2.0, sin AOCC (regresión reportada a softadm 22/8, rebuild AOCC en curso — benchmark +36% validado 17-20/8 fue con AOCC). "spack load elk" bare YA RESUELVE SOLO ahora (22/8, único hash /zvwixry) — si empieza a fallar con "matches multiple" es porque volvió AOCC, usar hash explícito y avisar que hay que revisar esta nota. mpirun --map-by ppr:32:node:PE=8. Input: elk.in. No necesita pseudopotenciales.
+Siesta 5.0.1: ⚠ NO INSTALADO — desapareció del store en el evento de reconcretize del 22/8, sin confirmar si fue intencional (reportado a softadm). Avisar al usuario que no está disponible ahora mismo, no inventar el comando.
+Wannier90 3.1.0: ⚠ %gcc@14.2.0, sin AOCC (regresión reportada a softadm 22/8, rebuild AOCC en curso). "spack load wannier90" bare YA RESUELVE SOLO ahora (22/8, único hash /lxfna7w) — mismo aviso que elk si vuelve a dar ambigüedad. wannier90.x seedname (serial). Post-proceso QE/Abinit.
+
+Potfit (ajuste de potenciales interatómicos por force-matching, github.com/potfit/potfit — contribución propia de este proyecto, PR #121 mergeado): 2 variantes instaladas, NO intercambiables.
+  ⚠ CRÍTICO carga: NUNCA "spack env activate rebuild-full" con potfit — el hash NO resuelve
+    adentro del environment (gotcha real, mismo patrón que lammps standalone). Cargar así:
+    export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config
+    source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
+    eval $(spack load --sh potfit)   # "spack load potfit" bare YA RESUELVE (23/8, wrapper) → apot+mpi /xrahw33
+    eval $(spack load --sh /xvyetef) # para model=kim, SIEMPRE hash explícito (bare da apot, no kim)
+  model=apot +mpi (hash /xrahw33): binario potfit_apot_pair_lapack_mpi, openmpi /2cgnkug.
+    mpirun -np $SLURM_NTASKS potfit_apot_pair_lapack_mpi archivo_parametros
+    Analítico (parámetros de una forma funcional fija), paraleliza bien con MPI.
+    CRÍTICO: NUNCA --ntasks=1 (potfit rechaza "not supported" con 1 solo proceso MPI) NI
+      --ntasks > cantidad de configuraciones en el archivo config (rechaza con error claro
+      "more MPI processes than configurations"). Validado real 23/8: --ntasks=8 con 1 config
+      falla, --ntasks=2 con 2 configs corre bien (optimización Powell real, EXIT_CODE 0).
+  model=kim ~mpi (hash /xvyetef): binario potfit_kim_lapack. SIN mpirun (serial):
+    potfit_kim_lapack archivo_parametros
+    Usa modelos de OpenKIM (openkim.org). Validado real 22-23/8, job real EXIT_CODE 0 (128 átomos Ar, KIM ex_model_Ar_P_LJ).
+  "archivo_parametros" (nombre libre, ej. param_file) es un archivo de texto que a su vez
+    referencia los otros 3: "config <ref_config>" (estructuras+fuerzas de entrenamiento),
+    "startpot <potencial_inicial.pot>", "endpot <potencial_optimizado.pot>". NINGUNO viene con
+    el paquete — el usuario trae su propio caso (potfit no empaqueta ejemplos como Geant4/LAMMPS).
+    Caso real de referencia (validado, sirve de plantilla): /mnt/cpu-data/gonzalo/potfit_test/. Partición cpu.
+
+CASA 6.7.5.18 (radioastronomía, ALMA/VLA): CASA_DIR=$($SPACK location -i /rti3yj5 2>/dev/null) — hash actualizado 22/8, el viejo /wmj34nf ya no existe. NO hay setup.bashrc que sourcear, el binario ya es standalone.
+  ${CASA_DIR}/bin/casa --nogui --agg --nologger --log2term -c script.py --cachedir $WORKDIR --logfile $WORKDIR/casa.log
+  script.py: Python normal (tclean, flagdata, importfits...), NO notebook. NUNCA sin --nogui/--agg.
+  casaviewer/plotms/imview son apps GUI separadas (AppImage), NO funciones de casatasks — NUNCA en sbatch, necesitan X11 (srun --x11 o ssh -Y). Para imágenes headless: exportfits (sí es casatasks) + matplotlib. mpicasa -n N casa ... para paralelo. Partición cpu.
+PLUMED: NO INSTALADO desde la limpieza del 1/8 (0 dependents reales, se borró). Ningún build de lammps actual tiene +plumed (ambos ~plumed). Si un usuario lo pide: avisar que no está disponible ahora, no inventar el comando — consultar si hace falta reinstalarlo.
+
+--- GENÓMICA (pipeline de ensamblado, instalado 28/8, validado con corrida real E. coli) ---
+
+Orden típico del pipeline: trimmomatic (limpiar reads) → spades (ensamblar) → quast (evaluar) → busco (completitud).
+trimmomatic@0.39: spack load --sh trimmomatic (bare, resuelve solo). Uso PE:
+  trimmomatic PE -threads N R1.fq.gz R2.fq.gz out_1P.fq.gz out_1U.fq.gz out_2P.fq.gz out_2U.fq.gz LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
+spades@4.0.0: spack load --sh spades (bare, resuelve solo). Ensamblado de novo:
+  spades.py --pe1-1 R1.fq.gz --pe1-2 R2.fq.gz -o salida -t N -m MEM_GB --isolate
+  Dataset de prueba real incluido: $(spack location -i spades)/share/spades/test_dataset/ (E. coli, pares + referencia).
+py-quast@5.2.0: spack load --sh py-quast (bare, resuelve solo). Evaluar ensamblado:
+  quast.py contigs.fasta -o salida -t N                        # sin referencia
+  quast.py contigs.fasta -r referencia.fa -g genes.txt -o salida -t N   # con referencia
+  Bug real 28/8 (PermissionError compilando minimap2 propio dentro del árbol de spack) YA
+  ARREGLADO por softadm el mismo día (hook post-install que precompila minimap2 durante el
+  spack install) — -r validado real de nuevo, ambos modos funcionan.
+busco@6.1.0: spack load --sh busco (bare, resuelve solo). Completitud del ensamblado:
+  busco -i contigs.fasta -o salida -m genome -l <linaje_odb12> -c N -f
+  Descarga el linaje de internet la PRIMERA vez que se usa (busco --list-datasets para ver
+  opciones) — confirmado que la partición cpu SÍ tiene salida a internet, funciona sin
+  problema. "0% complete" con un ensamblado de prueba muy chico (ej. el test_dataset de spades)
+  es esperado, no es un bug — el genoma de test no tiene genes completos suficientes.
+
+--- PYTHON / PDF / ANÁLISIS ---
+
+Python en sbatch: source /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env (o el mismo archivo en /mnt/gpu-data/shared/ifimar-ai/envs/ para jobs GPU — son copias independientes, NO comparten mount, mantenerlas idénticas) → $PYTHON (python-venv de spack-2026b, matplotlib 3.10.7 + numpy 2.3.5 + scipy 1.16.3, regenerado y validado real 21/8). NUNCA /usr/bin/python3. NUNCA eval $(spack load --sh python...) — falla en nodos con múltiples jobs (DB lock).
+PyTorch: NO INSTALADO desde el borrado masivo de python viejo del 1/8 — migración a python 3.14 pausada explícitamente sin supervisión humana. Si un usuario lo pide: avisar que no está disponible ahora, no inventar el comando.
+
+PDF con LaTeX: TEXLIVE ROTO desde el 1/8 (build fallido, sin hash válido todavía — softadm lo anotó de baja prioridad). NO usar spack load texlive ni ningún hash viejo. Alternativa mientras tanto: generar el PDF con matplotlib (fig.savefig('doc.pdf')) o pedirle a softadm que lo reconstruya si el usuario específicamente necesita LaTeX.
+Heredoc bash: comillas (<<'EOF') evitan expansión de $/\ (el bot auto-quotea si falta). Marcadores distintos por bloque: <<'LMPEOF' LAMMPS, <<'PYEOF' Python, <<'TEXEOF' LaTeX.
+  LaTeX en heredoc <<'TEXEOF': backslash SIMPLE — escribir \documentclass, \begin{document}, \section (NO \\documentclass ni \\begin). Con comillas el shell no toca los backslashes.
+log.lammps: NUNCA np.loadtxt() directo — el log tiene texto. Parsear así: `in_run=False; for line in f: if "Step" in line and "Temp" in line: in_run=True; continue; if in_run and "Loop" in line: break; if in_run: data.append(line.split())` — NO buscar cadena exacta (el log tiene espacios múltiples entre columnas).
+matplotlib mathtext: NO \displaystyle (ParseFatalException). Funciona: \frac{}{}, \left[\right], \varepsilon, \sigma, \pm.
+  Si necesitas variables bash dentro del heredoc: escribir el .py o .tex con Python usando f-strings o sed.
+
+CUDA kernels numéricos: verificar estabilidad. Ecuaciones de onda (SWE, acústica): Leapfrog (NO Forward Euler — inestable para todo k). CFL: c*dt/dx < 1/sqrt(dims). Forward Euler → NaN o ruido exponencial en 100-1000 pasos.
+
+--- SLURM UTILIDADES ---
+
+scancel <jobid>: SIEMPRE para terminar jobs (nunca kill directo). jobid viene de squeue o sbatch output.
+Job arrays: #SBATCH --array=1-N; dentro: $SLURM_ARRAY_TASK_ID; log: --output=/data/home/%u/job_%a_%j.out; limitar: --array=1-100%10 (ver regla crítica arriba de todo el archivo).
+CUDA/C/Fortran: MULTI-ARCHIVO (codigo.cu + compile.sbatch + run.sbatch + submit.sh), no sbatch gigante. Nombrar cada bloque en el texto previo ("compile.sbatch:") — se guardan con /saveall. Cambio puntual → modificar SOLO ese archivo, NO regenerar el resto.
+  compile y run COMPARTEN dir fijo: DIR=/mnt/gpu-data/$USER/proyecto (sin $SLURM_JOB_ID — deben coincidir; gpu NO ve cpu-data). Ambos --partition=gpu.
+  Dependencia SOLO en submit.sh: JID=$(sbatch --parsable compile.sbatch); sbatch --dependency=afterok:$JID run.sbatch. NUNCA #SBATCH --dependency en el .sbatch.
+Email: #SBATCH --mail-type=END,FAIL; --mail-user=email. SMTP: mail.ifimar-conicet.gob.ar:25 sin auth.
+Interactivo CPU: srun --partition=cpu --ntasks=1 --cpus-per-task=1 --mem=8G --time=00:30:00 --pty bash
+Interactivo GPU: srun --partition=gpu --gres=gpu:nvidia-a100-80gb-pcie:1 --mem=8G --time=00:30:00 --pty bash
+
+FAIRSHARE: usar todos los cores que escalen bien. Ej: 32×15046s=481k vs 128×3434s=440k core-s. El scheduler maneja equidad automáticamente.

@@ -1,0 +1,54 @@
+=== NOTIFICACIONES POR MAIL DE SLURM (--mail-user) ===
+
+Problema típico en un cluster recién armado: /usr/sbin/sendmail apunta a
+/bin/false (deshabilitado por defecto), así que --mail-type/--mail-user en
+un sbatch no manda nada aunque esté bien escrito.
+
+Solución: instalar ssmtp (relay SMTP liviano, sin correr un mail server
+propio) y apuntar sendmail ahí.
+
+=== OPCIÓN A: relay por Gmail (más simple, no depende de infra propia) ===
+
+1. Creá un "App Password" en tu cuenta de Gmail:
+   https://myaccount.google.com → Security → 2-Step Verification → App passwords
+   Elegí app "Mail" → te da un código de 16 caracteres.
+
+2. Como root, creá /etc/ssmtp/ssmtp.conf:
+
+   sudo bash -c 'cat > /etc/ssmtp/ssmtp.conf << CONF
+   root=tu_usuario@gmail.com
+   mailhub=smtp.gmail.com:587
+   hostname=nombre-del-nodo-login.tu-dominio.edu
+   AuthUser=tu_usuario@gmail.com
+   AuthPass=EL_APP_PASSWORD_DE_16_CHARS
+   UseSTARTTLS=YES
+   FromLineOverride=YES
+   CONF'
+   sudo chmod 640 /etc/ssmtp/ssmtp.conf
+   sudo chown root:mail /etc/ssmtp/ssmtp.conf
+
+3. Arreglar el symlink de sendmail:
+   sudo ln -sf /usr/sbin/ssmtp /usr/sbin/sendmail
+
+4. Test:
+   echo "Test mail HPC" | ssmtp tu_mail_de_prueba@dominio.com
+
+=== OPCIÓN B: relay SMTP institucional propio ===
+
+Mismo archivo, pero con las credenciales/host de tu propio servidor de
+correo (mailhub=mail.tu-institucion.edu:587, AuthUser/AuthPass de un
+mailbox dedicado tipo hpc@tu-institucion.edu).
+
+=== UNA VEZ CONFIGURADO: agregar mail a los sbatch ===
+
+   #SBATCH --mail-type=END,FAIL
+   #SBATCH --mail-user=tu_mail@dominio.com
+
+Slurm llama a sendmail (ahora apuntado a ssmtp) cuando el job termina o
+falla — por eso gonzabot agrega estas dos líneas por defecto a cualquier
+sbatch que genera (ver context/hpc.txt).
+
+=== VERIFICAR ===
+
+   cat /etc/ssmtp/ssmtp.conf   (solo root, tiene la contraseña en texto plano)
+   echo "Test" | ssmtp -v tu_mail_de_prueba@dominio.com 2>&1 | head -20
