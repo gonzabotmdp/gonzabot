@@ -5,6 +5,15 @@ usamos para levantar gonzabot en nuestro cluster, para que otro admin de
 HPC pueda replicar el criterio (no necesariamente cada comando literal,
 que va a depender de su propia infraestructura).
 
+Nota sobre rutas: vas a ver `/data/gpu/...` en algunos scripts y
+`/mnt/gpu-data/...` en otros para el mismo directorio — no es un error de
+tipeo. Es el mismo NFS montado con nombres distintos según el nodo: los
+nodos de login usan `/data/cpu/` y `/data/gpu/`, los nodos de cómputo usan
+`/mnt/cpu-data/` y `/mnt/gpu-data/`. `gonzabot-watcher.sh` corre en un nodo
+de login (por eso `/data/gpu/...`); `vllm-service.sbatch` corre dentro de
+un job en un nodo de cómputo (por eso `/mnt/gpu-data/...`). Adaptalo al
+esquema de mounts real de tu propio cluster.
+
 ## 1. Servir el modelo con vLLM
 
 `download-model.sh` — bajamos el modelo desde HuggingFace con

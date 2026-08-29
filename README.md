@@ -64,9 +64,11 @@ pero con `--ntasks=1` Slurm solo le da un proceso MPI para repartir entre las
   `cd $WORKDIR` inyectado sobre rutas relativas que ya funcionaban, `\$`
   espurios fuera de heredoc, `module load` con nombre de paquete ambiguo en
   Spack, etc.), con batería de tests (`gonzabot --selftest`).
-- `gonzabot-watcher.sh` — cron liviano que enciende el servicio vLLM
-  bajo demanda (por flag file) y lo apaga tras N minutos de inactividad,
-  para no ocupar GPUs de cómputo cuando nadie lo está usando.
+- `gonzabot-watcher.sh` — cron liviano que enciende el servicio vLLM bajo
+  demanda (por flag file) si no está corriendo. El apagado por inactividad
+  lo hace el propio job de vLLM (ver `tutorial/vllm-service.sbatch`), no
+  el watcher — así entre los dos no ocupan GPUs de cómputo cuando nadie
+  lo está usando.
 
 ## Uso
 
