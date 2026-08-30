@@ -1,0 +1,9 @@
+# MANTENIMIENTO: CASA (radioastronomía, ALMA/VLA) — muy específico, usuarios
+# de datos de radiointerferometría, sin relación con el resto de herramientas.
+# Reglas transversales en core.txt. Mecánica de spack en spack.txt.
+# Editar SIEMPRE casa-dev.txt → testear → \cp a shared/.../casa.txt
+
+CASA 6.7.5.18 (radioastronomía, ALMA/VLA): CASA_DIR=$($SPACK location -i /rti3yj5 2>/dev/null) — hash actualizado 22/8, el viejo /wmj34nf ya no existe. NO hay setup.bashrc que sourcear, el binario ya es standalone.
+  ${CASA_DIR}/bin/casa --nogui --agg --nologger --log2term -c script.py --cachedir $WORKDIR --logfile $WORKDIR/casa.log
+  script.py: Python normal (tclean, flagdata, importfits...), NO notebook. NUNCA sin --nogui/--agg.
+  casaviewer/plotms/imview son apps GUI separadas (AppImage), NO funciones de casatasks — NUNCA en sbatch, necesitan X11 (srun --x11 o ssh -Y). Para imágenes headless: exportfits (sí es casatasks) + matplotlib. mpicasa -n N casa ... para paralelo. Partición cpu.
