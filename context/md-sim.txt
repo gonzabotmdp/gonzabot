@@ -1,0 +1,62 @@
+# MANTENIMIENTO: dinámica molecular clásica (LAMMPS, GROMACS, AMBER) — comparten
+# patrón mpirun/OMP y vecindad conceptual. Reglas transversales (mem, array,
+# MPI) viven en core.txt, no acá. Mecánica de spack en spack.txt.
+# Editar SIEMPRE md-sim-dev.txt → testear → \cp a shared/.../md-sim.txt
+
+--- LAMMPS CPU ---
+
+lammps@20250722.4 (/3xvrevx, AOCC, ~cuda) — recomendado, MPI puro. NUNCA "spack load lammps" a
+  secas — salió del wrapper de desambiguación a propósito (decisión softadm 22/8: CPU/GPU es
+  bifurcación real, no debe resolverse en silencio), usar el hash explícito:
+  SPACK=/apps/local/spack/spack-2026b/spack/bin/spack
+  LAMMPS_DIR=$($SPACK location -i /3xvrevx 2>/dev/null)
+  OMPI_DIR=$($SPACK location -i /2cgnkug 2>/dev/null)
+  export PATH=${LAMMPS_DIR}/bin:${OMPI_DIR}/bin:$PATH
+  POT=${LAMMPS_DIR}/share/lammps/potentials   # 256 potenciales ya incluidos, ej: pair_coeff * * ${POT}/Al_jnp.eam
+  #SBATCH --ntasks=256 --cpus-per-task=1
+  ${OMPI_DIR}/bin/mpirun -np 256 --map-by core --bind-to core --mca btl ^openib,uct lmp -in $INPUT
+  NUNCA -sf omp, NUNCA ppr:1:l3cache, NUNCA cpus-per-task>1 — hybrid MPI+OMP más lento en Zen4.
+  ntasks SEGÚN TAMAÑO: <10k átomos → --ntasks=8-32 (o 1-2 serial p/ cadenas sueltas); 256 SOLO >100k átomos.
+
+LAMMPS input: NUNCA create_atoms random → átomos solapados → "Lost atoms". SIEMPRE lattice fcc.
+NUNCA thermo después de run — va ANTES.
+NUNCA inventar ruta de potencial (pair_coeff) tipo "/mnt/cpu-data/shared/lammps_potentials/" —
+  NO EXISTE. Los potenciales YA VIENEN con LAMMPS: $LAMMPS_DIR/share/lammps/potentials/
+  (256 archivos, ej: Al_jnp.eam, AlCu.eam.alloy). Si no está ahí, avisar y sugerir NIST/openkim.org.
+units lj: parámetros adimensionales. Si el usuario pide K o Å → usar units real/metal.
+units lj: pe/ke del log ya son POR ÁTOMO (norm yes default) — NUNCA dividir por N en el análisis.
+Difusión D por MSD: promediar ≥10 semillas (-var seed N, ${seed} en input quoteado) — 1 trayectoria da error ~100%. msd NO es keyword de thermo_style: compute msd_all all msd (SIN com yes) + c_msd_all[4].
+Bug CUDA error 34: export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1
+log.lammps: NUNCA np.loadtxt() directo — el log tiene texto. Parsear así: `in_run=False; for line in f: if "Step" in line and "Temp" in line: in_run=True; continue; if in_run and "Loop" in line: break; if in_run: data.append(line.split())` — NO buscar cadena exacta (el log tiene espacios múltiples entre columnas).
+
+--- LAMMPS GPU ---
+
+lammps@20250722.4 (/ung45dg, GCC14+cuda) ⚠ build GPU actual quedó en GCC14, no AOCC+cuda como
+  antes (regresión reportada a softadm 22/8, sin fecha de fix confirmada):
+  LAMMPS_DIR=$($SPACK location -i /ung45dg 2>/dev/null)
+  CUDA_DIR=$($SPACK location -i /okkjtu2 2>/dev/null)
+  export PATH=${LAMMPS_DIR}/bin:${CUDA_DIR}/bin:$PATH
+  export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1
+  mpirun -np $NGPU --map-by node:PE=12 --mca btl ^openib,uct lmp -sf gpu -pk gpu $NGPU -in $INPUT
+  Checkpoint: restart 1000 sim.restart → al reanudar: read_restart (sin create_atoms/create_box)
+  Scavenger GPU: usar --partition=gpu --qos=scavenger, trap SIGTERM para guardar checkpoint
+
+--- GROMACS 2024.3 ---
+
+⚠ Build actual SOLO %gcc@14.2.0, sin AOCC (regresión reportada a softadm 22/8 — el benchmark
+  +43% CPU validado 17-20/8 fue con AOCC, rendimiento actual puede ser menor).
+  Hashes: /humbjkf (CPU, ~cuda), /vg5odaz (+cuda). openmpi único ahora: /2cgnkug.
+  GROMACS_DIR=$($SPACK location -i /humbjkf 2>/dev/null)
+  OMPI_DIR=$($SPACK location -i /2cgnkug 2>/dev/null)
+  export PATH=${GROMACS_DIR}/bin:${OMPI_DIR}/bin:$PATH
+  export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+  mpirun -np $SLURM_NTASKS gmx_mpi mdrun -ntomp $SLURM_CPUS_PER_TASK -s topol.tpr -deffnm output
+  Óptimo CPU: --ntasks-per-node=32 --cpus-per-task=8.
+  CRÍTICO: NUNCA -ntmpi (es para builds sin MPI). Este build usa MPI real → mpirun -np controla los ranks.
+
+--- AMBER 25 ---
+
+⚠ ROTO desde el 22/8 (detectado en vivo) — pmemd.MPI no encuentra sus libs de MPI (el openmpi al
+  que estaba linkeado, gcc-13.3.0/openmpi-5.0.8, ya no existe en disco, reportado a softadm).
+  NO ofrecer AMBER hasta nueva validación: avisar al usuario que está temporalmente fuera de
+  servicio y que contacte a Gonzalo, no generar el sbatch como si funcionara.
