@@ -8,8 +8,9 @@ exagerados de recursos en scripts `sbatch` **antes** de que el job corra y
 falle o desperdicie horas de cómputo.
 
 Corre sobre un modelo local vía [vLLM](https://github.com/vllm-project/vllm)
-(probado con Qwen2.5-72B-Instruct-AWQ), sin dependencias externas de Python
-más allá de la librería estándar.
+— validado en producción con Qwen2.5-72B-Instruct-AWQ y, en evaluación
+activa, GLM-4.5-Air (ver sección "Comparación de modelos" más abajo) —
+sin dependencias externas de Python más allá de la librería estándar.
 
 Desarrollado y usado en producción en el cluster HPC del IFIMAR (CONICET /
 UNMDP, Argentina).
@@ -55,20 +56,51 @@ Esto es lo que generó, tal cual, el 29/8/2026:
 en vez de repartir 16 procesos entre las 4 imágenes). Script completo real
 en [`tutorial/ph_x_fonones_real.sbatch`](tutorial/ph_x_fonones_real.sbatch).
 
+## Comparación de modelos
+
+Evaluamos si un modelo distinto resolvía mejor el problema clásico de
+"lost in the middle". Comparación sistemática entre Qwen2.5-72B-Instruct-AWQ
+(el que está en producción) y GLM-4.5-Air, misma infraestructura, mismas
+preguntas:
+
+- Calidad/atención a reglas: GLM-4.5-Air ganó en la mayoría de los casos
+  puntuales que probamos -- incluido un caso real donde diagnosticó
+  correctamente un job fallado (`/diagnose`) que Qwen reportó como "sin
+  errores" (falso negativo).
+- Velocidad: Qwen2.5-72B es ~30% más rápido generando, en nuestro
+  hardware (A100 80GB).
+- Limitación conocida actual: el comando `/branch` (genera 3 variantes de
+  fix candidatas, las corre, compara resultados) no funciona de forma
+  confiable con GLM-4.5-Air todavía -- el modelo no siempre respeta el
+  formato de diff estructurado que ese comando exige. Con Qwen2.5-72B sí
+  funciona.
+
+De paso, usar GLM-4.5-Air nos llevó a encontrar y reportar un bug real
+de vLLM -- el contenido del razonamiento (`<think>...</think>`) a veces se
+filtra sin separar hacia la respuesta visible en streaming sin tools, a
+contextos largos. Reporte y repro standalone:
+[vllm-project/vllm#29763 (comment)](https://github.com/vllm-project/vllm/issues/29763#issuecomment-5470158016)
+
+Ninguno de los dos modelos reemplaza al otro todavía -- la decisión de
+cuál usar en producción sigue en evaluación.
+
 ## Arquitectura
 
 - `gonzabot` — CLI interactivo en Python 3 puro (stdlib únicamente:
   `sqlite3` para persistir sesiones, `urllib` para hablar con el endpoint
   OpenAI-compatible de vLLM). Sin `pip install` necesario.
 - `context/` — archivos de texto plano que se inyectan como contexto del
-  cluster (hardware, particiones, software instalado vía Spack, reglas
-  aprendidas de bugs reales). Son el "conocimiento" específico del sitio;
-  para adaptar gonzabot a otro cluster, se reescriben estos archivos.
+  cluster. Divididos por segmento temático (reglas transversales siempre
+  cargadas + un archivo por familia de software -- dinámica molecular, DFT,
+  física de partículas, GPU/CUDA, genómica, Python, etc.), cada uno con su
+  propio trigger de palabras clave -- así una pregunta sobre una
+  herramienta puntual no arrastra contexto irrelevante de las demás.
 - Post-procesamiento determinístico (no depende del LLM) sobre el `sbatch`
   generado: detecta y corrige patrones frecuentes (heredocs mal citados,
   `cd $WORKDIR` inyectado sobre rutas relativas que ya funcionaban, `\$`
   espurios fuera de heredoc, `module load` con nombre de paquete ambiguo en
-  Spack, etc.), con batería de tests (`gonzabot --selftest`).
+  Spack, separadores decorativos de comentario mal interpretados como
+  alucinación de hash, etc.), con batería de tests (`gonzabot --selftest`).
 - `gonzabot-watcher.sh` — cron liviano que enciende el servicio vLLM bajo
   demanda (por flag file) si no está corriendo. El apagado por inactividad
   lo hace el propio job de vLLM (ver `tutorial/vllm-service.sbatch`), no
@@ -85,15 +117,17 @@ en [`tutorial/ph_x_fonones_real.sbatch`](tutorial/ph_x_fonones_real.sbatch).
 
 Dentro de una sesión: `/load <archivo>` para pasarle un script existente,
 `/edit` para pedir una revisión puntual, `/diagnose` para que lea el log de
-un job fallido y explique la causa, `/save` / `/saveall` para persistir el
-`sbatch` sugerido.
+un job fallido y explique la causa, `/audit` para revisar todos los jobs
+activos del usuario, `/save` / `/saveall` para persistir el `sbatch` sugerido.
 
 ## Configuración
 
-`context/core.txt`, `context/hpc.txt` y `context/python.txt` son los que
-se incluyen acá como ejemplo real (sitio IFIMAR). Editables en texto plano,
-sin tocar código, para adaptar a otro cluster: hardware, particiones Slurm,
-paquetes Spack disponibles y reglas aprendidas de casos reales.
+`context/core.txt` (siempre cargado) más los segmentos por familia de
+software (`context/md-sim.txt`, `context/dft-qe.txt`, `context/python.txt`,
+etc.) son los que se incluyen acá como ejemplo real (sitio IFIMAR).
+Editables en texto plano, sin tocar código, para adaptar a otro cluster:
+hardware, particiones Slurm, paquetes Spack disponibles y reglas aprendidas
+de casos reales.
 
 El endpoint del modelo (host/puerto de vLLM) se configura al principio de
 `gonzabot`.
