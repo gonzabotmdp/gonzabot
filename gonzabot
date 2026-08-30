@@ -1185,6 +1185,18 @@ _LAMMPS_BIN = ("/usr/share/spack/root/opt/spack/linux-ubuntu24.04-zen4/"
 _OMPI_DIR   = ("/usr/share/spack/root/opt/spack/linux-ubuntu24.04-zen4/"
                "gcc-13.3.0/openmpi-5.0.8-5qsncbuslquefbwiynsdwp5hlkpkvko2")
 
+def _dedent_code_block(text: str) -> str:
+    """Saca la indentación común de un bloque de código extraído del reply.
+
+    Bug real 29/8: cuando el modelo anida un bloque dentro de un ítem de
+    lista numerada (markdown válido: "2. Crear el script:\\n   ```bash\\n
+    codigo\\n   ```"), la fence y el cuerpo entero quedan indentados (ej. 3
+    espacios). Sin dedent, /save y /saveall escriben el archivo con esa
+    indentación en TODAS las líneas — incluido el shebang y cada #SBATCH,
+    que Slurm ignora silenciosamente si no arrancan en columna 0 (rompe
+    todos los recursos pedidos sin avisar: nodelist, mem, time, etc.)."""
+    return textwrap.dedent(text)
+
 def _fix_sbatch(text: str) -> str:
     """Corrige scripts multi-nodo que usan spack load → rutas hardcodeadas (PATRÓN B)."""
     import re as _re
@@ -1822,6 +1834,19 @@ def _selftest() -> int:
     _t("saveall_names: detectados + fallback + sin duplicados",
        _names == ["wave.cu", "compile.sbatch", "ref3.py", "ref4.py"])
 
+    r = _dedent_code_block(
+        "   #!/bin/bash\n"
+        "   #SBATCH --job-name=lammps-test\n"
+        "   #SBATCH --nodelist=quad-33-n02\n"
+        "\n"
+        "   lmp -in input.lammps")
+    _t("dedent_code_block: saca indentación uniforme de bloque anidado en lista "
+       "(bug real 29/8, #SBATCH no arrancaba en columna 0)",
+       r.startswith("#!/bin/bash\n#SBATCH --job-name=lammps-test\n#SBATCH --nodelist=quad-33-n02"))
+    r = _dedent_code_block("#!/bin/bash\n#SBATCH --job-name=x\necho hola")
+    _t("dedent_code_block: bloque ya sin indentación queda intacto",
+       r == "#!/bin/bash\n#SBATCH --job-name=x\necho hola")
+
     n_fail = sum(1 for _, ok in results if not ok)
     for name, ok in results:
         print(("PASS  " if ok else "FAIL  ") + name)
@@ -2346,12 +2371,12 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
     _new_blocks: list = []
     if _rich_blocks:
         for _rb_lang, _rb_lines, _rb_title in _rich_blocks:
-            _new_blocks.append((_rb_lang, "\n".join(_rb_lines), _rb_title))
+            _new_blocks.append((_rb_lang, _dedent_code_block("\n".join(_rb_lines)), _rb_title))
     else:
         # fallback sin rich: extraer de full_text via regex
         import re as _re_gb
         for _m in _re_gb.finditer(r"```(?:\w+)?\n(.*?)```", text, _re_gb.DOTALL):
-            _new_blocks.append(("", _m.group(1), ""))
+            _new_blocks.append(("", _dedent_code_block(_m.group(1)), ""))
 
     # Postproceso determinístico: fixes sbatch/heredoc + lint LAMMPS
     _pp_warns: list[str] = []
