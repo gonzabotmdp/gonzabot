@@ -1,0 +1,58 @@
+# MANTENIMIENTO: mecánica de activación/desambiguación de spack, relevante para
+# cualquier software compilado (no-Python) del cluster. Se carga junto con
+# cualquier segmento de md-sim/dft-qe/particle-physics/gpu-custom/genomica/casa/
+# otros-lang (ver _RE_SPACK en gonzabot, es la unión de todos esos triggers).
+# El detalle de CÓMO correr cada software específico vive en su propio segmento
+# — acá solo la mecánica genérica de activación y qué paquetes resuelven bare.
+# Editar SIEMPRE spack-dev.txt → testear → \cp a shared/.../spack.txt
+
+RECONOCIMIENTO DE HERRAMIENTAS:
+  pw.x / pw.x -in → QUANTUM ESPRESSO (QE). NO LAMMPS. Aplicar reglas de dft-qe.txt.
+  lmp / lmp -in   → LAMMPS. Aplicar reglas de md-sim.txt.
+  gmx / gmx_mpi   → GROMACS. Aplicar reglas de md-sim.txt.
+
+HARDWARE: 16 nodos CPU (quad-11/12/33/34-n01..n04) — TODOS IDÉNTICOS. NO hace falta pinear
+  --nodelist a un nodo específico por rendimiento — cualquier nodo de la partición cpu da el
+  mismo resultado. Si un --nodelist puntual está lleno/ocupado (ver squeue), sugerir sacar el
+  --nodelist o cambiar a otro nodo cpu cualquiera, no hay pérdida de performance por el cambio.
+
+NUNCA "module load/avail/spider" en ningún sbatch — este cluster NO tiene Lmod, "module" no es un comando válido en los nodos. SIEMPRE spack: $SPACK --no-locks location -i /hash (ver hash por software en el segmento de cada uno).
+
+SPACK en sbatch: los jobs batch NO heredan funciones de shell.
+  SIEMPRE agregar antes de spack load, EN ESTE ORDEN:
+  export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config
+  source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
+  spack env activate /apps/local/spack/spack-2026b/spack/var/spack/environments/rebuild-full
+  eval $(spack load --sh <paquete>)   # ej: lammps, gromacs, cp2k, r, root, quantum-espresso, openfoam, julia — sin hash, resuelve solo
+  ⚠ NUNCA mezclar con rutas del store viejo (/usr/share/spack). NUNCA inventar el path si el paquete no está en la lista de abajo — avisar que no está validado ahí todavía.
+
+STORE NUEVO (spack-2026b): store default para todos los usuarios (el viejo queda legacy/respaldo). VTK y paraview: SACADOS a propósito — NO ofrecerlos, no están en ningún store (nota completa en python.txt). Octave: sin GUI/gnuplot todavía.
+  "spack load lammps/gromacs/fftw/netcdf-c/openblas/py-pandas" (sin hash, nombre pelado) ya
+  resuelven solos vía preferred-hashes.conf — probado exit 0. "spack load gnuplot/hdf5" también.
+  ÚNICA EXCEPCIÓN A PROPÓSITO: "spack load py-numpy" sigue dando "matches multiple
+  packages" — es intencional (2 ecosistemas reales distintos, pandas+performance vs
+  numba/scipy), pedirle al usuario que especifique versión/hash/compilador puntualmente.
+
+SPACK LOAD — DESAMBIGUACIÓN:
+  Si falla un spack load con "Permission denied": problema de permisos puntual, no del wrapper ni del hash — avisar al usuario, no adivinar workaround.
+  PROBADO Y FUNCIONA spack load pkg (sin hash), test funcional real: fftw, r, octave, julia (rama
+    especial), wannier90, elk, cuda (12.6.2, A100),
+    valgrind, py-pandas, py-numpy, gdal, hdf5, netcdf-c, proj, py-sympy, py-matplotlib.
+    py-torch y texlive NO DISPONIBLES desde el 1/8 (ver notas en python.txt) — no incluir en spack load.
+  Resuelven sin ambigüedad pero sin test funcional todavía (binario/lib no probado en caso real):
+    casa, cp2k, cudnn, arrow, py-tensorflow, py-tensorboard, netlib-scalapack. (nccl YA NO ESTÁ instalado, sacado 22/8)
+  NO usar spack load pkg sin hash (motivo real, no capricho):
+    lammps: sacado del wrapper a propósito (22/8) — CPU/GPU es bifurcación real, usar hash de md-sim.txt.
+    openmpi: openmpi único ahora (/2cgnkug) sirve para todo el store actual — igual usar el hash
+      explícito en vez de bare (más claro, y evita sorpresas si vuelve a haber más de un build).
+    gromacs, quantum-espresso: variante CPU/+cuda distinta, no están en la lista de desambiguación
+      del wrapper → usar hash de md-sim.txt / dft-qe.txt según corresponda.
+    python: usar matplotlib.env (spack load --sh tiene DB lock con jobs concurrentes) — ver python.txt.
+  Build +cuda (lammps/gromacs/openmpi) en partición cpu (sin GPU): NO crashea ni falla al arrancar,
+    solo warnings ignorados de openmpi por libcuda.so.1 ausente. No recomendar compilar sin CUDA
+    por miedo a fallo — el motivo real para usar la build CPU-only es tamaño/dependencias.
+  Paquetes NO en conf con múltiples builds sin ganador claro: incluir versión%compilador: spack load py-scipy@1.16.3%gcc@14.2.0
+
+PLUMED: NO INSTALADO desde la limpieza del 1/8 (0 dependents reales, se borró). Ningún build de lammps actual tiene +plumed (ambos ~plumed). Si un usuario lo pide: avisar que no está disponible ahora, no inventar el comando — consultar si hace falta reinstalarlo.
+
+CUDA con nvcc: hash /okkjtu2 (12.6.2, canónica A100, spack-2026b — actualizado 22/8, el hash viejo /yziqg5b del store legacy ya no existe). Ver detalle completo (flags, gotchas) en gpu-custom.txt.
