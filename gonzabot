@@ -80,7 +80,7 @@ except ImportError:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 VLLM_BASE    = os.environ.get("GONZABOT_URL",     "http://gpu-01:8000/v1")
-MODEL        = os.environ.get("GONZABOT_MODEL",   "qwen25-72b")
+MODEL        = os.environ.get("GONZABOT_MODEL",   "glm45-air")
 _SCRIPT_DIR  = Path(__file__).resolve().parent
 CONTEXT_FILE = os.environ.get("GONZABOT_CONTEXT", str(_SCRIPT_DIR / "context" / "core.txt"))
 CONTEXT_DIR  = Path(os.environ.get("GONZABOT_CONTEXT_DIR", str(_SCRIPT_DIR / "context")))
@@ -990,49 +990,78 @@ _BASE_PROMPT = (
 )
 
 # Segmentos cargados en memoria al arrancar (lectura única)
-_CTX_CORE:    str = ""
-_CTX_HPC:     str = ""
-_CTX_PYTHON:  str = ""
+_CTX: dict[str, str] = {}  # nombre de _SEGMENTS -> contenido del archivo
 _CTX_DYNAMIC: str = ""  # squeue/sinfo — capturado una vez al inicio de sesión
 
-_RE_HPC = re.compile(
-    r'lammps|gromacs|espresso|pw\.x|ph\.x|cp2k|openfoam|amber(?!bar)|geant4?|'
-    r'abinit|siesta|vasp|namd|elk\b|plumed|nccl|nvhpc|cuda|julia|'
-    r'fortran|mpirun|mpiexec|tensorflow|wannier90|valgrind|cern|\boctave\b|'
-    r'\bcasa\b|casaviewer|casalith|mpicasa|\btclean\b|\bflagdata\b',
-    re.IGNORECASE
-)
+_RE_MDSIM = re.compile(r'lammps|gromacs|amber(?!bar)', re.IGNORECASE)
+_RE_DFTQE = re.compile(
+    r'espresso|pw\.x|ph\.x|abinit|siesta|elk\b|wannier90', re.IGNORECASE)
+_RE_PARTICLE = re.compile(r'geant4?|cern|potfit', re.IGNORECASE)
+_RE_GPUCUSTOM = re.compile(r'cuda|julia|nvhpc|nccl', re.IGNORECASE)
+_RE_GENOMICA = re.compile(
+    r'trimmomatic|spades|quast|busco|gen[oó]mic|ensambl.*genoma', re.IGNORECASE)
+_RE_CASA = re.compile(
+    r'\bcasa\b|casaviewer|casalith|mpicasa|\btclean\b|\bflagdata\b', re.IGNORECASE)
+_RE_OTROSLANG = re.compile(r'fortran|\boctave\b', re.IGNORECASE)
 _RE_PYTHON = re.compile(
     r'python|numpy|scipy|matplotlib|pandas|sklearn|torch|jax\b|cupy|numba|mpi4py|'
     r'jupyter|geopandas|spglib|statsmodels|dask|xarray|pymatgen|phonopy|'
     r'py-|\.py\b|tidyverse|ggplot|rscript|\br\b|apptainer|singularity|'
     r'gsl\b|pycharm|gnuplot|paraview|ovito|adios|oneapi|intel.*compil|icx\b|ifx\b|'
-    r'grace\b|xmgrace',
+    r'grace\b|xmgrace|tensorflow',
     re.IGNORECASE
 )
+# spack.txt: mecánica de activación/desambiguación de spack, relevante para
+# cualquier pedido de software compilado (no-Python) — unión de los triggers
+# de arriba más extras sin sección propia (cp2k/openfoam/vasp/namd/plumed/
+# valgrind: sin contenido dedicado, pero listados en el inventario de spack).
+# Incluye \bmpi\b y mpicc (fix 29/8 que nunca se había sincronizado a prod).
+_RE_SPACK = re.compile(
+    r'lammps|gromacs|amber(?!bar)|espresso|pw\.x|ph\.x|abinit|siesta|elk\b|'
+    r'wannier90|geant4?|cern|potfit|cuda|julia|nvhpc|nccl|fortran|\boctave\b|'
+    r'\bmpi\b|mpirun|mpiexec|mpicc|cp2k|openfoam|vasp|namd|plumed|valgrind|'
+    r'\bcasa\b|casaviewer|casalith|mpicasa|\btclean\b|\bflagdata\b|'
+    r'trimmomatic|spades|quast|busco|gen[oó]mic|spack',
+    re.IGNORECASE
+)
+
+# Registro de segmentos de contexto: (nombre_archivo, regex_trigger|None).
+# "core" (trigger=None) se carga siempre. El resto solo si su regex matchea
+# el mensaje actual + historial reciente (o los logs, para /diagnose).
+_SEGMENTS: list[tuple[str, "re.Pattern[str] | None"]] = [
+    ("core", None),
+    ("spack", _RE_SPACK),
+    ("md-sim", _RE_MDSIM),
+    ("dft-qe", _RE_DFTQE),
+    ("particle-physics", _RE_PARTICLE),
+    ("gpu-custom", _RE_GPUCUSTOM),
+    ("genomica", _RE_GENOMICA),
+    ("casa", _RE_CASA),
+    ("otros-lang", _RE_OTROSLANG),
+    ("python", _RE_PYTHON),
+]
 
 
 def _init_context() -> None:
     """Carga segmentos de contexto en memoria. Llamar una vez al inicio de sesión."""
-    global _CTX_CORE, _CTX_HPC, _CTX_PYTHON, _CTX_DYNAMIC
-    for attr, name in [("_CTX_CORE", "core"), ("_CTX_HPC", "hpc"), ("_CTX_PYTHON", "python")]:
+    global _CTX_DYNAMIC
+    for name, _rx in _SEGMENTS:
+        _CTX[name] = ""
         # Preferir variante -dev si existe, sino la de producción
         for candidate in [CONTEXT_DIR / f"{name}-dev.txt", CONTEXT_DIR / f"{name}.txt"]:
             try:
                 if candidate.exists():
-                    globals()[attr] = candidate.read_text(encoding="utf-8")
+                    _CTX[name] = candidate.read_text(encoding="utf-8")
                     break
             except (PermissionError, OSError):
                 continue
         else:
             # Fallback monolítico legacy (solo para core)
-            if attr == "_CTX_CORE":
+            if name == "core":
                 try:
-                    globals()[attr] = Path(CONTEXT_FILE).read_text(encoding="utf-8")
+                    _CTX[name] = Path(CONTEXT_FILE).read_text(encoding="utf-8")
                 except (PermissionError, OSError):
-                    globals()[attr] = ""
-            else:
-                globals()[attr] = ""
+                    _CTX[name] = ""
 
     dynamic = _run_dynamic_context()
     if dynamic:
@@ -1049,6 +1078,21 @@ def _init_context() -> None:
             pass
 
 
+def _ctx_for_probe(probe: str, include_python: bool = True) -> str:
+    """Arma el bloque de contexto para un texto dado: core siempre, el resto
+    solo si su regex matchea. Usado tanto por el chat normal (_system_prompt_for)
+    como por /diagnose (que sondea logs en vez de un mensaje de usuario)."""
+    ctx = _CTX.get("core", "")
+    for name, rx in _SEGMENTS:
+        if name == "core":
+            continue
+        if name == "python" and not include_python:
+            continue
+        if rx and rx.search(probe) and _CTX.get(name):
+            ctx += "\n\n" + _CTX[name]
+    return ctx
+
+
 def _system_prompt_for(user_message: str = "", history: str = "") -> str:
     """Construye el system prompt cargando solo los segmentos relevantes.
 
@@ -1056,17 +1100,16 @@ def _system_prompt_for(user_message: str = "", history: str = "") -> str:
     los follow-ups ("eso falló, ¿no hay otra forma?") no repiten las keywords
     pero las reglas del cluster siguen haciendo falta (bug reparado 13 jul 2026)."""
     probe = user_message + "\n" + history
-    ctx = _CTX_CORE
-    if _RE_HPC.search(probe):    ctx += "\n\n" + _CTX_HPC
-    if _RE_PYTHON.search(probe): ctx += "\n\n" + _CTX_PYTHON
-    ctx += _CTX_DYNAMIC
+    ctx = _ctx_for_probe(probe, include_python=True) + _CTX_DYNAMIC
     return _BASE_PROMPT + ctx
 
 
 def load_system_prompt() -> str:
-    """Compatibilidad: devuelve el prompt con todos los segmentos (para usos internos)."""
-    return _BASE_PROMPT + _CTX_CORE + ("\n\n" + _CTX_HPC if _CTX_HPC else "") + \
-           ("\n\n" + _CTX_PYTHON if _CTX_PYTHON else "") + _CTX_DYNAMIC
+    """Compatibilidad: devuelve el prompt con TODOS los segmentos (para /audit,
+    /compact, /queue, /branch check — comandos sin un mensaje de usuario puntual
+    contra el que sondear triggers)."""
+    parts = [_CTX[name] for name, _ in _SEGMENTS if _CTX.get(name)]
+    return _BASE_PROMPT + "\n\n".join(parts) + _CTX_DYNAMIC
 
 
 # ── /load command ─────────────────────────────────────────────────────────────
@@ -1197,6 +1240,37 @@ def _dedent_code_block(text: str) -> str:
     todos los recursos pedidos sin avisar: nodelist, mem, time, etc.)."""
     return textwrap.dedent(text)
 
+_KNOWN_HASH_PREFIXES_CACHE = None
+# Comandos propios de gonzabot que también aparecen como "/palabra" en core.txt —
+# excluirlos explícitamente evita falsos positivos (bug real 30/8: la primera versión
+# de este extractor tomaba CUALQUIER "/palabra" del texto, incluyendo "/branch",
+# "/diagnose", nombres de paquete dentro de listas tipo "lammps/gromacs", etc.)
+_KNOWN_SLASH_COMMANDS = {"diagnose", "branch", "load", "save", "saveall",
+                         "edit", "diff", "help", "audit", "queue",
+                         "compact", "history", "new", "model"}
+
+def _known_hash_prefixes() -> set:
+    """Hashes de spack documentados en context/*.txt (siempre escritos como '/xxxxxxx',
+    token aislado — no pegado a otra palabra ni seguido de una extensión de archivo).
+    Se usa para detectar el bug real 30/8: el modelo reproduce el hash bien (a veces
+    incluso más largo/preciso que el documentado) pero se olvida la '/' inicial —
+    sin ella spack interpreta el argumento como NOMBRE de paquete, no como hash, y falla."""
+    global _KNOWN_HASH_PREFIXES_CACHE
+    if _KNOWN_HASH_PREFIXES_CACHE is None:
+        prefixes = set()
+        for f in CONTEXT_DIR.glob("*.txt"):
+            try:
+                text = f.read_text(errors="ignore")
+            except OSError:
+                continue
+            for m in re.finditer(
+                    r'(?:(?<=^)|(?<=[\s(]))/([0-9a-z]{6,32})(?=[\s),]|$)', text, re.M):
+                tok = m.group(1)
+                if tok not in _KNOWN_SLASH_COMMANDS:
+                    prefixes.add(tok)
+        _KNOWN_HASH_PREFIXES_CACHE = prefixes
+    return _KNOWN_HASH_PREFIXES_CACHE
+
 def _fix_sbatch(text: str) -> str:
     """Corrige scripts multi-nodo que usan spack load → rutas hardcodeadas (PATRÓN B)."""
     import re as _re
@@ -1265,7 +1339,10 @@ def _fix_sbatch(text: str) -> str:
         # comando distinto. No tocar el directorio en ninguno de los dos casos.
         if _re.search(r'^\s*(?:source|\.)\s+(?!["\']?[/$])\S', block, _re.M):
             return block
-        if _re.search(r'-in\s+(?!["\']?[/$])[\w.-]+\.(?:lmp|lammps|in)\b', block):
+        # El nombre puede tener una variable a mitad (ej. "-in script_k${k}.lmp", caso real
+        # gchoque 29/8: un loop genera N archivos .lmp con el valor de un parámetro en el
+        # nombre) — [\w${}.-]+ cubre eso además del nombre literal simple.
+        if _re.search(r'-in\s+(?!["\']?[/$])[\w${}.-]+\.(?:lmp|lammps|in)\b', block):
             return block
         pm = _re.search(r'--partition[= ](gpu|cpu|scavenger)', block)
         if not pm:
@@ -1389,12 +1466,59 @@ def _fix_sbatch(text: str) -> str:
             if not os.path.exists(path):
                 warns.append(f"'{path}' no existe en el filesystem — "
                              f"verificar la ruta antes de sourcearla")
-        used = set(_re.findall(r'\$\{?(\w+(?:_DIR|_BIN))\}?/', block))
-        assigned = set(_re.findall(r'^\s*(\w+(?:_DIR|_BIN))\s*=', block, _re.M))
-        used = {v for v in used if not v.startswith('SLURM_')}  # variables de Slurm: las define Slurm solo, nunca hay que asignarlas
+        # No restringido a sufijo _DIR/_BIN: bug real 30/8 (SPACK/AOCC bare,
+        # sin sufijo, usados en un sbatch de GSL sin nunca asignarlos).
+        _STD_ENV_VARS = {"HOME", "USER", "PATH", "PWD", "OLDPWD", "TMPDIR",
+                          "SHELL", "LANG", "LC_ALL", "TERM", "LOGNAME",
+                          "HOSTNAME", "DISPLAY", "WORKDIR"}
+        used = set(_re.findall(r'\$\{?(\w+)\}?/(?:bin|include|lib64?)\b', block))
+        used |= set(_re.findall(r'\$\{?(\w+)\}?\s+(?:--no-locks\s+)?location\s+-i',
+                                block))
+        assigned = set(_re.findall(r'^\s*(\w+)\s*=', block, _re.M))
+        used = {v for v in used
+                if not v.startswith('SLURM_') and v not in _STD_ENV_VARS}
         for v in sorted(used - assigned):
-            warns.append(f"'{v}' se usa pero nunca se define en el script — "
-                         f"falta {v}=$($SPACK --no-locks location -i /hash)")
+            if v == "SPACK":
+                warns.append("'SPACK' se usa pero nunca se define en el script — "
+                             "falta SPACK=/apps/local/spack/spack-2026b/spack/bin/spack")
+            else:
+                warns.append(f"'{v}' se usa pero nunca se define en el script — "
+                             f"falta {v}=$($SPACK --no-locks location -i /hash)")
+        # Compilador invocado desde el bin/ de un paquete que NO es un toolchain
+        # (bug real 30/8: GSL_DIR/bin/gcc — GSL es librería, no trae compilador).
+        _COMPILER_BINS = {"gcc", "g++", "gfortran", "clang", "clang++", "cc",
+                          "nvfortran", "nvc", "nvc++", "nvcc"}
+        _COMPILER_DIR_PREFIXES = {"AOCC", "NVHPC", "GCC", "GCC13", "GCC14", "CUDA"}
+        for m in _re.finditer(r'\$\{?(\w+_DIR)\}?/bin/([\w+]+)', block):
+            dirvar, binname = m.group(1), m.group(2)
+            if binname not in _COMPILER_BINS:
+                continue
+            prefix = dirvar[:-4]  # quitar sufijo _DIR
+            if binname == "nvcc" and prefix == "CUDA":
+                continue  # CUDA_DIR/bin/nvcc es el patrón correcto
+            if prefix in _COMPILER_DIR_PREFIXES:
+                continue
+            warns.append(f"'{dirvar}/bin/{binname}' — {prefix} no es un paquete que "
+                         f"provea compilador (es una librería) — usar el {binname} "
+                         f"del sistema/spack normal, o AOCC_DIR/NVHPC_DIR si corresponde")
+        # Bug real 30/8: pide GPU (--gres=gpu) pero el spec de spack pedido es ~cuda
+        # (variante SIN CUDA) — la GPU asignada por Slurm queda sin usar.
+        if _re.search(r'--gres=gpu', block) and _re.search(r'[\w@.]+~cuda\b', block):
+            warns.append("pediste GPU (--gres=gpu) pero el spec de spack tiene ~cuda "
+                         "(variante SIN soporte CUDA) — la GPU asignada queda sin uso, "
+                         "usar +cuda o el hash +cuda correspondiente")
+        # Bug real 30/8: 'location -i <hash>' sin la '/' inicial — el hash en sí puede
+        # estar bien (incluso ser un prefijo más largo/preciso que el documentado), pero
+        # sin '/' spack lo interpreta como NOMBRE de paquete y falla ("no existe el paquete").
+        _hash_prefixes = _known_hash_prefixes()
+        for m in _re.finditer(r'\blocation\s+-i\s+(\S+)', block):
+            tok = m.group(1)
+            if tok.startswith('/') or tok.startswith('$'):
+                continue
+            if any(tok.startswith(p) or p.startswith(tok) for p in _hash_prefixes):
+                warns.append(f"'location -i {tok}' sin '/' — es un hash de spack, sin la "
+                             f"barra spack lo interpreta como nombre de paquete y falla: "
+                             f"usar '/{tok}'")
         return warns
 
     def _lint_lammps(block: str) -> list[str]:
@@ -1452,6 +1576,25 @@ def _fix_sbatch(text: str) -> str:
                     warns.append("thermo/thermo_style después del último run no tiene "
                                  "efecto — va ANTES del run")
                     break
+        return warns
+
+    def _lint_gromacs(block: str) -> list[str]:
+        """Bug real 30/8: gmx_mpi mdrun invocado sin mpirun (build MPI real, CRÍTICO
+        en md-sim.txt) y -deffnm que no matchea el -o que generó grompp (mdrun busca
+        <deffnm>.tpr y no lo encuentra)."""
+        warns = []
+        for gm in _re.finditer(r'\bgmx(?:_mpi)?\s+grompp\b[^\n]*?-o\s+(\S+)', block):
+            tpr_out = gm.group(1)
+            base = tpr_out[:-4] if tpr_out.endswith('.tpr') else tpr_out
+            for mm in _re.finditer(r'\bgmx(?:_mpi)?\s+mdrun\b([^\n]*)', block):
+                sm = _re.search(r'-deffnm\s+(\S+)', mm.group(1))
+                if sm and sm.group(1) != base:
+                    warns.append(f"grompp genera '{tpr_out}' pero mdrun usa "
+                                 f"-deffnm {sm.group(1)} (buscaría {sm.group(1)}.tpr) "
+                                 f"— nombres no coinciden, mdrun no encuentra el archivo")
+        if _re.search(r'\bgmx_mpi\s+mdrun\b', block) and not _re.search(r'\bmpirun\b', block):
+            warns.append("'gmx_mpi mdrun' sin mpirun -np $SLURM_NTASKS antes — build MPI "
+                         "real, sin mpirun no reparte ranks (NUNCA -ntmpi con este build)")
         return warns
 
     # module name → (hash spack, nombre variable). Ver hpc.txt para la fuente de verdad.
@@ -1549,6 +1692,7 @@ def _fix_sbatch(text: str) -> str:
             warns = _lint_lammps(body)
             if is_bash:
                 warns += _lint_filesystem(body)
+                warns += _lint_gromacs(body)
             if warns:
                 tail = "\n" + "\n".join(f"⚠ {w}" for w in dict.fromkeys(warns))
         return f"{fence}\n{body}\n```{tail}"
@@ -1709,6 +1853,10 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("lmp -in /mnt/cpu-data/gonzalo/archivo.lmp"))
     _t("workdir: SÍ se inyecta si el -in es ruta ABSOLUTA",
        "WORKDIR=" in r)
+    r = _fix_sbatch(B.format("lmp -in script_k${k}.lmp -var k -50.0"))
+    _t("workdir: NO se inyecta si el nombre del -in tiene una variable a mitad "
+       "(bug real 29/8, gchoque: script_k${k}.lmp generado por un loop)",
+       "WORKDIR=" not in r)
 
     r = _fix_sbatch(B.format(
         'k=\\$(printf "%.2f" \\$(echo "-100.0 + (\\$SLURM_ARRAY_TASK_ID - 1) * 2.0" | bc -l))\n'
@@ -1776,9 +1924,77 @@ def _selftest() -> int:
     _t("lint: _DIR usado sin definir (bug real CASA_DIR 13 jul 2026)",
        "'CASA_DIR' se usa pero nunca se define" in r)
     r = _fix_sbatch(B.format(
+        "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
         "CASA_DIR=$($SPACK --no-locks location -i /wmj34nf 2>/dev/null)\n"
         "${CASA_DIR}/bin/casa --nogui -c s.py"))
     _t("lint: _DIR definido y usado → sin warning", "⚠" not in r)
+    r = _fix_sbatch(B.format(
+        "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
+        "GSL_DIR=$($SPACK --no-locks location -i /mq2eqdc 2>/dev/null)\n"
+        "${GSL_DIR}/bin/gcc -O3 prog.c -lgsl -o prog"))
+    _t("lint: compilador desde bin/ de paquete no-toolchain (bug real GSL_DIR/bin/gcc 30/8)",
+       "GSL no es un paquete que provea compilador" in r)
+    r = _fix_sbatch(B.format(
+        "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
+        "CUDA_DIR=$($SPACK --no-locks location -i /okkjtu2 2>/dev/null)\n"
+        "${CUDA_DIR}/bin/nvcc -arch=sm_80 prog.cu -o prog"))
+    _t("lint: CUDA_DIR/bin/nvcc → sin warning (patrón correcto)", "⚠" not in r)
+    r = _fix_sbatch(B.format(
+        "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
+        "AOCC_DIR=$($SPACK --no-locks location -i /vs4buop 2>/dev/null)\n"
+        "${AOCC_DIR}/bin/clang -O3 prog.c -o prog"))
+    _t("lint: AOCC_DIR/bin/clang → sin warning (AOCC sí provee compilador)", "⚠" not in r)
+    r = _fix_sbatch(B.format(
+        "GSL=$($SPACK --no-locks location -i /mq2eqdc 2>/dev/null)\n"
+        "export PATH=${AOCC}/bin:$PATH\n"
+        "clang -O3 -march=znver4 -I${GSL}/include prog.c -L${GSL}/lib -lgsl -o prog"))
+    _t("lint: SPACK/AOCC bare (sin sufijo _DIR) usados sin definir (bug real 30/8)",
+       "'SPACK' se usa pero nunca se define" in r and "'AOCC' se usa pero nunca se define" in r)
+    r = _fix_sbatch(B.format(
+        "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
+        "AOCC=$($SPACK --no-locks location -i /vs4buop 2>/dev/null)\n"
+        "GSL=$($SPACK --no-locks location -i /mq2eqdc 2>/dev/null)\n"
+        "export PATH=${AOCC}/bin:$PATH\n"
+        "clang -O3 -march=znver4 -I${GSL}/include prog.c -L${GSL}/lib -lgsl -o prog"))
+    _t("lint: SPACK/AOCC/GSL bare, todos definidos → sin warning", "⚠" not in r)
+    r = _fix_sbatch(B.format(
+        "gmx_mpi grompp -f minim.mdp -c conf.gro -p topol.top -o tpr.tpr\n"
+        "gmx_mpi mdrun -v -deffnm min"))
+    _t("lint: GROMACS sin mpirun + -deffnm no matchea -o de grompp (bug real 30/8)",
+       "sin mpirun no reparte ranks" in r and "nombres no coinciden" in r)
+    r = _fix_sbatch(B.format(
+        "mpirun -np $SLURM_NTASKS gmx_mpi mdrun -ntomp $SLURM_CPUS_PER_TASK "
+        "-s topol.tpr -deffnm output"))
+    _t("lint: GROMACS con mpirun, sin grompp en el bloque → sin warning (patrón correcto)",
+       "⚠" not in r)
+    r = _fix_sbatch("```bash\n#!/bin/bash\n#SBATCH --partition=gpu\n"
+                     "#SBATCH --gres=gpu:nvidia-a100-80gb-pcie:1\n"
+                     "eval $(spack load --sh gromacs@2024.3%gcc@14.2.0~cuda)\n```")
+    _t("lint: --gres=gpu pero spec ~cuda (bug real 30/8, GPU asignada sin usar)",
+       "GPU asignada queda sin uso" in r)
+    r = _fix_sbatch("```bash\n#!/bin/bash\n#SBATCH --partition=gpu\n"
+                     "#SBATCH --gres=gpu:nvidia-a100-80gb-pcie:1\n"
+                     "eval $(spack load --sh gromacs@2024.3%gcc@14.2.0+cuda)\n```")
+    _t("lint: --gres=gpu con spec +cuda → sin warning (patrón correcto)", "⚠" not in r)
+    r = _fix_sbatch(B.format(
+        "VG5ODAZJ=$(/apps/local/spack/spack-2026b/spack/bin/spack location -i vg5odazj 2>/dev/null)"))
+    _t("lint: hash real de spack sin '/' inicial (bug real 30/8, spack lo lee como nombre de paquete)",
+       "sin '/'" in r and "/vg5odazj" in r)
+    r = _fix_sbatch(B.format(
+        "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
+        "GROMACS_DIR=$($SPACK location -i /vg5odaz 2>/dev/null)"))
+    _t("lint: hash con '/' inicial (patrón correcto) → sin warning", "⚠" not in r)
+    r = _fix_sbatch(B.format(
+        "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
+        "ADIOS_DIR=$($SPACK --no-locks location -i adios2 2>/dev/null)"))
+    _t("lint: nombre de paquete real bare (adios2, no es hash) → sin falso positivo",
+       "⚠" not in r)
+    r = _fix_sbatch(B.format(
+        "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
+        "GROMACS_DIR=$($SPACK location -i gromacs@2024.3%gcc@14.2.0+cuda 2>/dev/null)"))
+    _t("lint: spec de spack con @/%/+ (NO es un hash real) → sin falso positivo "
+       "(bug real 30/8: 'gromacs' de 'lammps/gromacs' en spack.txt colaba como hash)",
+       "sin '/'" not in r)
     r = _fix_sbatch(B.format(
         "WORKDIR=/mnt/cpu-data/$USER/x_$SLURM_JOB_ID\nmkdir -p $WORKDIR\n"
         "cp -r $SLURM_SUBMIT_DIR/. $WORKDIR/\ncd $WORKDIR"))
@@ -1847,11 +2063,41 @@ def _selftest() -> int:
     _t("dedent_code_block: bloque ya sin indentación queda intacto",
        r == "#!/bin/bash\n#SBATCH --job-name=x\necho hola")
 
+    _t("_RE_SPACK: 'MPI' solo (sin mpirun/mpiexec) SÍ dispara carga de spack.txt "
+       "(bug real 29/8: preguntar por MPI genérico no cargaba hpc.txt, el bot "
+       "no veía la regla de mpirun-vs-srun y sugería srun)",
+       bool(_RE_SPACK.search("quiero correr un test de MPI en la particion cpu")))
+    _t("_RE_SPACK: 'mpicc' también dispara carga de spack.txt",
+       bool(_RE_SPACK.search("como compilo con mpicc")))
+    _core_candidate = next((p for p in (CONTEXT_DIR / "core-dev.txt", CONTEXT_DIR / "core.txt") if p.exists()), None)
+    _CTX_CORE_TEXT = _core_candidate.read_text(encoding="utf-8", errors="replace") if _core_candidate else ""
+    _t("core.txt: la regla mpirun-vs-srun vive acá (siempre cargado, no depende "
+       "de ningún trigger — fix 30/8 tras split de hpc.txt en segmentos)",
+       "mpirun" in _CTX_CORE_TEXT and "srun" in _CTX_CORE_TEXT)
+    for _seg, _rx in _SEGMENTS:
+        if _rx is None:
+            continue
+        _t(f"_SEGMENTS: '{_seg}' tiene archivo de contexto real en disco "
+           f"({_seg}-dev.txt o {_seg}.txt)",
+           (CONTEXT_DIR / f"{_seg}-dev.txt").exists() or (CONTEXT_DIR / f"{_seg}.txt").exists())
+
     n_fail = sum(1 for _, ok in results if not ok)
     for name, ok in results:
         print(("PASS  " if ok else "FAIL  ") + name)
     print(f"\n{len(results) - n_fail}/{len(results)} OK")
     return 1 if n_fail else 0
+
+
+# Modelos con reasoning-parser propio (--reasoning-parser en su sbatch de vLLM)
+# donde confirmamos en vivo (30/8) que el modelo a veces NO emite el token
+# especial <think> como su primer token generado -- cuando eso pasa, el parser
+# de vLLM (glm4_moe_reasoning_parser.py, rama "thinking is disabled") nunca ve
+# el token_id esperado y deja "<think>" como texto crudo en el campo content
+# que gonzabot renderiza. Medido: ~50% de las veces a ~17K tokens de contexto
+# real. Fix que SÍ funciona (14/14 en tests): forzar el prefijo "<think>\n" vía
+# continue_final_message le saca al modelo la decisión ambigua de "abro
+# razonamiento o no".
+_REASONING_MODELS = {"glm45-air"}
 
 
 def _build_request(messages: list[dict], max_tokens: int = 8000) -> Request:
@@ -1860,7 +2106,7 @@ def _build_request(messages: list[dict], max_tokens: int = 8000) -> Request:
     # tiempo, no charla creativa). top_p/top_k agregados: faltaban del todo, sin ellos vLLM
     # usa su propio default (mas permisivo que lo que Qwen valido) — estos son los valores
     # oficiales del generation_config.json de Qwen2.5-72B-Instruct.
-    payload = json.dumps({
+    body = {
         "model":    MODEL,
         "messages": messages,
         "stream":   True,
@@ -1869,7 +2115,12 @@ def _build_request(messages: list[dict], max_tokens: int = 8000) -> Request:
         "top_k": 20,
         "repetition_penalty": 1.1,
         "max_tokens": max_tokens,
-    }).encode("utf-8")
+    }
+    if MODEL in _REASONING_MODELS and messages and messages[-1].get("role") != "assistant":
+        body["messages"] = list(messages) + [{"role": "assistant", "content": "<think>\n"}]
+        body["continue_final_message"] = True
+        body["add_generation_prompt"] = False
+    payload = json.dumps(body).encode("utf-8")
     return Request(
         f"{VLLM_BASE}/chat/completions",
         data=payload,
@@ -2278,7 +2529,11 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                                 # Dentro de código: detectar char repetido 25+ veces (alucinación de hash)
                                 if check_garbage and in_code and _roll_tok % 10 == 0:
                                     import re as _re_ic
-                                    if _re_ic.search(r'(.)\1{24,}', _roll_buf):
+                                    # Excluir caracteres de separador decorativo (# ====, # ----,
+                                    # # ****, etc. — patrón real y común en comentarios de shell/
+                                    # Python, no es alucinación de hash). Bug real 30/8: /audit con
+                                    # GLM disparaba __GARBAGE_SCREEN__ en vivo por esto.
+                                    if _re_ic.search(r'([^=\-#_*~^.• \t])\1{24,}', _roll_buf):
                                         raise RuntimeError(
                                             "__GARBAGE_SCREEN__" if _screen_lines_after_early > 0
                                             else "__GARBAGE__"
@@ -2338,7 +2593,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
         if t.count("❖")   > n * 0.05: return True
         # Detectar alucinación: líneas con un mismo carácter repetido 25+ veces seguidas
         # (el modelo a veces genera 0000... o ════... donde debería ir código real)
-        if _re_g.search(r'(.)\1{25,}', t):
+        if _re_g.search(r'([^=\-#_*~^.• \t])\1{25,}', t):
             return True
         unusual = sum(1 for c in t if
             '✀' <= c <= '➿' or
@@ -2636,15 +2891,15 @@ def repl(new_session: bool = False):
                 print(f"  Endpoint: {VLLM_BASE}")
                 print(f"  Modelo:   {MODEL}")
                 print(f"  Ctx dir:  {CONTEXT_DIR}")
-                for _seg in ("core", "hpc", "python"):
+                for _seg, _ in _SEGMENTS:
                     _dev = CONTEXT_DIR / f"{_seg}-dev.txt"
                     _pro = CONTEXT_DIR / f"{_seg}.txt"
                     if _dev.exists():
-                        print(f"  {_seg:8s}  {_dev.name}  ({len(_dev.read_text(encoding='utf-8', errors='replace')):,} chars)")
+                        print(f"  {_seg:18s}  {_dev.name}  ({len(_dev.read_text(encoding='utf-8', errors='replace')):,} chars)")
                     elif _pro.exists():
-                        print(f"  {_seg:8s}  {_pro.name}  ({len(_pro.read_text(encoding='utf-8', errors='replace')):,} chars)")
+                        print(f"  {_seg:18s}  {_pro.name}  ({len(_pro.read_text(encoding='utf-8', errors='replace')):,} chars)")
                     else:
-                        print(f"  {_seg:8s}  (no encontrado)")
+                        print(f"  {_seg:18s}  (no encontrado)")
 
             elif cmd == "/compact":
                 if len(context_msgs) < 4:
@@ -3203,12 +3458,15 @@ def repl(new_session: bool = False):
                             f"Analizá los logs. Si hay errores explicá qué falló y cómo corregirlo. "
                             f"Si el job terminó bien decilo en una línea."
                             f"{_fail_warning}")
-                # Incluir reglas del cluster (hpc.txt/core.txt): sin ellas el diagnóstico
-                # receta soluciones genéricas inválidas acá (module load, pip install)
+                # Incluir reglas del cluster (segmentos relevantes + core): sin
+                # ellas el diagnóstico receta soluciones genéricas inválidas acá
+                # (module load, pip install). Sondea logs + script, no python
+                # (un job fallado no necesita reglas de numpy/pandas).
+                _diag_probe = log_content + "\n" + original_script
                 _diag_sys = {"role": "system", "content":
                              "Sos un asistente de HPC. Analizá logs de Slurm y respondé en español, "
                              "directo y corto. Las soluciones DEBEN respetar las reglas de este cluster:\n"
-                             + _CTX_CORE + ("\n\n" + _CTX_HPC if _CTX_HPC else "")}
+                             + _ctx_for_probe(_diag_probe, include_python=False)}
                 messages_diag = [_diag_sys, {"role": "user", "content": diag_msg}]
                 save_message(con, session_id, "user", diag_msg)
                 try:
@@ -3610,7 +3868,14 @@ def repl(new_session: bool = False):
                 messages_br = [_br_sys, {"role": "user", "content": branch_prompt}]
                 save_message(con, session_id, "user", branch_prompt)
                 try:
-                    reply_br = stream_response(messages_br, max_tokens=8000, check_garbage=False)
+                    # max_tokens alto (no 8000): modelos con razonamiento (GLM, reasoning_content
+                    # separado por --reasoning-parser) gastan buena parte del budget PENSANDO antes
+                    # de emitir el diff real en "content" — confirmado en vivo 30/8: con 8000,
+                    # reasoning_content llegó a 18K+ caracteres y "content" volvía vacío o cortado
+                    # a mitad del Branch 2/3. 8000 alcanza de sobra para modelos sin razonamiento
+                    # (Qwen no lo usa igual, termina antes por su cuenta) — no genera costo extra
+                    # real, solo levanta el techo para el caso que lo necesita.
+                    reply_br = stream_response(messages_br, max_tokens=24000, check_garbage=False)
                 except RuntimeError as e:
                     _handle_runtime_error(e)
                     continue
