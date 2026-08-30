@@ -27,8 +27,11 @@ SPACK en sbatch: los jobs batch NO heredan funciones de shell.
   ⚠ NUNCA mezclar con rutas del store viejo (/usr/share/spack). NUNCA inventar el path si el paquete no está en la lista de abajo — avisar que no está validado ahí todavía.
 
 STORE NUEVO (spack-2026b): store default para todos los usuarios (el viejo queda legacy/respaldo). VTK y paraview: SACADOS a propósito — NO ofrecerlos, no están en ningún store (nota completa en python.txt). Octave: sin GUI/gnuplot todavía.
-  "spack load lammps/gromacs/fftw/netcdf-c/openblas/py-pandas" (sin hash, nombre pelado) ya
+  "spack load fftw/netcdf-c/openblas/py-pandas" (sin hash, nombre pelado) ya
   resuelven solos vía preferred-hashes.conf — probado exit 0. "spack load gnuplot/hdf5" también.
+  ⚠ lammps y gromacs NO están acá (bug real 30/8: esta lista los mencionaba y contradecía la
+  sección DESAMBIGUACIÓN de abajo — "matches multiple packages" confirmado con gromacs) — para
+  esos dos usar SIEMPRE el hash explícito de md-sim.txt, nunca "spack load lammps/gromacs" bare.
   ÚNICA EXCEPCIÓN A PROPÓSITO: "spack load py-numpy" sigue dando "matches multiple
   packages" — es intencional (2 ecosistemas reales distintos, pandas+performance vs
   numba/scipy), pedirle al usuario que especifique versión/hash/compilador puntualmente.
