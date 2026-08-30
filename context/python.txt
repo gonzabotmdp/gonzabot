@@ -183,7 +183,7 @@ Apptainer 1.4.1 (contenedores Singularity-compatible, hash /utpbedt — actualiz
   apptainer exec imagen.sif mi_prog; apptainer run docker://ubuntu:22.04 bash; apptainer pull docker://tensorflow/tensorflow:latest-gpu
   Para GPU: partición gpu + --nv flag (apptainer exec --nv imagen.sif prog). Imágenes .sif en /mnt/gpu-data/$USER/ o /mnt/cpu-data/$USER/ (no /tmp).
 
-Geant4 11.3.2: SÍ instalado en spack-2026b (no es Python, ver hpc.txt sección Geant4 para carga/ejemplos/rutas reales).
+Geant4 11.3.2: SÍ instalado en spack-2026b (no es Python, ver particle-physics.txt para carga/ejemplos/rutas reales).
 
 GSL 2.8 (GNU Scientific Library, hash /mq2eqdc — actualizado 22/8, el viejo /ldeaug34 ya no existe):
   GSL=$($SPACK --no-locks location -i /mq2eqdc 2>/dev/null)
@@ -238,6 +238,12 @@ JupyterLab: NO INSTALADO al revisar el 1/8 (ausente del store, motivo no confirm
 
 Rust 1.86.0 (hash 7a2bbni, gcc14): eval $(spack load --sh /7a2bbni); cargo build/run. Reconstruido el 1/8 (chocaba compilando su LLVM/lld embebido con AOCC contra libstdc++ de gcc14, real bug, resuelto forzando gcc14 completo). Partición cpu.
 Go, Node.js: NO INSTALADOS al revisar el 1/8 (ausentes del store, motivo no confirmado — posiblemente ya estaban así antes de la migración de hoy). Avisar al usuario que no están disponibles, no inventar el comando.
+
+PDF con LaTeX: TEXLIVE ROTO desde el 1/8 (build fallido, sin hash válido todavía — softadm lo anotó de baja prioridad). NO usar spack load texlive ni ningún hash viejo. Alternativa mientras tanto: generar el PDF con matplotlib (fig.savefig('doc.pdf')) o pedirle a softadm que lo reconstruya si el usuario específicamente necesita LaTeX.
+Heredoc bash: comillas (<<'EOF') evitan expansión de $/\ (el bot auto-quotea si falta). Marcadores distintos por bloque: <<'LMPEOF' LAMMPS, <<'PYEOF' Python, <<'TEXEOF' LaTeX.
+  LaTeX en heredoc <<'TEXEOF': backslash SIMPLE — escribir \documentclass, \begin{document}, \section (NO \\documentclass ni \\begin). Con comillas el shell no toca los backslashes.
+  Si necesitas variables bash dentro del heredoc: escribir el .py o .tex con Python usando f-strings o sed.
+matplotlib mathtext: NO \displaystyle (ParseFatalException). Funciona: \frac{}{}, \left[\right], \varepsilon, \sigma, \pm.
 
 Numba (py-numba, disponible en spack-2026b, spack load py-numba): para loops de Python puro con millones de iteraciones secuenciales (integradores ODE/SDE paso a paso, Monte Carlo iterativo), agregar @njit a las funciones del loop da speedups reales de 50-100x+ (validado 27/8: integrador de Heun, 500k pasos, 8.9s → 0.096s, ~93x). Es la primera opción a sugerir ante un loop `for i in range(N)` con N grande y trabajo por iteración chico.
   ⚠ CRÍTICO — NO sugerir `multiprocessing`/chunking por tiempo para integración SECUENCIAL (donde el estado en el paso i depende del paso i-1, ej. cualquier integrador ODE/SDE tipo Euler/Heun/Runge-Kutta): partir el rango temporal en chunks independientes con `Pool` y cada chunk arrancando desde `initial_condition` NO reconstruye la trayectoria real — cada chunk sería una simulación distinta empezando de cero, no una continuación. Ese patrón de "paralelizar por chunks de tiempo" solo es válido si las iteraciones son independientes entre sí (ej. barrido de parámetros, no evolución temporal de un mismo estado). Para integración secuencial, Numba (@njit) es la opción correcta; multiprocessing NO sirve para acelerar el loop en sí.
