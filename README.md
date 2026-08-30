@@ -8,9 +8,10 @@ exagerados de recursos en scripts `sbatch` **antes** de que el job corra y
 falle o desperdicie horas de cómputo.
 
 Corre sobre un modelo local vía [vLLM](https://github.com/vllm-project/vllm)
-— validado en producción con Qwen2.5-72B-Instruct-AWQ y, en evaluación
-activa, GLM-4.5-Air (ver sección "Comparación de modelos" más abajo) —
-sin dependencias externas de Python más allá de la librería estándar.
+— en producción con **GLM-4.5-Air** desde el 30/8/2026 (antes
+Qwen2.5-72B-Instruct-AWQ, ver sección "Comparación de modelos" más abajo
+para por qué migramos) — sin dependencias externas de Python más allá de
+la librería estándar.
 
 Desarrollado y usado en producción en el cluster HPC del IFIMAR (CONICET /
 UNMDP, Argentina).
@@ -60,29 +61,38 @@ en [`tutorial/ph_x_fonones_real.sbatch`](tutorial/ph_x_fonones_real.sbatch).
 
 Evaluamos si un modelo distinto resolvía mejor el problema clásico de
 "lost in the middle". Comparación sistemática entre Qwen2.5-72B-Instruct-AWQ
-(el que está en producción) y GLM-4.5-Air, misma infraestructura, mismas
-preguntas:
+(el que estaba en producción hasta el 30/8) y GLM-4.5-Air, misma
+infraestructura, mismas preguntas:
 
 - Calidad/atención a reglas: GLM-4.5-Air ganó en la mayoría de los casos
   puntuales que probamos -- incluido un caso real donde diagnosticó
   correctamente un job fallado (`/diagnose`) que Qwen reportó como "sin
   errores" (falso negativo).
 - Velocidad: Qwen2.5-72B es ~30% más rápido generando, en nuestro
-  hardware (A100 80GB).
-- Limitación conocida actual: el comando `/branch` (genera 3 variantes de
-  fix candidatas, las corre, compara resultados) no funciona de forma
-  confiable con GLM-4.5-Air todavía -- el modelo no siempre respeta el
-  formato de diff estructurado que ese comando exige. Con Qwen2.5-72B sí
-  funciona.
+  hardware (A100 80GB) -- el costo real de haber migrado.
+- Limitación conocida, todavía abierta en producción: el comando
+  `/branch` (genera 3 variantes de fix candidatas, las corre, compara
+  resultados) no funciona de forma confiable con GLM-4.5-Air -- el
+  modelo no siempre respeta el formato de diff estructurado que ese
+  comando exige. Con Qwen2.5-72B sí funcionaba.
+
+Con la calidad como criterio principal, **GLM-4.5-Air pasó a producción
+el 30/8/2026**. El regression-testing posterior a la migración (probar
+en vivo, con la infraestructura real, los casos que ya andaban bien con
+Qwen) encontró y arregló 4 bugs nuevos específicos de GLM que no habían
+aparecido en la comparación sistemática previa -- GROMACS invocado sin
+`mpirun`, GPU pedida junto a un build de spack sin soporte CUDA, hash de
+spack real sin la `/` inicial -- y de paso destapó una contradicción real
+preexistente en la documentación de sitio (`context/spack.txt` decía dos
+cosas distintas sobre si GROMACS resuelve sin hash). Ninguno es un bug
+del LLM: todos viven en el post-procesador o en `context/`, ver
+"Arquitectura" más abajo.
 
 De paso, usar GLM-4.5-Air nos llevó a encontrar y reportar un bug real
 de vLLM -- el contenido del razonamiento (`<think>...</think>`) a veces se
 filtra sin separar hacia la respuesta visible en streaming sin tools, a
 contextos largos. Reporte y repro standalone:
 [vllm-project/vllm#29763 (comment)](https://github.com/vllm-project/vllm/issues/29763#issuecomment-5470158016)
-
-Ninguno de los dos modelos reemplaza al otro todavía -- la decisión de
-cuál usar en producción sigue en evaluación.
 
 ## Arquitectura
 
