@@ -175,9 +175,21 @@ is a single run of a single composition (50B out of the paper's nine) —
 a demo of gonzabot's real-world capability, not a statistically rigorous
 independent validation (that would need multiple seeds).
 
+## Requirements
+
+- **Python 3.10+** (uses PEP 604 union types, e.g. `str | None`, without
+  `from __future__ import annotations`).
+- **Linux/Unix** — uses `termios`/`tty` for raw terminal input (arrow
+  keys, paste detection); doesn't run on Windows without WSL.
+- A running vLLM OpenAI-compatible endpoint (see
+  [`tutorial/vllm-service.sbatch`](tutorial/vllm-service.sbatch) for how
+  we serve ours). No `pip install` needed for gonzabot itself.
+
 ## Usage
 
 ```
+git clone https://github.com/gonzabotmdp/gonzabot.git
+cd gonzabot
 ./gonzabot                 # normal conversation
 ./gonzabot --new           # force a new session (ignore previous history)
 ./gonzabot --selftest      # run the post-processor's test suite
@@ -197,8 +209,15 @@ text, without touching code, to adapt to another cluster: hardware,
 Slurm partitions, available Spack packages, and rules learned from real
 cases.
 
-The model endpoint (vLLM host/port) is configured at the top of
-`gonzabot`.
+The model endpoint and model name are read from environment variables
+(falling back to our own production defaults if unset), no code edit
+needed:
+
+```
+export GONZABOT_URL="http://your-vllm-host:8000/v1"
+export GONZABOT_MODEL="your-served-model-name"
+./gonzabot
+```
 
 ## Tutorial: how we set it up
 

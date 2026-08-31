@@ -119,9 +119,21 @@ contextos largos. Reporte y repro standalone:
   el watcher — así entre los dos no ocupan GPUs de cómputo cuando nadie
   lo está usando.
 
+## Requisitos
+
+- **Python 3.10+** (usa uniones de tipo de PEP 604, ej. `str | None`, sin
+  `from __future__ import annotations`).
+- **Linux/Unix** — usa `termios`/`tty` para input crudo de terminal
+  (flechas, detección de paste); no corre en Windows sin WSL.
+- Un endpoint de vLLM compatible con OpenAI corriendo (ver
+  [`tutorial/vllm-service.sbatch`](tutorial/vllm-service.sbatch) para
+  cómo servimos el nuestro). Sin `pip install` necesario para gonzabot en sí.
+
 ## Uso
 
 ```
+git clone https://github.com/gonzabotmdp/gonzabot.git
+cd gonzabot
 ./gonzabot                 # conversación normal
 ./gonzabot --new           # fuerza sesión nueva (ignora historial previo)
 ./gonzabot --selftest      # corre la batería de tests del post-procesador
@@ -141,8 +153,15 @@ Editables en texto plano, sin tocar código, para adaptar a otro cluster:
 hardware, particiones Slurm, paquetes Spack disponibles y reglas aprendidas
 de casos reales.
 
-El endpoint del modelo (host/puerto de vLLM) se configura al principio de
-`gonzabot`.
+El endpoint del modelo y el nombre del modelo se leen de variables de
+entorno (si no están seteadas, caen a nuestros propios defaults de
+producción), sin necesidad de tocar código:
+
+```
+export GONZABOT_URL="http://tu-host-vllm:8000/v1"
+export GONZABOT_MODEL="nombre-del-modelo-servido"
+./gonzabot
+```
 
 ## Caso de éxito: un "investigador" IA usando gonzabot de punta a punta (30/8/2026)
 
