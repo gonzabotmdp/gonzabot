@@ -144,66 +144,67 @@ de casos reales.
 El endpoint del modelo (host/puerto de vLLM) se configura al principio de
 `gonzabot`.
 
-## Case study: an AI "researcher" using gonzabot end-to-end (30/8/2026)
+## Caso de éxito: un "investigador" IA usando gonzabot de punta a punta (30/8/2026)
 
-*(This section is in English for international context — the rest of the
-README, and the actual gonzabot session logs, are in Spanish, since that's
-the real language spoken at IFIMAR.)*
+Para probar gonzabot como lo usaría un usuario real — no con prompts
+sintéticos de benchmark — corrimos una sesión completa donde un agente de
+IA jugó el rol de un investigador de IFIMAR y usó **solo** gonzabot (nunca
+una edición manual) desde la idea hasta el entregable, en una sola
+terminal, contra la instancia real de producción.
 
-To stress-test gonzabot the way a real user would — not synthetic
-benchmark prompts — we ran a full session where an AI agent played the
-role of an IFIMAR researcher and used **only** gonzabot (never a manual
-edit) from idea to deliverable, in a single terminal, against the live
-production instance.
+**Parte 1 — una idea de investigación real, generada, sometida,
+depurada y escrita.** El "investigador" propuso estudiar el comportamiento
+térmico de la aleación Heusler Fe₂CrGa cerca de su temperatura de Curie
+(dinámica molecular + validación DFT), le pidió a gonzabot un `sbatch` de
+prueba de LAMMPS, y lo corrió de verdad. A lo largo de varias iteraciones,
+esto destapó y arregló **5 bugs reales** en vivo: `spack env activate`
+estrechando en silencio la visibilidad de paquetes y rompiendo hashes
+válidos (lo que antes había hecho que `/diagnose` diagnosticara mal un
+hash perfectamente válido como roto), un `create_box` sin `create_atoms`
+después (celda de simulación vacía), un trigger de regex faltante que
+hacía que un pedido de PDF con LaTeX nunca cargara la nota de sitio de
+"TeXLive está roto", y — encontrado mientras se perseguía ese último bug —
+un bug de documentación **a nivel de todo el cluster**: el flag
+`--no-locks`, citado como "crítico" en más de 15 lugares de
+`context/*.txt`, no existe en absoluto en el Spack 1.2.2 instalado
+(`spack --help` no lo lista; usarlo falla de inmediato con
+`unrecognized arguments`). Los cinco quedaron arreglados en `context/` y
+en el post-procesador determinístico, con nuevos casos de
+`--selftest`.
 
-**Part 1 — a real research idea, generated, submitted, debugged, and
-written up.** The "researcher" proposed studying the thermal behavior of
-the Heusler alloy Fe₂CrGa near its Curie temperature (molecular dynamics
-+ DFT validation), asked gonzabot for a test LAMMPS `sbatch`, and ran it
-for real. Over several iterations, this surfaced and fixed **5 genuine
-bugs** live: `spack env activate` silently narrowing package visibility
-and breaking valid hashes (which had earlier caused `/diagnose` to
-misdiagnose a perfectly valid hash as broken), a `create_box` with no
-`create_atoms` afterward (empty simulation cell), a missing regex trigger
-that meant a LaTeX/PDF request never loaded the site's "TeXLive is
-currently broken" note, and — found while chasing that last one down — a
-**cluster-wide** documentation bug: the `--no-locks` flag referenced as
-"critical" in 15+ places across `context/*.txt` doesn't exist at all in
-the installed Spack 1.2.2 (`spack --help` doesn't list it; using it fails
-immediately with `unrecognized arguments`). All five are fixed in
-`context/` and the deterministic post-processor, with new `--selftest`
-cases.
+**Parte 2 — reproduciendo un resultado negativo real de la
+literatura.** Buscamos en arXiv un paper de física de acceso abierto con
+resultados negativos y elegimos el de F.-X. Coudert [*"Failure to
+Reproduce the Results of 'A new transferable interatomic potential for
+molecular dynamics simulations of borosilicate glasses'"*](https://arxiv.org/abs/2305.14958)
+(2023) — un caso documentado donde los archivos de LAMMPS de los autores
+originales tenían masas atómicas incorrectas de boro y silicio, y
+"corregirlas" hace que el potencial concuerde *peor* con el experimento
+(porque los parámetros B–B del potencial fueron ajustados usando esas
+masas erróneas). Descargamos el archivo de input real publicado por el
+propio autor (`50B/md.inp`, sin modificar) de
+[fxcoudert/citable-data](https://github.com/fxcoudert/citable-data), le
+pedimos a gonzabot el sbatch envolvente (limpio al primer intento, sin
+bugs esta vez), y corrimos el protocolo completo de melt-quench de verdad
+(3120 átomos, Buckingham + PPPM, 3.01M timesteps, ~1h15m de wall time en
+32 cores de CPU):
 
-**Part 2 — reproducing a real negative result from the literature.** We
-searched arXiv for an open-access negative-results physics paper and
-picked F.-X. Coudert's [*"Failure to Reproduce the Results of 'A new
-transferable interatomic potential for molecular dynamics simulations of
-borosilicate glasses'"*](https://arxiv.org/abs/2305.14958) (2023) — a
-documented case where the original authors' LAMMPS files had incorrect
-boron/silicon atomic masses, and "fixing" them makes the potential agree
-*worse* with experiment (because the potential's B–B parameters were
-themselves fit against the buggy masses). We downloaded the author's own
-published input file (`50B/md.inp`, unmodified) from
-[fxcoudert/citable-data](https://github.com/fxcoudert/citable-data), had
-gonzabot generate the wrapping `sbatch` on the first try (no bugs this
-time), and ran the full melt-quench protocol for real (3120 atoms,
-Buckingham + PPPM, 3.01M timesteps, ~1h15m wall time on 32 CPU cores):
-
-| Source | Density (g/cm³) | Masses |
+| Fuente | Densidad (g/cm³) | Masas |
 |---|---:|---|
 | Experimental (Wang et al.) | 2.453 | — |
-| Wang et al. 2018 (as published) | 2.467 | **incorrect** |
-| Coudert 2023 (his reproduction) | 2.520 | correct |
-| **This run (IFIMAR, 30/8/2026)** | **2.536** | correct |
+| Wang et al. 2018 (publicado) | 2.467 | **incorrectas** |
+| Coudert 2023 (su reproducción) | 2.520 | correctas |
+| **Esta corrida (IFIMAR, 30/8/2026)** | **2.536** | correctas |
 
-We reproduced Coudert's finding independently: correcting the masses
-moves the density *away* from experiment (Δ=0.082) rather than toward it,
-compared to the original buggy potential (Δ=0.014) — and our value lands
-close to Coudert's own (Δ=0.016), a small and expected gap between
-independent MD runs (seed, LAMMPS version, hardware). Honest caveat: this
-is a single run of a single composition (50B out of the paper's nine) —
-a demo of gonzabot's real-world capability, not a statistically rigorous
-independent validation (that would need multiple seeds).
+Reprodujimos el hallazgo de Coudert de forma independiente: corregir las
+masas mueve la densidad *lejos* del experimento (Δ=0,082) en vez de
+acercarla, comparado con el potencial original con el bug (Δ=0,014) — y
+nuestro valor queda cerca del de Coudert (Δ=0,016), una diferencia chica y
+esperable entre corridas MD independientes (semilla, versión de LAMMPS,
+hardware). Aclaración honesta: es una sola corrida de una sola composición
+(50B de las nueve del paper) — una demo de la capacidad real de gonzabot,
+no una validación independiente estadísticamente rigurosa (para eso harían
+falta varias semillas).
 
 ## Tutorial: cómo lo armamos
 
