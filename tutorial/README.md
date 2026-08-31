@@ -1,113 +1,112 @@
-# Tutorial: cómo armamos gonzabot en IFIMAR
+**English** | [Español](README.es.md)
 
-Esto no es un instalador — es la bitácora real de los pasos y scripts que
-usamos para levantar gonzabot en nuestro cluster, para que otro admin de
-HPC pueda replicar el criterio (no necesariamente cada comando literal,
-que va a depender de su propia infraestructura).
+# Tutorial: how we set up gonzabot at IFIMAR
 
-Nota sobre rutas — dos reglas separadas, no las mezcles:
+This isn't an installer — it's the real log of steps and scripts we used
+to stand up gonzabot on our cluster, so another HPC admin can replicate
+the approach (not necessarily every literal command, which will depend on
+their own infrastructure).
 
-1. **Nombre del mount, según el nodo.** El nodo de login (por donde entran
-   los usuarios) y los nodos de cómputo (CPU y GPU) montan el NFS como
-   `/mnt/cpu-data/` y `/mnt/gpu-data/`. Un nodo de administración aparte
-   (no es por donde entran los usuarios normales) monta el mismo NFS como
-   `/data/cpu/` y `/data/gpu/`. Por eso vas a ver ambos estilos en
-   distintos scripts de este repo: `gonzabot-watcher.sh` corre vía cron en
-   el nodo de administración (`/data/gpu/...`); `vllm-service.sbatch`
-   corre dentro de un job en un nodo de cómputo (`/mnt/gpu-data/...`).
+Note on paths — two separate rules, don't mix them up:
 
-2. **Cuál de los dos (cpu-data / gpu-data) existe en cada nodo, aparte del
-   nombre.** Los nodos de cómputo GPU solo tienen montado `gpu-data` —
-   `cpu-data` no existe ahí. Los nodos de cómputo CPU es al revés: solo
-   `cpu-data`, no `gpu-data`. Solo el nodo de login tiene ambos montados
-   a la vez. Un `sbatch` a la partición GPU con un WorkDir en
-   `.../cpu-data/...` falla instantáneo (Slurm no puede hacer `chdir`),
-   y viceversa — antes de mandar un job, verificar que el path exista en
-   la partición de destino, no asumir que "es el mismo NFS" significa que
-   está todo visible desde todos lados.
+1. **Mount name, depends on the node.** The login node (where users log
+   in) and the compute nodes (CPU and GPU) mount the NFS as
+   `/mnt/cpu-data/` and `/mnt/gpu-data/`. A separate admin node (not where
+   regular users log in) mounts the same NFS as `/data/cpu/` and
+   `/data/gpu/`. That's why you'll see both styles across different
+   scripts in this repo: `gonzabot-watcher.sh` runs via cron on the admin
+   node (`/data/gpu/...`); `vllm-service.sbatch` runs inside a job on a
+   compute node (`/mnt/gpu-data/...`).
 
-Adaptalo al esquema de mounts real de tu propio cluster — y si tenés más
-de dos categorías de nodo, no asumas que ninguno de estos dos patrones es
-binario.
+2. **Which of the two (cpu-data / gpu-data) exists on each node**, apart
+   from the naming. GPU compute nodes only have `gpu-data` mounted —
+   `cpu-data` doesn't exist there. CPU compute nodes are the reverse: only
+   `cpu-data`, no `gpu-data`. Only the login node has both mounted at
+   once. An `sbatch` to the GPU partition with a WorkDir under
+   `.../cpu-data/...` fails instantly (Slurm can't `chdir`), and vice
+   versa — before submitting a job, check that the path actually exists
+   on the target partition, don't assume "it's the same NFS" means
+   everything is visible from everywhere.
 
-## 1. Servir el modelo con vLLM
+Adapt this to your own cluster's real mount layout — and if you have more
+than two node categories, don't assume either of these two patterns is
+binary.
 
-`download-model.sh` — bajamos el modelo desde HuggingFace con
-`huggingface_hub.snapshot_download` (acá con Llama 3.3 70B de ejemplo;
-nosotros terminamos usando Qwen2.5-72B-Instruct-AWQ en producción, ver
+## 1. Serving the model with vLLM
+
+`download-model.sh` — we download the model from HuggingFace with
+`huggingface_hub.snapshot_download` (Llama 3.3 70B as the example here;
+we ended up running Qwen2.5-72B-Instruct-AWQ in production, see
 `vllm-service.sbatch`).
 
-`vllm-service.sbatch` — el job de Slurm real que levanta el servicio.
-Dos ideas del script que vale la pena copiar tal cual:
+`vllm-service.sbatch` — the real Slurm job that starts the service. Two
+ideas from the script worth copying as-is:
 
-- **Vive en la partición `inference`** (no `gpu`), como un servicio de
-  larga duración (`--time=16:00:00`) en vez de un job de cómputo puntual.
-- **Watchdog de inactividad integrado**: un subproceso en background
-  (`while sleep 60; do ...`) chequea un archivo "heartbeat" — cada
-  request de gonzabot lo toca — y si pasan `IDLE_MINUTES` sin actividad,
-  se cancela el propio job (`scancel $SLURM_JOB_ID`). Así el servicio no
-  ocupa GPUs de cómputo cuando nadie lo está usando, sin necesitar un
-  daemon externo.
+- **Lives in the `inference` partition** (not `gpu`), as a long-running
+  service (`--time=16:00:00`) rather than a one-off compute job.
+- **Built-in idle watchdog**: a background subprocess
+  (`while sleep 60; do ...`) checks a "heartbeat" file — every gonzabot
+  request touches it — and if `IDLE_MINUTES` pass with no activity, the
+  job cancels itself (`scancel $SLURM_JOB_ID`). This way the service
+  doesn't hold compute GPUs when nobody's using it, with no external
+  daemon needed.
 
-## 2. Encendido bajo demanda
+## 2. On-demand startup
 
-El servicio arriba se cae solo por inactividad — pero alguien tiene que
-volver a prenderlo cuando un usuario lo necesita. Eso lo hace
-[`gonzabot-watcher.sh`](../gonzabot-watcher.sh) (raíz del repo): un cron
-liviano (corrido por un usuario normal, sin root) que revisa un flag file
-cada minuto y somete `vllm-service.sbatch` si hace falta.
+The service above shuts itself down on idle — but something has to turn
+it back on when a user needs it. That's
+[`gonzabot-watcher.sh`](../gonzabot-watcher.sh) (repo root): a lightweight
+cron (run by a regular user, no root) that checks a flag file every
+minute and submits `vllm-service.sbatch` if needed.
 
-## 3. Resolución de hashes ambiguos en Spack
+## 3. Resolving ambiguous Spack hashes
 
-`spack-load-wrapper.txt` — el problema y la solución real que encontramos
-cuando `spack load paquete` fallaba por tener múltiples builds instalados
-del mismo paquete (`Error: fftw matches multiple packages`). Wrapper que
-redefine `spack load` para resolver el hash preferido automáticamente.
+`spack-load-wrapper.txt` — the real problem and solution we found when
+`spack load package` failed because multiple builds of the same package
+were installed (`Error: fftw matches multiple packages`). A wrapper that
+redefines `spack load` to automatically resolve the preferred hash.
 
-## 4. Notificaciones de Slurm por mail
+## 4. Slurm mail notifications
 
-`slurm-mail-notifications.txt` — cómo arreglamos `--mail-user`/`--mail-type`
-cuando `sendmail` venía deshabilitado por defecto (`/bin/false`), con
-`ssmtp` como relay SMTP liviano (Gmail App Password o SMTP institucional).
+`slurm-mail-notifications.txt` — how we fixed `--mail-user`/`--mail-type`
+when `sendmail` came disabled by default (`/bin/false`), using `ssmtp` as
+a lightweight SMTP relay (Gmail App Password or institutional SMTP).
 
-## Lo que NO está acá
+## What's NOT here
 
-Dejamos afuera la configuración de VPN/firewall (WireGuard + OPNsense) que
-usamos para dar acceso a colaboradores externos — no por ser complicada,
-sino porque el documento real tiene la topología de red completa de
-nuestra institución (IPs públicas, reglas de firewall). El patrón general
-es simple igual: WireGuard corriendo directo en el firewall perimetral, un
-peer por colaborador externo, `AllowedIPs` acotado solo al nodo de login
-(nunca `0.0.0.0/0`) para no romper la red del usuario.
+We left out the VPN/firewall setup (WireGuard + OPNsense) we use to give
+access to external collaborators — not because it's complicated, but
+because the real document has our institution's full network topology
+(public IPs, firewall rules). The general pattern is simple enough
+anyway: WireGuard running directly on the perimeter firewall, one peer
+per external collaborator, `AllowedIPs` scoped only to the login node
+(never `0.0.0.0/0`) so it doesn't break the user's own network.
 
-## 5. Cómo iterar sin romper lo que ya usan tus investigadores
+## 5. How to iterate without breaking what your researchers are already using
 
-No es parte del código ni es obligatorio, pero es la recomendación más
-práctica que tenemos: correr **dos instancias** de gonzabot — una "dev"
-(puerto propio, para vos) donde probás cambios de código o de `context/`,
-y una "prod" (la que usan tus usuarios reales) que solo se actualiza
-después de validar el cambio en dev. `context/*.txt` se puede editar en
-caliente (efecto inmediato, sin reiniciar nada); cambios al *código* de
-`gonzabot` necesitan que cada usuario reabra su sesión para tomar el
-binario nuevo. Nosotros aprendimos esto de la mala manera: probando
-cambios de código directo contra la instancia real, un bug a mitad de
-prueba podía haberle afectado a alguien con un job real corriendo en ese
-momento.
+Not part of the code and not mandatory, but it's the most practical
+recommendation we have: run **two instances** of gonzabot — a "dev" one
+(its own port, for you) where you test code or `context/` changes, and a
+"prod" one (the one your real users hit) that only gets updated after the
+change is validated in dev. `context/*.txt` can be hot-edited (immediate
+effect, nothing to restart); changes to gonzabot's *code* require each
+user to reopen their session to pick up the new binary. We learned this
+the hard way: testing code changes directly against the real instance, a
+bug mid-test could have hit someone with a real job running at that
+moment.
 
-Si adoptás algo parecido: cuidado con que la instancia "dev" no termine
-con lógica o rutas hardcodeadas específicas de tu propia sesión de
-pruebas (nos pasó — nuestro dev tenía una detección de modo con una ruta
-a un directorio personal, que casi terminamos publicando en este mismo
-repo). Antes de copiar de dev a un release público, comparar los dos
-archivos y confirmar que las únicas diferencias sean cosas realmente
-específicas de desarrollo, no accidentes.
+If you adopt something similar: watch out for the "dev" instance ending
+up with logic or paths hardcoded to your own testing session (happened to
+us — our dev had a mode-detection check with a path to a personal
+directory, which we almost ended up publishing in this very repo). Before
+copying from dev to a public release, diff the two files and confirm the
+only differences are genuinely dev-specific, not accidents.
 
-## Cómo se relaciona con el "conocimiento" del cluster
+## How this relates to the cluster's "knowledge"
 
-Todo lo de arriba es infraestructura — se configura una vez. El
-`context/*.txt` en la raíz del repo es distinto: es el conocimiento
-específico del cluster (hardware, particiones, paquetes Spack, reglas
-aprendidas de bugs reales de usuarios) que gonzabot usa en cada
-conversación. Para adaptar gonzabot a otro cluster, la infraestructura de
-acá arriba se replica una vez; el `context/` se reescribe por completo con
-los datos reales del cluster propio.
+Everything above is infrastructure — configured once. The `context/*.txt`
+files at the repo root are different: that's the cluster-specific
+knowledge (hardware, partitions, Spack packages, rules learned from real
+user bugs) that gonzabot uses in every conversation. To adapt gonzabot to
+another cluster, the infrastructure above gets replicated once; `context/`
+gets rewritten from scratch with your own cluster's real data.

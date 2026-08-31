@@ -1,0 +1,115 @@
+[English](README.md) | **Español**
+
+# Tutorial: cómo armamos gonzabot en IFIMAR
+
+Esto no es un instalador — es la bitácora real de los pasos y scripts que
+usamos para levantar gonzabot en nuestro cluster, para que otro admin de
+HPC pueda replicar el criterio (no necesariamente cada comando literal,
+que va a depender de su propia infraestructura).
+
+Nota sobre rutas — dos reglas separadas, no las mezcles:
+
+1. **Nombre del mount, según el nodo.** El nodo de login (por donde entran
+   los usuarios) y los nodos de cómputo (CPU y GPU) montan el NFS como
+   `/mnt/cpu-data/` y `/mnt/gpu-data/`. Un nodo de administración aparte
+   (no es por donde entran los usuarios normales) monta el mismo NFS como
+   `/data/cpu/` y `/data/gpu/`. Por eso vas a ver ambos estilos en
+   distintos scripts de este repo: `gonzabot-watcher.sh` corre vía cron en
+   el nodo de administración (`/data/gpu/...`); `vllm-service.sbatch`
+   corre dentro de un job en un nodo de cómputo (`/mnt/gpu-data/...`).
+
+2. **Cuál de los dos (cpu-data / gpu-data) existe en cada nodo, aparte del
+   nombre.** Los nodos de cómputo GPU solo tienen montado `gpu-data` —
+   `cpu-data` no existe ahí. Los nodos de cómputo CPU es al revés: solo
+   `cpu-data`, no `gpu-data`. Solo el nodo de login tiene ambos montados
+   a la vez. Un `sbatch` a la partición GPU con un WorkDir en
+   `.../cpu-data/...` falla instantáneo (Slurm no puede hacer `chdir`),
+   y viceversa — antes de mandar un job, verificar que el path exista en
+   la partición de destino, no asumir que "es el mismo NFS" significa que
+   está todo visible desde todos lados.
+
+Adaptalo al esquema de mounts real de tu propio cluster — y si tenés más
+de dos categorías de nodo, no asumas que ninguno de estos dos patrones es
+binario.
+
+## 1. Servir el modelo con vLLM
+
+`download-model.sh` — bajamos el modelo desde HuggingFace con
+`huggingface_hub.snapshot_download` (acá con Llama 3.3 70B de ejemplo;
+nosotros terminamos usando Qwen2.5-72B-Instruct-AWQ en producción, ver
+`vllm-service.sbatch`).
+
+`vllm-service.sbatch` — el job de Slurm real que levanta el servicio.
+Dos ideas del script que vale la pena copiar tal cual:
+
+- **Vive en la partición `inference`** (no `gpu`), como un servicio de
+  larga duración (`--time=16:00:00`) en vez de un job de cómputo puntual.
+- **Watchdog de inactividad integrado**: un subproceso en background
+  (`while sleep 60; do ...`) chequea un archivo "heartbeat" — cada
+  request de gonzabot lo toca — y si pasan `IDLE_MINUTES` sin actividad,
+  se cancela el propio job (`scancel $SLURM_JOB_ID`). Así el servicio no
+  ocupa GPUs de cómputo cuando nadie lo está usando, sin necesitar un
+  daemon externo.
+
+## 2. Encendido bajo demanda
+
+El servicio arriba se cae solo por inactividad — pero alguien tiene que
+volver a prenderlo cuando un usuario lo necesita. Eso lo hace
+[`gonzabot-watcher.sh`](../gonzabot-watcher.sh) (raíz del repo): un cron
+liviano (corrido por un usuario normal, sin root) que revisa un flag file
+cada minuto y somete `vllm-service.sbatch` si hace falta.
+
+## 3. Resolución de hashes ambiguos en Spack
+
+`spack-load-wrapper.txt` — el problema y la solución real que encontramos
+cuando `spack load paquete` fallaba por tener múltiples builds instalados
+del mismo paquete (`Error: fftw matches multiple packages`). Wrapper que
+redefine `spack load` para resolver el hash preferido automáticamente.
+
+## 4. Notificaciones de Slurm por mail
+
+`slurm-mail-notifications.txt` — cómo arreglamos `--mail-user`/`--mail-type`
+cuando `sendmail` venía deshabilitado por defecto (`/bin/false`), con
+`ssmtp` como relay SMTP liviano (Gmail App Password o SMTP institucional).
+
+## Lo que NO está acá
+
+Dejamos afuera la configuración de VPN/firewall (WireGuard + OPNsense) que
+usamos para dar acceso a colaboradores externos — no por ser complicada,
+sino porque el documento real tiene la topología de red completa de
+nuestra institución (IPs públicas, reglas de firewall). El patrón general
+es simple igual: WireGuard corriendo directo en el firewall perimetral, un
+peer por colaborador externo, `AllowedIPs` acotado solo al nodo de login
+(nunca `0.0.0.0/0`) para no romper la red del usuario.
+
+## 5. Cómo iterar sin romper lo que ya usan tus investigadores
+
+No es parte del código ni es obligatorio, pero es la recomendación más
+práctica que tenemos: correr **dos instancias** de gonzabot — una "dev"
+(puerto propio, para vos) donde probás cambios de código o de `context/`,
+y una "prod" (la que usan tus usuarios reales) que solo se actualiza
+después de validar el cambio en dev. `context/*.txt` se puede editar en
+caliente (efecto inmediato, sin reiniciar nada); cambios al *código* de
+`gonzabot` necesitan que cada usuario reabra su sesión para tomar el
+binario nuevo. Nosotros aprendimos esto de la mala manera: probando
+cambios de código directo contra la instancia real, un bug a mitad de
+prueba podía haberle afectado a alguien con un job real corriendo en ese
+momento.
+
+Si adoptás algo parecido: cuidado con que la instancia "dev" no termine
+con lógica o rutas hardcodeadas específicas de tu propia sesión de
+pruebas (nos pasó — nuestro dev tenía una detección de modo con una ruta
+a un directorio personal, que casi terminamos publicando en este mismo
+repo). Antes de copiar de dev a un release público, comparar los dos
+archivos y confirmar que las únicas diferencias sean cosas realmente
+específicas de desarrollo, no accidentes.
+
+## Cómo se relaciona con el "conocimiento" del cluster
+
+Todo lo de arriba es infraestructura — se configura una vez. El
+`context/*.txt` en la raíz del repo es distinto: es el conocimiento
+específico del cluster (hardware, particiones, paquetes Spack, reglas
+aprendidas de bugs reales de usuarios) que gonzabot usa en cada
+conversación. Para adaptar gonzabot a otro cluster, la infraestructura de
+acá arriba se replica una vez; el `context/` se reescribe por completo con
+los datos reales del cluster propio.

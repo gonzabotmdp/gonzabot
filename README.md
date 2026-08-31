@@ -1,45 +1,46 @@
 # gonzabot
 
+**English** | [Español](README.es.md)
+
 ![license](https://img.shields.io/badge/license-MIT-blue) ![python](https://img.shields.io/badge/python-3%20stdlib%20only-green)
 
-Asistente de IA para usuarios de un cluster HPC (Slurm + Spack), pensado para
-encontrar errores de configuración, malos usos de recursos y pedidos
-exagerados de recursos en scripts `sbatch` **antes** de que el job corra y
-falle o desperdicie horas de cómputo.
+AI assistant for users of an HPC cluster (Slurm + Spack), built to catch
+configuration mistakes, resource misuse, and oversized resource requests in
+`sbatch` scripts **before** the job runs and fails or wastes compute hours.
 
-Corre sobre un modelo local vía [vLLM](https://github.com/vllm-project/vllm)
-— en producción con **GLM-4.5-Air** desde el 30/8/2026 (antes
-Qwen2.5-72B-Instruct-AWQ, ver sección "Comparación de modelos" más abajo
-para por qué migramos) — sin dependencias externas de Python más allá de
-la librería estándar.
+Runs on a local model via [vLLM](https://github.com/vllm-project/vllm) —
+in production with **GLM-4.5-Air** since 2026-08-30 (previously
+Qwen2.5-72B-Instruct-AWQ, see the "Model comparison" section below for why
+we migrated) — with no external Python dependencies beyond the standard
+library.
 
-Desarrollado y usado en producción en el cluster HPC del IFIMAR (CONICET /
+Developed and used in production on the HPC cluster at IFIMAR (CONICET /
 UNMDP, Argentina).
 
-## Motivación
+## Motivation
 
-En un cluster HPC compartido es común perder horas de cómputo por errores
-evitables: `--mem`/`--time` mal dimensionados, variables de entorno mal
-resueltas dentro de un script, paralelismo mal configurado (`--ntasks` que no
-matchea el paralelismo real del programa), rutas relativas que se rompen al
-moverse a un directorio de trabajo temporal, etc. gonzabot conversa con el
-usuario en lenguaje natural, entiende su script y su intención, y sugiere el
-`sbatch` corregido — citando la razón del cambio.
+On a shared HPC cluster it's common to lose compute hours to avoidable
+mistakes: `--mem`/`--time` misjudged, environment variables that resolve
+wrong inside a script, mis-configured parallelism (`--ntasks` that doesn't
+match the program's real parallelism), relative paths that break when
+moving to a temporary work directory, etc. gonzabot talks with the user in
+natural language, understands their script and intent, and suggests the
+corrected `sbatch` — citing the reason for each change.
 
-## Resultados medidos
+## Measured results
 
-Casos reales de usuarios del cluster, comparando tiempo de ejecución antes y
-después de aplicar la sugerencia de gonzabot (mismo nodo, mismos datos):
+Real cases from cluster users, comparing execution time before and after
+applying gonzabot's suggestion (same node, same data):
 
-- LAMMPS (barrido de parámetro secuencial → job array): **~2.7x** más rápido.
-- Quantum ESPRESSO/`ph.x` (fonones, `--ntasks` no escalado con `-nimage`):
-  validado real, subir `-nimage` sin escalar `--ntasks` en proporción llegó
-  a ser **44% más lento**, no más rápido (nimage 4 → 27.1 min, nimage 8,
-  mismo `--ntasks` → 39.2 min).
+- LAMMPS (sequential parameter sweep → job array): **~2.7x** faster.
+- Quantum ESPRESSO/`ph.x` (phonons, `--ntasks` not scaled with `-nimage`):
+  validated for real — scaling up `-nimage` without proportionally scaling
+  `--ntasks` ended up being **44% slower**, not faster (nimage 4 → 27.1
+  min, nimage 8 with the same `--ntasks` → 39.2 min).
 
-Ejemplo real — le pedimos a gonzabot en vivo (sesión nueva, sin editar la
-respuesta) cómo paralelizar un cálculo de fonones con `ph.x -nimage 4`.
-Esto es lo que generó, tal cual, el 29/8/2026:
+Real example — we asked gonzabot live (fresh session, response shown
+unedited) how to parallelize a phonon calculation with `ph.x -nimage 4`.
+This is exactly what it generated, on 2026-08-29:
 
 ```diff
  #SBATCH --nodes=1
@@ -51,108 +52,79 @@ Esto es lo que generó, tal cual, el 29/8/2026:
 +mpirun -np 64 --bind-to core --map-by core ph.x -nimage 4 -in input.in
 ```
 
-(la línea `-` es la forma naive de pedirlo — mismo `--ntasks` que sin
-`-nimage` — la `+` es la respuesta real de gonzabot: escala `--ntasks` a
-64 para que cada una de las 4 imágenes tenga sus propios 16 procesos MPI,
-en vez de repartir 16 procesos entre las 4 imágenes). Script completo real
-en [`tutorial/ph_x_fonones_real.sbatch`](tutorial/ph_x_fonones_real.sbatch).
+(the `-` line is the naive way to ask for it — same `--ntasks` as without
+`-nimage` — the `+` line is gonzabot's actual answer: it scales `--ntasks`
+to 64 so each of the 4 images gets its own 16 MPI processes, instead of
+splitting 16 processes across the 4 images). Full real script in
+[`tutorial/ph_x_fonones_real.sbatch`](tutorial/ph_x_fonones_real.sbatch).
 
-## Comparación de modelos
+## Model comparison
 
-Evaluamos si un modelo distinto resolvía mejor el problema clásico de
-"lost in the middle". Comparación sistemática entre Qwen2.5-72B-Instruct-AWQ
-(el que estaba en producción hasta el 30/8) y GLM-4.5-Air, misma
-infraestructura, mismas preguntas:
+We evaluated whether a different model handled the classic "lost in the
+middle" problem better. Systematic comparison between
+Qwen2.5-72B-Instruct-AWQ (in production until 2026-08-30) and GLM-4.5-Air,
+same infrastructure, same questions:
 
-- Calidad/atención a reglas: GLM-4.5-Air ganó en la mayoría de los casos
-  puntuales que probamos -- incluido un caso real donde diagnosticó
-  correctamente un job fallado (`/diagnose`) que Qwen reportó como "sin
-  errores" (falso negativo).
-- Velocidad: Qwen2.5-72B es ~30% más rápido generando, en nuestro
-  hardware (A100 80GB) -- el costo real de haber migrado.
-- Limitación conocida, todavía abierta en producción: el comando
-  `/branch` (genera 3 variantes de fix candidatas, las corre, compara
-  resultados) no funciona de forma confiable con GLM-4.5-Air -- el
-  modelo no siempre respeta el formato de diff estructurado que ese
-  comando exige. Con Qwen2.5-72B sí funcionaba.
+- Rule-following quality: GLM-4.5-Air won most of the individual cases we
+  tested — including a real case where it correctly diagnosed a failed
+  job (`/diagnose`) that Qwen reported as "no errors" (false negative).
+- Speed: Qwen2.5-72B is ~30% faster generating, on our hardware (A100
+  80GB) — the real cost of migrating.
+- Known limitation, still open in production: the `/branch` command
+  (generates 3 candidate fixes, runs them, compares results) doesn't work
+  reliably with GLM-4.5-Air — the model doesn't always respect the
+  structured diff format that command requires. It worked fine with
+  Qwen2.5-72B.
 
-Con la calidad como criterio principal, **GLM-4.5-Air pasó a producción
-el 30/8/2026**. El regression-testing posterior a la migración (probar
-en vivo, con la infraestructura real, los casos que ya andaban bien con
-Qwen) encontró y arregló 4 bugs nuevos específicos de GLM que no habían
-aparecido en la comparación sistemática previa -- GROMACS invocado sin
-`mpirun`, GPU pedida junto a un build de spack sin soporte CUDA, hash de
-spack real sin la `/` inicial -- y de paso destapó una contradicción real
-preexistente en la documentación de sitio (`context/spack.txt` decía dos
-cosas distintas sobre si GROMACS resuelve sin hash). Ninguno es un bug
-del LLM: todos viven en el post-procesador o en `context/`, ver
-"Arquitectura" más abajo.
+With quality as the main criterion, **GLM-4.5-Air went into production on
+2026-08-30**. The regression-testing that followed the migration (testing
+live, against real infrastructure, cases that already worked well with
+Qwen) found and fixed 4 new bugs specific to GLM that hadn't shown up in
+the earlier systematic comparison — GROMACS invoked without `mpirun`, a
+GPU requested alongside a Spack build with no CUDA support, a real Spack
+hash missing the leading `/` — and along the way uncovered a real
+pre-existing contradiction in the site documentation (`context/spack.txt`
+said two different things about whether GROMACS resolves without a hash).
+None of these are LLM bugs: they all live in the post-processor or in
+`context/`, see "Architecture" below.
 
-De paso, usar GLM-4.5-Air nos llevó a encontrar y reportar un bug real
-de vLLM -- el contenido del razonamiento (`<think>...</think>`) a veces se
-filtra sin separar hacia la respuesta visible en streaming sin tools, a
-contextos largos. Reporte y repro standalone:
+Along the way, using GLM-4.5-Air led us to find and report a real vLLM bug
+— reasoning content (`<think>...</think>`) sometimes leaks unseparated
+into the visible response during tool-free streaming, on long contexts.
+Report and standalone repro:
 [vllm-project/vllm#29763 (comment)](https://github.com/vllm-project/vllm/issues/29763#issuecomment-5470158016)
 
-## Arquitectura
+## Architecture
 
-- `gonzabot` — CLI interactivo en Python 3 puro (stdlib únicamente:
-  `sqlite3` para persistir sesiones, `urllib` para hablar con el endpoint
-  OpenAI-compatible de vLLM). Sin `pip install` necesario.
-- `context/` — archivos de texto plano que se inyectan como contexto del
-  cluster. Divididos por segmento temático (reglas transversales siempre
-  cargadas + un archivo por familia de software -- dinámica molecular, DFT,
-  física de partículas, GPU/CUDA, genómica, Python, etc.), cada uno con su
-  propio trigger de palabras clave -- así una pregunta sobre una
-  herramienta puntual no arrastra contexto irrelevante de las demás.
-- Post-procesamiento determinístico (no depende del LLM) sobre el `sbatch`
-  generado: detecta y corrige patrones frecuentes (heredocs mal citados,
-  `cd $WORKDIR` inyectado sobre rutas relativas que ya funcionaban, `\$`
-  espurios fuera de heredoc, `module load` con nombre de paquete ambiguo en
-  Spack, separadores decorativos de comentario mal interpretados como
-  alucinación de hash, etc.), con batería de tests (`gonzabot --selftest`).
-- `gonzabot-watcher.sh` — cron liviano que enciende el servicio vLLM bajo
-  demanda (por flag file) si no está corriendo. El apagado por inactividad
-  lo hace el propio job de vLLM (ver `tutorial/vllm-service.sbatch`), no
-  el watcher — así entre los dos no ocupan GPUs de cómputo cuando nadie
-  lo está usando.
+- `gonzabot` — interactive CLI in pure Python 3 (stdlib only: `sqlite3` to
+  persist sessions, `urllib` to talk to vLLM's OpenAI-compatible
+  endpoint). No `pip install` required.
+- `context/` — plain-text files injected as cluster context. Split into
+  topical segments (cross-cutting rules always loaded, plus one file per
+  software family — molecular dynamics, DFT, particle physics, GPU/CUDA,
+  genomics, Python, etc.), each with its own keyword trigger — so a
+  question about one specific tool doesn't drag in irrelevant context
+  from the others.
+- Deterministic post-processing (doesn't depend on the LLM) on the
+  generated `sbatch`: detects and fixes frequent patterns (badly-quoted
+  heredocs, `cd $WORKDIR` injected over relative paths that already
+  worked, stray `\$` outside heredocs, `module load` with an ambiguous
+  Spack package name, decorative comment separators misread as hash
+  hallucination, etc.), with a test suite (`gonzabot --selftest`).
+- `gonzabot-watcher.sh` — a lightweight cron that starts the vLLM service
+  on demand (via a flag file) if it isn't running. Shutdown on idle is
+  handled by the vLLM job itself (see
+  `tutorial/vllm-service.sbatch`), not the watcher — so between the two,
+  no GPUs sit idle-but-reserved when nobody's using the service.
 
-## Uso
-
-```
-./gonzabot                 # conversación normal
-./gonzabot --new           # fuerza sesión nueva (ignora historial previo)
-./gonzabot --selftest      # corre la batería de tests del post-procesador
-```
-
-Dentro de una sesión: `/load <archivo>` para pasarle un script existente,
-`/edit` para pedir una revisión puntual, `/diagnose` para que lea el log de
-un job fallido y explique la causa, `/audit` para revisar todos los jobs
-activos del usuario, `/save` / `/saveall` para persistir el `sbatch` sugerido.
-
-## Configuración
-
-`context/core.txt` (siempre cargado) más los segmentos por familia de
-software (`context/md-sim.txt`, `context/dft-qe.txt`, `context/python.txt`,
-etc.) son los que se incluyen acá como ejemplo real (sitio IFIMAR).
-Editables en texto plano, sin tocar código, para adaptar a otro cluster:
-hardware, particiones Slurm, paquetes Spack disponibles y reglas aprendidas
-de casos reales.
-
-El endpoint del modelo (host/puerto de vLLM) se configura al principio de
-`gonzabot`.
-
-## Case study: an AI "researcher" using gonzabot end-to-end (30/8/2026)
-
-*(This section is in English for international context — the rest of the
-README, and the actual gonzabot session logs, are in Spanish, since that's
-the real language spoken at IFIMAR.)*
+## Case study: an AI "researcher" using gonzabot end-to-end (2026-08-30)
 
 To stress-test gonzabot the way a real user would — not synthetic
 benchmark prompts — we ran a full session where an AI agent played the
 role of an IFIMAR researcher and used **only** gonzabot (never a manual
 edit) from idea to deliverable, in a single terminal, against the live
-production instance.
+production instance. (The actual session transcripts are in Spanish,
+since that's the real language spoken at IFIMAR.)
 
 **Part 1 — a real research idea, generated, submitted, debugged, and
 written up.** The "researcher" proposed studying the thermal behavior of
@@ -192,7 +164,7 @@ Buckingham + PPPM, 3.01M timesteps, ~1h15m wall time on 32 CPU cores):
 | Experimental (Wang et al.) | 2.453 | — |
 | Wang et al. 2018 (as published) | 2.467 | **incorrect** |
 | Coudert 2023 (his reproduction) | 2.520 | correct |
-| **This run (IFIMAR, 30/8/2026)** | **2.536** | correct |
+| **This run (IFIMAR, 2026-08-30)** | **2.536** | correct |
 
 We reproduced Coudert's finding independently: correcting the masses
 moves the density *away* from experiment (Δ=0.082) rather than toward it,
@@ -203,13 +175,38 @@ is a single run of a single composition (50B out of the paper's nine) —
 a demo of gonzabot's real-world capability, not a statistically rigorous
 independent validation (that would need multiple seeds).
 
-## Tutorial: cómo lo armamos
+## Usage
 
-[`tutorial/`](tutorial/) tiene la bitácora real y los scripts que usamos
-para levantar todo esto en IFIMAR: servir el modelo con vLLM (con
-apagado automático por inactividad), encendido bajo demanda, el wrapper
-de Spack para hashes ambiguos, y notificaciones de Slurm por mail.
+```
+./gonzabot                 # normal conversation
+./gonzabot --new           # force a new session (ignore previous history)
+./gonzabot --selftest      # run the post-processor's test suite
+```
 
-## Licencia
+Inside a session: `/load <file>` to hand it an existing script, `/edit`
+for a specific revision request, `/diagnose` to have it read a failed
+job's log and explain the cause, `/audit` to review all of a user's
+active jobs, `/save` / `/saveall` to persist the suggested `sbatch`.
 
-MIT — ver `LICENSE`.
+## Configuration
+
+`context/core.txt` (always loaded) plus the per-software-family segments
+(`context/md-sim.txt`, `context/dft-qe.txt`, `context/python.txt`, etc.)
+are included here as a real example (IFIMAR site). Editable in plain
+text, without touching code, to adapt to another cluster: hardware,
+Slurm partitions, available Spack packages, and rules learned from real
+cases.
+
+The model endpoint (vLLM host/port) is configured at the top of
+`gonzabot`.
+
+## Tutorial: how we set it up
+
+[`tutorial/`](tutorial/) has the real log and scripts we used to stand
+all of this up at IFIMAR: serving the model with vLLM (with automatic
+shutdown on idle), on-demand startup, the Spack wrapper for ambiguous
+hashes, and Slurm mail notifications.
+
+## License
+
+MIT — see `LICENSE`.
