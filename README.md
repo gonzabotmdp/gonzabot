@@ -216,8 +216,14 @@ needed:
 ```
 export GONZABOT_URL="http://your-vllm-host:8000/v1"
 export GONZABOT_MODEL="your-served-model-name"
+export GONZABOT_CONTEXT_DIR="/path/to/your/context"  # defaults to ./context
 ./gonzabot
 ```
+
+`GONZABOT_CONTEXT_DIR` is what lets us run separate dev/prod instances
+against the same code with different `context/` directories (see
+[`tutorial/`](tutorial/), section 5) — useful if you want to test
+context changes without touching what your real users hit.
 
 ## Tutorial: how we set it up
 

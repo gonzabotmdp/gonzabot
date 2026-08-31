@@ -160,8 +160,14 @@ producción), sin necesidad de tocar código:
 ```
 export GONZABOT_URL="http://tu-host-vllm:8000/v1"
 export GONZABOT_MODEL="nombre-del-modelo-servido"
+export GONZABOT_CONTEXT_DIR="/ruta/a/tu/context"  # default: ./context
 ./gonzabot
 ```
+
+`GONZABOT_CONTEXT_DIR` es lo que nos permite correr instancias dev/prod
+separadas contra el mismo código con distintos directorios `context/`
+(ver [`tutorial/`](tutorial/), sección 5) — útil para probar cambios de
+contexto sin tocar lo que usan los usuarios reales.
 
 ## Caso de éxito: un "investigador" IA usando gonzabot de punta a punta (30/8/2026)
 
