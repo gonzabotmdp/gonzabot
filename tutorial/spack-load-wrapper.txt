@@ -1,0 +1,81 @@
+SPACK LOAD WRAPPER — resolución automática de hashes ambiguos
+=============================================================
+Fecha: 2026-07-11
+Responsable: Gonzalo + softadm
+
+PROBLEMA
+--------
+`spack load PKG` falla cuando hay múltiples builds del mismo paquete instalados.
+Ejemplo: fftw tiene 3 builds (fftw@2.1.5, fftw@3.3.10 x2), spack no sabe cuál elegir:
+
+  ==> Error: fftw matches multiple packages.
+
+Esto afecta a cualquier usuario que haga `spack load fftw` (u otro paquete con
+múltiples versiones) sin especificar hash. Los sbatch que usaban PATRÓN A
+(eval $(spack load --sh PKG)) fallaban silenciosamente con || true.
+
+También afectaba la concretización de entornos spack: conflicto entre
+py-setuptools requerido por llvm y r. Solución paralela: `unify: false`
+en la configuración de spack (aplicado por softadm).
+
+SOLUCIÓN
+--------
+Wrapper en /apps/local/spack/site/spack-load-wrapper.sh (creado por softadm).
+Redefine `spack load` para resolver automáticamente el hash preferido cuando
+hay ambigüedad. El archivo está en NFS → persiste en todos los nodos.
+
+La línea de activación:
+
+  [ -r /apps/local/spack/site/spack-load-wrapper.sh ] && \
+      . /apps/local/spack/site/spack-load-wrapper.sh
+
+Se agregó a los siguientes archivos el 2026-07-11:
+
+1. /usr/share/spack/setup-env.sh          (ql-front, sesión actual — NO persiste en reboot)
+2. /srv/ql-common/skel/zsh/zshrc          (skel para usuarios nuevos, via ql-head)
+3. /srv/ql-common/skel/bash/bashrc        (ídem bash)
+4. /data/home/*/.zshrc y .bashrc          (usuarios existentes, via ql-head /data/home)
+
+PERSISTENCIA EN QL-FRONT
+------------------------
+ql-front es diskless (squashfs). El cambio en /usr/share/spack/setup-env.sh
+NO sobrevive reboot a menos que esté en qlustar-rc.boot.
+
+Estado al 2026-07-11: APLICADO en /srv/ql-common/rc.boot (via ql-head).
+En cada boot se re-aplica el append a /usr/share/spack/setup-env.sh con guard
+de idempotencia (grep -q antes de escribir).
+
+BACKUP
+------
+Backup de todos los archivos modificados en ql-front:
+  /root/spack-wrapper-backup-20260711-085139/
+
+Archivos respaldados:
+  - /usr/share/spack/setup-env.sh
+  - /etc/qlustar/common/skel/zsh/zshrc   (via NFS, estado pre-cambio)
+  - /etc/qlustar/common/skel/bash/bashrc (ídem)
+  - dotfiles de usuarios que no tenían el wrapper
+
+WORKAROUND PREVIO (ya no necesario para usuarios)
+--------------------------------------------------
+Antes del wrapper, la única forma de evitar la ambigüedad era usar hash explícito:
+
+  FFTW_DIR=$($SPACK --no-locks location -i /7e22jrv5)   # PATRÓN B, un nodo
+  eval $(spack load --sh fftw/7e22jrv5)                  # hash en spack load
+
+Los sbatch en producción que ya usan hash explícito siguen funcionando igual.
+
+VERIFICACIÓN
+------------
+Para confirmar que el wrapper funciona en una sesión nueva:
+
+  source /usr/share/spack/setup-env.sh
+  spack load --sh fftw 2>&1 | head -3
+  # Debe mostrar líneas "export ..." sin error de ambigüedad
+
+CONTEXTO GONZABOT
+-----------------
+core.txt (prod y dev) actualizado el mismo día con:
+  - Advertencia: NUNCA "source $SPACK/share/spack/setup-env.sh" ($SPACK es el binario)
+  - Corrección: spack location -i SIN --no-locks falla; CON --no-locks funciona en sbatch
+  - FFTW agregado a specs: fftw@3.3.10 (/7e22jrv5 gcc-14.2.0)

@@ -1,0 +1,38 @@
+# MANTENIMIENTO: simulación/análisis de física de partículas (Geant4, ROOT,
+# Potfit) — comunidad de usuarios solapada, sin relación de código entre sí.
+# Reglas transversales viven en core.txt. Mecánica de spack en spack.txt.
+# Editar SIEMPRE particle-physics-dev.txt → testear → \cp a shared/.../particle-physics.txt
+
+Geant4 11.3.2 (simulación de física de partículas, spack-2026b): spack load geant4 — resuelve solo, sin hash. Los 14 datasets de física (G4LEDATA, G4NEUTRONHPDATA, etc.) quedan seteados automáticamente, apuntando a directorios reales — NO hace falta bajarlos a mano ni compilar Geant4 desde cero. Si piden version más nueva (ej. 11.4.2): avisar que la instalada es 11.3.2 antes de sugerir compilar a mano.
+  ⚠ RUTA REAL de los ejemplos (ej. B1) — NO INVENTAR "/mnt/cpu-data/shared/geant4_examples/" ni ningún path separado, ese directorio NO EXISTE: los ejemplos vienen empaquetados DENTRO de la propia instalación. Después de "spack load geant4", el path real es $(geant4-config --prefix)/share/Geant4/examples/basic/B1 (y basic/B2, B3, B4, B5 para otros ejemplos oficiales). Compilar con: mkdir build && cd build && cmake -DGeant4_DIR=$(geant4-config --prefix)/lib/Geant4-11.3.2 $(geant4-config --prefix)/share/Geant4/examples/basic/B1 && make -j4 && ./exampleB1 run1.mac (run1.mac ya viene en el directorio del ejemplo, no hace falta crearlo).
+
+ROOT 6.36.04 (CERN ROOT, análisis de datos de física de partículas):
+  ROOT_DIR=$($SPACK location -i /qiwxnch 2>/dev/null)  # hash actualizado 22/8, el viejo /3xri6vd ya no existe
+  source ${ROOT_DIR}/bin/thisroot.sh  # OBLIGATORIO — configura ROOTSYS, PATH, LD_LIBRARY_PATH
+  root -b -q script.C                 # -b headless (sin X11); -q sale al terminar
+  root -b -q 'script.C("arg1")'       # con argumentos
+  Macros: .x script.C (interactivo); compilado: root -b -q 'script.C+()' (más rápido).
+  Batch: crear sbatch con source thisroot.sh + root -b -q script.C. Partición cpu.
+
+Potfit (ajuste de potenciales interatómicos por force-matching, github.com/potfit/potfit — contribución propia de este proyecto, PR #121 mergeado): 2 variantes instaladas, NO intercambiables.
+  ⚠ CRÍTICO carga: NUNCA "spack env activate rebuild-full" con potfit — el hash NO resuelve
+    adentro del environment (gotcha real, mismo patrón que lammps standalone). Cargar así:
+    export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config
+    source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
+    eval $(spack load --sh potfit)   # "spack load potfit" bare YA RESUELVE (23/8, wrapper) → apot+mpi /xrahw33
+    eval $(spack load --sh /xvyetef) # para model=kim, SIEMPRE hash explícito (bare da apot, no kim)
+  model=apot +mpi (hash /xrahw33): binario potfit_apot_pair_lapack_mpi, openmpi /2cgnkug.
+    mpirun -np $SLURM_NTASKS potfit_apot_pair_lapack_mpi archivo_parametros
+    Analítico (parámetros de una forma funcional fija), paraleliza bien con MPI.
+    CRÍTICO: NUNCA --ntasks=1 (potfit rechaza "not supported" con 1 solo proceso MPI) NI
+      --ntasks > cantidad de configuraciones en el archivo config (rechaza con error claro
+      "more MPI processes than configurations"). Validado real 23/8: --ntasks=8 con 1 config
+      falla, --ntasks=2 con 2 configs corre bien (optimización Powell real, EXIT_CODE 0).
+  model=kim ~mpi (hash /xvyetef): binario potfit_kim_lapack. SIN mpirun (serial):
+    potfit_kim_lapack archivo_parametros
+    Usa modelos de OpenKIM (openkim.org). Validado real 22-23/8, job real EXIT_CODE 0 (128 átomos Ar, KIM ex_model_Ar_P_LJ).
+  "archivo_parametros" (nombre libre, ej. param_file) es un archivo de texto que a su vez
+    referencia los otros 3: "config <ref_config>" (estructuras+fuerzas de entrenamiento),
+    "startpot <potencial_inicial.pot>", "endpot <potencial_optimizado.pot>". NINGUNO viene con
+    el paquete — el usuario trae su propio caso (potfit no empaqueta ejemplos como Geant4/LAMMPS).
+    Caso real de referencia (validado, sirve de plantilla): /mnt/cpu-data/gonzalo/potfit_test/. Partición cpu.

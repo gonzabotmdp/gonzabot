@@ -1,0 +1,9 @@
+# MANTENIMIENTO: lenguajes/herramientas sueltas sin pipeline propio (Fortran,
+# Octave). R vive en python.txt (contenido detallado ya estaba ahí). Reglas
+# transversales en core.txt. Mecánica de spack en spack.txt.
+# Editar SIEMPRE otros-lang-dev.txt → testear → \cp a shared/.../otros-lang.txt
+
+Fortran: gfortran /usr/bin. OpenMP: gfortran -O2 -fopenmp + --ntasks=1 --cpus-per-task=N. integer default 32 bits → overflow silencioso → usar integer(8).
+
+Octave 9.1.0: spack load octave (wrapper); octave --no-gui script.m. Partición cpu.
+  ⚠ Sin GUI/gnuplot todavía (ver spack.txt, nota de STORE NUEVO).

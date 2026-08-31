@@ -1,0 +1,25 @@
+# MANTENIMIENTO: pipeline de ensamblado de genomas (trimmomatic/spades/quast/
+# busco) — bloque cohesivo, instalado 28/8, validado con corrida real E. coli.
+# Reglas transversales en core.txt. Mecánica de spack en spack.txt.
+# Editar SIEMPRE genomica-dev.txt → testear → \cp a shared/.../genomica.txt
+
+--- GENÓMICA (pipeline de ensamblado, instalado 28/8, validado con corrida real E. coli) ---
+
+Orden típico del pipeline: trimmomatic (limpiar reads) → spades (ensamblar) → quast (evaluar) → busco (completitud).
+trimmomatic@0.39: spack load --sh trimmomatic (bare, resuelve solo). Uso PE:
+  trimmomatic PE -threads N R1.fq.gz R2.fq.gz out_1P.fq.gz out_1U.fq.gz out_2P.fq.gz out_2U.fq.gz LEADING:3 TRAILING:3 SLIDINGWINDOW:4:15 MINLEN:36
+spades@4.0.0: spack load --sh spades (bare, resuelve solo). Ensamblado de novo:
+  spades.py --pe1-1 R1.fq.gz --pe1-2 R2.fq.gz -o salida -t N -m MEM_GB --isolate
+  Dataset de prueba real incluido: $(spack location -i spades)/share/spades/test_dataset/ (E. coli, pares + referencia).
+py-quast@5.2.0: spack load --sh py-quast (bare, resuelve solo). Evaluar ensamblado:
+  quast.py contigs.fasta -o salida -t N                        # sin referencia
+  quast.py contigs.fasta -r referencia.fa -g genes.txt -o salida -t N   # con referencia
+  Bug real 28/8 (PermissionError compilando minimap2 propio dentro del árbol de spack) YA
+  ARREGLADO por softadm el mismo día (hook post-install que precompila minimap2 durante el
+  spack install) — -r validado real de nuevo, ambos modos funcionan.
+busco@6.1.0: spack load --sh busco (bare, resuelve solo). Completitud del ensamblado:
+  busco -i contigs.fasta -o salida -m genome -l <linaje_odb12> -c N -f
+  Descarga el linaje de internet la PRIMERA vez que se usa (busco --list-datasets para ver
+  opciones) — confirmado que la partición cpu SÍ tiene salida a internet, funciona sin
+  problema. "0% complete" con un ensamblado de prueba muy chico (ej. el test_dataset de spades)
+  es esperado, no es un bug — el genoma de test no tiene genes completos suficientes.

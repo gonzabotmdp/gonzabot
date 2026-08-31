@@ -1,0 +1,40 @@
+# MANTENIMIENTO: CUDA propio (nvcc/NVHPC) y Julia con CUDA.jl — todo lo que
+# toca CUDA_DIR/nvcc directo. Reglas transversales viven en core.txt. Mecánica
+# de spack en spack.txt.
+# Editar SIEMPRE gpu-custom-dev.txt → testear → \cp a shared/.../gpu-custom.txt
+
+--- CUDA/GPU CUSTOM ---
+
+SPACK=/apps/local/spack/spack-2026b/spack/bin/spack
+CUDA_DIR=$($SPACK location -i /okkjtu2 2>/dev/null)
+export PATH=$CUDA_DIR/bin:$PATH; export LD_LIBRARY_PATH=$CUDA_DIR/lib64:$LD_LIBRARY_PATH
+nvcc --expt-extended-lambda -lcufft -std=c++17 -arch=sm_80
+CUDA con nvcc: hash /okkjtu2 (12.6.2, canónica A100, spack-2026b — actualizado 22/8, el hash viejo /yziqg5b del store legacy ya no existe). Usar el hash explícito en compilación.
+CRÍTICO -arch=sm_80 (o -gencode arch=compute_80,code=sm_80) en TODO nvcc: sin el flag, COMPILA SIN ERROR pero el kernel FALLA AL LANZARSE en la A100 ("the provided PTX was compiled with an unsupported toolchain").
+CRÍTICO jobs paralelos compilando: compilar en dir aislado por job (TMP=/tmp/build_${SLURM_JOB_ID}; cp fuentes $TMP; cd $TMP; make)
+gres correcto A100: --gres=gpu:1 (shorthand) o --gres=gpu:nvidia-a100-80gb-pcie:N
+CRÍTICO rutas NFS en sbatch GPU: nodos GPU NO montan /mnt/cpu-data/. Sí tienen /mnt/gpu-data/ y /data/home/ (visible desde todos los nodos). WORKDIR=/mnt/gpu-data/$USER/nombre_$SLURM_JOB_ID en el script body (NUNCA #SBATCH --chdir). --output/--error a /data/home/%u/ funciona correctamente en GPU.
+
+NVHPC 26.5 (actualizado 22/8, hash /qpe3nuq — la 24.9 vieja ya no existe): NVHPC_DIR=$($SPACK location -i /qpe3nuq 2>/dev/null); nvc/nvc++/nvfortran; OpenACC: nvc -acc -gpu=cc80; CUDA: nvcc -arch=sm_80
+
+CUDA/C/Fortran, proyecto MULTI-ARCHIVO (codigo.cu + compile.sbatch + run.sbatch + submit.sh), no sbatch gigante. Nombrar cada bloque en el texto previo ("compile.sbatch:") — se guardan con /saveall. Cambio puntual → modificar SOLO ese archivo, NO regenerar el resto.
+  compile y run COMPARTEN dir fijo: DIR=/mnt/gpu-data/$USER/proyecto (sin $SLURM_JOB_ID — deben coincidir; gpu NO ve cpu-data). Ambos --partition=gpu.
+  Dependencia SOLO en submit.sh: JID=$(sbatch --parsable compile.sbatch); sbatch --dependency=afterok:$JID run.sbatch. NUNCA #SBATCH --dependency en el .sbatch.
+
+CUDA kernels numéricos: verificar estabilidad. Ecuaciones de onda (SWE, acústica): Leapfrog (NO Forward Euler — inestable para todo k). CFL: c*dt/dx < 1/sqrt(dims). Forward Euler → NaN o ruido exponencial en 100-1000 pasos.
+
+NCCL: NO INSTALADO (sacado 22/8). Si un usuario pide multi-GPU con NCCL, avisar que no está disponible — alternativa: MPI.jl (Julia) o comunicación manual entre procesos.
+
+--- JULIA ---
+
+CPU (partition=cpu) Y GPU (partition=gpu): mismo binario oficial para ambas — JULIA_BIN=/apps/local/spack/opt/julia/bin/julia.
+GPU (partition=gpu) CON CUDA: incluye su propia LLVM parcheada — LLVM_JL NO existe/NO hace falta.
+  CUDA_DIR=$($SPACK location -i /okkjtu2 2>/dev/null); export PATH=$CUDA_DIR/bin:$PATH; export LD_LIBRARY_PATH=$CUDA_DIR/lib64:$LD_LIBRARY_PATH
+  CRÍTICO — requisito de una sola vez por usuario: si $HOME/.julia/environments/v1.11/LocalPreferences.toml NO tiene "[CUDA_Runtime_jll]\nlocal = true", CUDA.jl intenta bajar el runtime de internet y el nodo GPU NO tiene salida a internet → el job se CUELGA EN SILENCIO (sin error, sin output) hasta agotar el time limit. Incluir siempre en el sbatch, antes de correr Julia:
+    mkdir -p $HOME/.julia/environments/v1.11
+    grep -q "CUDA_Runtime_jll" $HOME/.julia/environments/v1.11/LocalPreferences.toml 2>/dev/null || printf '[CUDA_Runtime_jll]\nlocal = true\n' >> $HOME/.julia/environments/v1.11/LocalPreferences.toml
+  Julia SIN CUDA en nodo GPU (CPU-only dentro de un job GPU) si hace falta: mismo patrón pero sin CUDA_DIR ni el bloque LocalPreferences.
+  ${JULIA_BIN} --threads=12 script.jl
+  @cuda: SIEMPRE función separada, NO begin...end inline. Alternativa simple: c = a .+ b; CUDA.synchronize()
+  Multi-GPU: MPI.jl + CUDA.device!(rank % 4)
+  Julia: script .jl con heredoc en $WORKDIR. NO $JULIA_BIN -e '...' (comillas anidadas).
