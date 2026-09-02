@@ -993,11 +993,60 @@ _BASE_PROMPT = (
 _CTX: dict[str, str] = {}  # nombre de _SEGMENTS -> contenido del archivo
 _CTX_DYNAMIC: str = ""  # squeue/sinfo — capturado una vez al inicio de sesión
 
+# Bug real 2/9: el modelo NO puede correr squeue/sinfo a mitad de su propia
+# respuesta (el auto-run de comandos solo dispara con input literal del
+# USUARIO) — cuando core.txt le pedía "corré squeue y sinfo directo", el
+# modelo terminaba escribiéndolos como sugerencia para que el usuario los
+# corra él, en vez de tener el dato real. Fix real: si el mensaje pinta como
+# pregunta de "me conviene más/menos recursos", refrescar squeue/sinfo acá
+# en código (no depender de que el LLM invente cómo obtenerlo) e inyectarlo
+# como bloque aparte, más fresco que el INFO EN VIVO de inicio de sesión.
+_RE_QUEUE_OPT = re.compile(
+    r'conviene\b.*(recurs|core|nodo|node|cpu|walltime|tiempo)|'
+    r'(recurs|core|nodo|node)\b.*conviene|'
+    r'(subir|bajar|aumentar|reducir|escalar)\b.*(--?ntasks|--?nodes|--?cpus|core|nodo)|'
+    r'como est(a|á) la cola|estado de la cola|cola.*(libre|ocupad|congestion)|'
+    r'hay recursos? (libre|disponible)|nodos? (libre|idle|disponible)',
+    re.IGNORECASE
+)
+
+
+def _fresh_queue_snapshot() -> str:
+    """Squeue/sinfo recién consultados (no el de INFO EN VIVO, que puede ser
+    de hace rato) — liviano a propósito, solo para la regla de optimización
+    según estado real de la cola (ver core.txt)."""
+    parts = []
+    try:
+        r = subprocess.run(
+            ["squeue", "-o", "%i %P %j %u %T %.10M %D %R", "--noheader"],
+            capture_output=True, text=True, timeout=8)
+        out = r.stdout.strip()
+        if len(out) > 1500:
+            out = out[:1500] + "... [truncado]"
+        parts.append(f"[squeue cluster-wide, recién consultado]\n{out or '(vacío, sin jobs en cola)'}")
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["sinfo", "-o", "%P %a %D %t", "--noheader"],
+                            capture_output=True, text=True, timeout=8)
+        out = r.stdout.strip()
+        if len(out) > 500:
+            out = out[:500] + "... [truncado]"
+        parts.append(f"[sinfo (particion/nodos/estado), recién consultado]\n{out}")
+    except Exception:
+        pass
+    if not parts:
+        return ""
+    return ("\n\n--- ESTADO ACTUAL DE LA COLA (recién consultado, no esperes "
+            "más info al usuario, ya la tenés acá) ---\n" + "\n\n".join(parts)
+            + "\n--- FIN ESTADO ACTUAL DE LA COLA ---")
+
+
 _RE_MDSIM = re.compile(r'lammps|gromacs|amber(?!bar)', re.IGNORECASE)
 _RE_DFTQE = re.compile(
     r'espresso|pw\.x|ph\.x|abinit|siesta|elk\b|wannier90', re.IGNORECASE)
 _RE_PARTICLE = re.compile(r'geant4?|cern|potfit', re.IGNORECASE)
-_RE_GPUCUSTOM = re.compile(r'cuda|julia|nvhpc|nccl', re.IGNORECASE)
+_RE_GPUCUSTOM = re.compile(r'cuda|julia|nvhpc|nccl|nvcc', re.IGNORECASE)
 _RE_GENOMICA = re.compile(
     r'trimmomatic|spades|quast|busco|gen[oó]mic|ensambl.*genoma', re.IGNORECASE)
 _RE_CASA = re.compile(
@@ -1008,7 +1057,10 @@ _RE_PYTHON = re.compile(
     r'jupyter|geopandas|spglib|statsmodels|dask|xarray|pymatgen|phonopy|'
     r'py-|\.py\b|tidyverse|ggplot|rscript|\br\b|apptainer|singularity|'
     r'gsl\b|pycharm|gnuplot|paraview|ovito|adios|oneapi|intel.*compil|icx\b|ifx\b|'
-    r'grace\b|xmgrace|tensorflow',
+    r'grace\b|xmgrace|tensorflow|'
+    # bug real 30/8: "pdf con latex" no cargaba python.txt (única sección con la
+    # nota "TEXLIVE ROTO desde el 1/8") — el modelo alucinaba un pdflatex que falla.
+    r'\blatex|pdflatex|texlive|\.tex\b',
     re.IGNORECASE
 )
 # spack.txt: mecánica de activación/desambiguación de spack, relevante para
@@ -1018,7 +1070,7 @@ _RE_PYTHON = re.compile(
 # Incluye \bmpi\b y mpicc (fix 29/8 que nunca se había sincronizado a prod).
 _RE_SPACK = re.compile(
     r'lammps|gromacs|amber(?!bar)|espresso|pw\.x|ph\.x|abinit|siesta|elk\b|'
-    r'wannier90|geant4?|cern|potfit|cuda|julia|nvhpc|nccl|fortran|\boctave\b|'
+    r'wannier90|geant4?|cern|potfit|cuda|nvcc|julia|nvhpc|nccl|fortran|\boctave\b|'
     r'\bmpi\b|mpirun|mpiexec|mpicc|cp2k|openfoam|vasp|namd|plumed|valgrind|'
     r'\bcasa\b|casaviewer|casalith|mpicasa|\btclean\b|\bflagdata\b|'
     r'trimmomatic|spades|quast|busco|gen[oó]mic|spack',
@@ -1101,6 +1153,8 @@ def _system_prompt_for(user_message: str = "", history: str = "") -> str:
     pero las reglas del cluster siguen haciendo falta (bug reparado 13 jul 2026)."""
     probe = user_message + "\n" + history
     ctx = _ctx_for_probe(probe, include_python=True) + _CTX_DYNAMIC
+    if _RE_QUEUE_OPT.search(user_message):
+        ctx += _fresh_queue_snapshot()
     return _BASE_PROMPT + ctx
 
 
@@ -1340,7 +1394,7 @@ def _fix_sbatch(text: str) -> str:
         if _re.search(r'^\s*(?:source|\.)\s+(?!["\']?[/$])\S', block, _re.M):
             return block
         # El nombre puede tener una variable a mitad (ej. "-in script_k${k}.lmp", caso real
-        # gchoque 29/8: un loop genera N archivos .lmp con el valor de un parámetro en el
+        # usuario4 29/8: un loop genera N archivos .lmp con el valor de un parámetro en el
         # nombre) — [\w${}.-]+ cubre eso además del nombre literal simple.
         if _re.search(r'-in\s+(?!["\']?[/$])[\w${}.-]+\.(?:lmp|lammps|in)\b', block):
             return block
@@ -1382,7 +1436,7 @@ def _fix_sbatch(text: str) -> str:
         Solo para extensiones de código; .sh/.conf/etc. pueden querer expansión
         intencional ($SLURM_JOB_ID en un script generado).
 
-        EXCEPCIÓN (bug real 28/8, caso gchoque): si el CUERPO del heredoc referencia
+        EXCEPCIÓN (bug real 28/8, caso usuario4): si el CUERPO del heredoc referencia
         mayormente variables bash asignadas antes en el mismo bloque (ej. un loop
         que genera N archivos .lmp, uno por valor de parámetro), es un TEMPLATE
         real que necesita expansión — quotearlo deja literales "${N}" sin resolver
@@ -1519,6 +1573,20 @@ def _fix_sbatch(text: str) -> str:
                 warns.append(f"'location -i {tok}' sin '/' — es un hash de spack, sin la "
                              f"barra spack lo interpreta como nombre de paquete y falla: "
                              f"usar '/{tok}'")
+        # Bug real 30/8 (confirmado en un nodo de cómputo real): "spack env activate
+        # .../rebuild-full" ESTRECHA la visibilidad de paquetes a los miembros de ESE
+        # environment — un hash real y válido, pero de un paquete fuera del environment,
+        # falla con "matches no installed packages" aunque nunca estuvo roto. Reproducido
+        # con LAMMPS (/3xvrevx): sin env activate exit 0, con env activate falla.
+        if _re.search(r'\bspack\s+env\s+activate\b', block):
+            _hash_like = set(_re.findall(r'/([0-9a-z]{6,32})\b', block))
+            if any(any(h.startswith(p) or p.startswith(h) for p in _hash_prefixes)
+                   for h in _hash_like):
+                warns.append("'spack env activate' junto con un hash real (/hash) en el "
+                             "mismo script — bug real 30/8: env activate estrecha la "
+                             "visibilidad de paquetes al environment, y un hash válido "
+                             "fuera de él falla con 'matches no installed packages' — "
+                             "sacar 'spack env activate' cuando se usa un hash directo")
         return warns
 
     def _lint_lammps(block: str) -> list[str]:
@@ -1567,6 +1635,15 @@ def _fix_sbatch(text: str) -> str:
         if _re.search(r'^\s*create_atoms\s+\d+\s+random', block, _re.M):
             warns.append("create_atoms random genera átomos solapados → 'Lost atoms' — "
                          "usar lattice fcc + create_atoms N box")
+        # Bug real 30/8: create_box sin create_atoms después → caja vacía, "velocity"/
+        # "run" fallan con "Velocity command with no atoms existing" (o corren sobre 0
+        # átomos sin avisar). read_data también puebla la caja, cuenta como válido.
+        if (_re.search(r'^\s*create_box\s', block, _re.M)
+                and not _re.search(r'^\s*create_atoms\s', block, _re.M)
+                and not _re.search(r'^\s*read_data\s', block, _re.M)):
+            warns.append("'create_box' sin 'create_atoms' después — la caja queda vacía, "
+                         "velocity/run fallan (o corren sobre 0 átomos) — agregar "
+                         "'create_atoms N box' o 'read_data <archivo>'")
         # thermo/thermo_style después del último run → nunca se ejecuta
         _blines = block.split('\n')
         _runs = [i for i, l in enumerate(_blines) if _re.match(r'\s*run\s+\d', l)]
@@ -1828,7 +1905,7 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format(
         'N=108000\nk=$(echo "-100.0 + ($i - 1) * 2.0" | bc)\n'
         'cat << EOF > script_k${k}.lmp\nvariable N equal ${N}\nvariable k equal ${k}\nEOF'))
-    _t("heredoc: NO quotea si el cuerpo referencia vars bash asignadas antes (bug real 28/8, gchoque)",
+    _t("heredoc: NO quotea si el cuerpo referencia vars bash asignadas antes (bug real 28/8, usuario4)",
        "<< EOF" in r and "<<'EOF'" not in r)
     r = _fix_sbatch(B.format("cat << MSG\nhola\nMSG"))
     _t("heredoc a stdout intacto", "<< MSG" in r)
@@ -1848,14 +1925,14 @@ def _selftest() -> int:
     _t("workdir: SÍ se inyecta si el source usa variable ($VAR, no ruta relativa)",
        "WORKDIR=" in r)
     r = _fix_sbatch(B.format("lmp -in gchoque_paper.lmp -var k -50.0"))
-    _t("workdir: NO se inyecta si hay 'lmp -in archivo.lmp' relativo (bug real 28/8, gchoque)",
+    _t("workdir: NO se inyecta si hay 'lmp -in archivo.lmp' relativo (bug real 28/8, usuario4)",
        "WORKDIR=" not in r)
     r = _fix_sbatch(B.format("lmp -in /mnt/cpu-data/gonzalo/archivo.lmp"))
     _t("workdir: SÍ se inyecta si el -in es ruta ABSOLUTA",
        "WORKDIR=" in r)
     r = _fix_sbatch(B.format("lmp -in script_k${k}.lmp -var k -50.0"))
     _t("workdir: NO se inyecta si el nombre del -in tiene una variable a mitad "
-       "(bug real 29/8, gchoque: script_k${k}.lmp generado por un loop)",
+       "(bug real 29/8, usuario4: script_k${k}.lmp generado por un loop)",
        "WORKDIR=" not in r)
 
     r = _fix_sbatch(B.format(
@@ -1863,7 +1940,7 @@ def _selftest() -> int:
         'if (( \\$SLURM_ARRAY_TASK_ID > 36 )); then\n'
         '  k=\\$(printf "%.2f" \\$(echo "-29.8 + (\\$SLURM_ARRAY_TASK_ID - 37) * 0.2" | bc -l))\n'
         'fi'))
-    _t("dollar-escape: saca \\$ espurio fuera de heredoc (bug real 28/8, gchoque)",
+    _t("dollar-escape: saca \\$ espurio fuera de heredoc (bug real 28/8, usuario4)",
        "\\$" not in r and "$SLURM_ARRAY_TASK_ID" in r)
     r = _fix_sbatch(B.format(
         "cat <<EOF > out.lmp\nvariable a equal (4.0/\\${rho})^(1.0/3.0)\nEOF"))
@@ -1885,6 +1962,17 @@ def _selftest() -> int:
        "nunca referenciado" in _fix_sbatch(L.format("units lj\ncompute msd all msd\nrun 100")))
     _t("lint: create_atoms random",
        "Lost atoms" in _fix_sbatch(L.format("units lj\ncreate_atoms 1 random 1000 1 region box")))
+    _t("lint: create_box sin create_atoms (bug real 30/8, caja vacía)",
+       "caja queda vacía" in _fix_sbatch(L.format(
+           "units metal\nlattice fcc 3.56\nregion box block 0 2 0 2 0 2\n"
+           "create_box 1 box\nvelocity all create 300.0 12345 dist gaussian\nrun 100")))
+    _t("lint: create_box CON create_atoms → sin warning",
+       "caja queda vacía" not in _fix_sbatch(L.format(
+           "units metal\nlattice fcc 3.56\nregion box block 0 2 0 2 0 2\n"
+           "create_box 1 box\ncreate_atoms 1 box\nrun 100")))
+    _t("lint: create_box CON read_data → sin warning (read_data también puebla la caja)",
+       "caja queda vacía" not in _fix_sbatch(L.format(
+           "units metal\ncreate_box 1 box\nread_data data.lammps\nrun 100")))
     _t("lint: thermo tras run",
        "último run" in _fix_sbatch(L.format("units lj\nrun 100\nthermo_style custom step temp")))
     _t("lint: script limpio sin warnings",
@@ -1893,7 +1981,7 @@ def _selftest() -> int:
            "thermo_style custom step temp pe c_m[4]\nrun 1000")))
 
     r = _fix_sbatch(B.format("module load octave\noctave --no-gui script.m"))
-    _t("module load octave → auto-fix con hash spack (bug real iperez 13 jul 2026)",
+    _t("module load octave → auto-fix con hash spack (bug real usuario3 13 jul 2026)",
        "module load" not in r and "/okdqlkti" in r and "export PATH=${OCTAVE_DIR}/bin:$PATH" in r
        and "octave --no-gui script.m" in r)
     r = _fix_sbatch(B.format("module load r\nRscript a.R"))
@@ -1996,6 +2084,17 @@ def _selftest() -> int:
        "(bug real 30/8: 'gromacs' de 'lammps/gromacs' en spack.txt colaba como hash)",
        "sin '/'" not in r)
     r = _fix_sbatch(B.format(
+        "spack env activate /apps/local/spack/spack-2026b/spack/var/spack/environments/rebuild-full\n"
+        "LAMMPS_DIR=$(spack location -i /3xvrevx 2>/dev/null)"))
+    _t("lint: spack env activate + hash real en el mismo script (bug real 30/8, "
+       "confirmado en nodo de cómputo: env activate rompe la resolución por hash)",
+       "env activate estrecha la visibilidad" in r)
+    r = _fix_sbatch(B.format(
+        "spack env activate /apps/local/spack/spack-2026b/spack/var/spack/environments/rebuild-full\n"
+        "eval $(spack load --sh fftw)"))
+    _t("lint: spack env activate + paquete bare sin hash (patrón correcto b) → sin warning",
+       "⚠" not in r)
+    r = _fix_sbatch(B.format(
         "WORKDIR=/mnt/cpu-data/$USER/x_$SLURM_JOB_ID\nmkdir -p $WORKDIR\n"
         "cp -r $SLURM_SUBMIT_DIR/. $WORKDIR/\ncd $WORKDIR"))
     _t("lint: SLURM_SUBMIT_DIR (variable de Slurm, no de software) → sin falso positivo",
@@ -2069,6 +2168,29 @@ def _selftest() -> int:
        bool(_RE_SPACK.search("quiero correr un test de MPI en la particion cpu")))
     _t("_RE_SPACK: 'mpicc' también dispara carga de spack.txt",
        bool(_RE_SPACK.search("como compilo con mpicc")))
+    _t("_RE_PYTHON: 'latex'/'pdf con latex' dispara carga de python.txt (bug real "
+       "30/8: 'quiero un pdf con latex' no cargaba la nota TEXLIVE ROTO, el bot "
+       "alucinaba un pdflatex que falla)",
+       bool(_RE_PYTHON.search("quiero armar un resumen en pdf con latex")))
+    _t("_RE_PYTHON: 'pdflatex' también dispara carga de python.txt",
+       bool(_RE_PYTHON.search("como corro pdflatex en el cluster")))
+    _t("_RE_GPUCUSTOM/_RE_SPACK: 'nvcc' solo (sin decir 'cuda') dispara carga "
+       "de gpu-custom.txt/spack.txt (bug real 31/8: 'como cargo nvcc en gpu' "
+       "no cargaba ningún contexto real, el bot alucinó una versión de CUDA "
+       "que no existe en el cluster)",
+       bool(_RE_GPUCUSTOM.search("como cargo nvcc en gpu"))
+       and bool(_RE_SPACK.search("como cargo nvcc en gpu")))
+    _t("_RE_QUEUE_OPT: pregunta de 'me conviene más recursos' dispara refresh "
+       "de cola (bug real 2/9: el bot no puede correr squeue/sinfo a mitad "
+       "de su propia respuesta, terminaba pidiéndoselo al usuario en vez de "
+       "usarlo — fix real: inyectarlo en código antes de llamar al LLM)",
+       bool(_RE_QUEUE_OPT.search(
+           "tengo un script LAMMPS que corre con --ntasks=16 en particion cpu "
+           "y tarda bastante. como esta la cola ahora, me conviene subir a "
+           "mas cores para que termine antes, o mejor no tocarlo?")))
+    _t("_RE_QUEUE_OPT: pregunta genérica sin intención de optimizar recursos "
+       "→ sin falso positivo",
+       not bool(_RE_QUEUE_OPT.search("como compilo un programa con gcc")))
     _core_candidate = next((p for p in (CONTEXT_DIR / "core-dev.txt", CONTEXT_DIR / "core.txt") if p.exists()), None)
     _CTX_CORE_TEXT = _core_candidate.read_text(encoding="utf-8", errors="replace") if _core_candidate else ""
     _t("core.txt: la regla mpirun-vs-srun vive acá (siempre cargado, no depende "

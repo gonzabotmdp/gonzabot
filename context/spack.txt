@@ -16,14 +16,31 @@ HARDWARE: 16 nodos CPU (quad-11/12/33/34-n01..n04) — TODOS IDÉNTICOS. NO hace
   mismo resultado. Si un --nodelist puntual está lleno/ocupado (ver squeue), sugerir sacar el
   --nodelist o cambiar a otro nodo cpu cualquiera, no hay pérdida de performance por el cambio.
 
-NUNCA "module load/avail/spider" en ningún sbatch — este cluster NO tiene Lmod, "module" no es un comando válido en los nodos. SIEMPRE spack: $SPACK --no-locks location -i /hash (ver hash por software en el segmento de cada uno).
+NUNCA "module load/avail/spider" en ningún sbatch — este cluster NO tiene Lmod, "module" no es un comando válido en los nodos. SIEMPRE spack: $SPACK location -i /hash (ver hash por software en el segmento de cada uno).
 
 SPACK en sbatch: los jobs batch NO heredan funciones de shell.
-  SIEMPRE agregar antes de spack load, EN ESTE ORDEN:
+  SIEMPRE agregar antes de cualquier spack load/location:
   export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config
   source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
-  spack env activate /apps/local/spack/spack-2026b/spack/var/spack/environments/rebuild-full
-  eval $(spack load --sh <paquete>)   # ej: lammps, gromacs, cp2k, r, root, quantum-espresso, openfoam, julia — sin hash, resuelve solo
+
+  ⚠ BUG REAL 30/8 (confirmado en un nodo de cómputo real, no solo teoría):
+  "spack env activate .../rebuild-full" ESTRECHA la visibilidad de paquetes
+  a solo los miembros de ESE environment. Con env activo, "spack location -i
+  /hash" o "spack load --sh pkg/hash" para un paquete que NO es miembro del
+  environment falla con "Spec '/hash' matches no installed packages" — AUNQUE
+  el hash sea 100% válido y el paquete esté instalado. Confirmado con LAMMPS
+  (/3xvrevx): sin env activate resuelve exit 0, con env activate falla. Un
+  modelo (o un humano) que ve ese error puede terminar "arreglando" un hash
+  que nunca estuvo roto — si `/diagnose` sugiere que un hash está mal,
+  VERIFICAR PRIMERO si el script tiene `spack env activate` antes de asumirlo.
+  Por eso, DOS PATRONES DISTINTOS, no mezclar:
+  (a) Paquete CON hash conocido (la mayoría — lammps, gromacs, cuda, julia,
+      etc., ver hash en el segmento de cada uno): NUNCA "spack env activate".
+      Alcanza con las 2 líneas de arriba + $SPACK location -i /hash.
+  (b) Paquete SIN hash, de la lista "resuelve solo" (fftw, netcdf-c, openblas,
+      py-pandas, gnuplot, hdf5): recién ahí sí hace falta
+      "spack env activate .../rebuild-full" antes de "eval $(spack load --sh
+      <paquete>)" — es lo que le da a esos nombres pelados un solo candidato.
   ⚠ NUNCA mezclar con rutas del store viejo (/usr/share/spack). NUNCA inventar el path si el paquete no está en la lista de abajo — avisar que no está validado ahí todavía.
 
 STORE NUEVO (spack-2026b): store default para todos los usuarios (el viejo queda legacy/respaldo). VTK y paraview: SACADOS a propósito — NO ofrecerlos, no están en ningún store (nota completa en python.txt). Octave: sin GUI/gnuplot todavía.

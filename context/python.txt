@@ -54,13 +54,13 @@ Grace 5.1.25 / xmgrace (graficación científica 2D):
 ParaView: ⚠ NO DISPONIBLE. Sacado de spack-2026b por decisión del usuario (13/8/2026) y el env file viejo (paraview.env) apunta a un build del store viejo que ya fue borrado del disco (confirmado 27/8: directorio inexistente) — no hay forma real de correrlo hoy en ningún store. Si lo piden, avisar que no está instalado y no hay fecha de reinstalación. NUNCA generar sbatch, NUNCA usar el hash /4oatdsf ni source paraview.env — aunque el archivo .env todavía exista en disco, su contenido es inválido.
 
 OVITO 3.6.0 (visualización/análisis MD, headless) — PATRÓN B:
-  OVITO_DIR=$($SPACK --no-locks location -i /d7rmircc 2>/dev/null)
+  OVITO_DIR=$($SPACK location -i /d7rmircc 2>/dev/null)
   export PATH=${OVITO_DIR}/bin:$PATH
   ovitos script.py   # Python scripting mode (análisis batch, sin GUI).
   Partición cpu.
 
 ADIOS2 2.10.2 (I/O paralelo de alto rendimiento) — PATRÓN B:
-  ADIOS_DIR=$($SPACK --no-locks location -i adios2 2>/dev/null)
+  ADIOS_DIR=$($SPACK location -i adios2 2>/dev/null)
   export PATH=${ADIOS_DIR}/bin:$PATH; export LD_LIBRARY_PATH=${ADIOS_DIR}/lib:${LD_LIBRARY_PATH}
   Python: export PYTHONPATH=${ADIOS_DIR}/lib/python3.11/site-packages:$PYTHONPATH; import adios2
   Binarios: adios2_iotest, adios2_reorganize, adios2_reorganize_mpi. Partición cpu.
@@ -68,7 +68,7 @@ ADIOS2 2.10.2 (I/O paralelo de alto rendimiento) — PATRÓN B:
 Intel oneAPI Compilers: DESINSTALADO A PROPÓSITO el 1/8 (0 dependents reales, sacado del medio para evitar que se colara como dependencia de grpc/tensorflow). Si un usuario específicamente necesita icx/icpx/ifx, avisar que no está y consultar antes de reinstalar — no es un bug, fue decisión consciente del plan de unificación spack.
 
 Intel MPI 2021.14.0 (alternativa a OpenMPI):
-  IMPI_BASE=$($SPACK --no-locks location -i /bc46wpeg 2>/dev/null); IMPI_DIR=${IMPI_BASE}/mpi/2021.14
+  IMPI_BASE=$($SPACK location -i /bc46wpeg 2>/dev/null); IMPI_DIR=${IMPI_BASE}/mpi/2021.14
   export PATH=${IMPI_DIR}/bin:$PATH; export LD_LIBRARY_PATH=${IMPI_DIR}/lib:${LD_LIBRARY_PATH}
   NOTA: códigos del cluster compilados con OpenMPI — openmpi único en spack-2026b ahora: /2cgnkug (los hashes viejos /5qsncbu y /mft7jna ya no existen). Intel MPI solo si el código lo requiere.
 
@@ -117,13 +117,17 @@ py-scipy 1.16.3 (python 3.14) + py-numpy 2.3.5 — cómputo científico:
 
 Python científico — patrón spack (python 3.14 por default): para paquetes NO en la lista de env files de arriba:
   SPACK=/apps/local/spack/spack-2026b/spack/bin/spack  # store viejo (/usr/share/spack) vacío desde el 22/8, NUNCA usarlo
-  PYTHON=$($SPACK --no-locks location -i /cr5vvdl 2>/dev/null)/bin/python3  # python 3.14 target, AOCC
+  PYTHON=$($SPACK location -i /cr5vvdl 2>/dev/null)/bin/python3  # python 3.14 target, AOCC
   export SPACK_USER_CACHE_PATH=/tmp/spack-${USER}-${SLURM_JOB_ID}; mkdir -p $SPACK_USER_CACHE_PATH
   source /usr/share/spack/root/share/spack/setup-env.sh 2>/dev/null || true
   eval $(spack load --sh py-<paquete>)   # setea PYTHONPATH+PATH con TODAS las deps
   $PYTHON script.py
   CRITICO: SIEMPRE ejecutar con $PYTHON, NUNCA con "python3" del sistema. python 3.12 YA NO EXISTE (migrado el 1/8) — geopandas ahora usa python 3.13.8 (misma excepción que tensorflow, hash yzty22g), mpi4py ahora usa python 3.14 (cr5vvdl, igual que el resto). NO usar más $PYTHON312 en scripts nuevos, verificar con find_dep_hash antes si hay dudas.
-  CRITICO: "spack location -i pkg" sin --no-locks falla en nodos (DB lock). Usar $SPACK --no-locks location -i /hash.
+  CRITICO (corregido 30/8): "--no-locks" NO EXISTE en spack 1.2.2 (esta versión) — no aparece
+  en "spack --help" ni "spack location --help", y usarlo rompe el comando con "unrecognized
+  arguments:" (confirmado con un job real, texlive). La nota vieja sobre "DB lock"
+  quedó obsoleta con esta versión de spack — "spack location -i /hash" solo, sin flags, anda
+  bien en nodos de cómputo (confirmado en vivo). Usar $SPACK location -i /hash, SIN.
   CRITICO: NO usar "spack env activate" ni "spack env create" en nodos de cómputo (fallan en sbatch).
 
 py-ase 3.26.0 (python 3.14, Atomic Simulation Env): eval $(spack load --sh py-ase); $PYTHON script.py. Deps: matplotlib, scipy, numpy. Partición cpu.
@@ -164,7 +168,7 @@ py-rasterio 1.4.3 (hash szebksj) — reconstruido el 1/8 junto con gdal/pyogrio/
 py-fiona: NO INSTALADO. Avisar al usuario que no está disponible, no inventar el comando.
 
 py-mpi4py 4.1.1 (python 3.14, hash 7s7dddy — usa MPICH, NO OpenMPI, cambio del 1/8):
-  MPICH_DIR=$($SPACK --no-locks location -i /2lx4n56 2>/dev/null)
+  MPICH_DIR=$($SPACK location -i /2lx4n56 2>/dev/null)
   eval $(spack load --sh py-mpi4py 2>/dev/null) || true
   ${MPICH_DIR}/bin/mpirun -np ${SLURM_NTASKS} $PYTHON script.py
   Partición cpu, WORKDIR /mnt/cpu-data/$USER/. mpi4py.env regenerado y validado el 1/8 (import real, mpi4py.MPI).
@@ -172,13 +176,13 @@ py-mpi4py 4.1.1 (python 3.14, hash 7s7dddy — usa MPICH, NO OpenMPI, cambio del
 NOTA Python: pandas/scipy/numpy/matplotlib accesibles via eval $(spack load --sh py-dask) o py-ase etc. python 3.12 YA NO EXISTE — mpi4py y geopandas migraron a 3.14/3.13.8 respectivamente el 1/8, ver notas en cada sección.
 
 R 4.5.2 (tidyverse 2.0.0, r-sf 1.0-16, r-terra 1.7-78):
-  R_DIR=$($SPACK --no-locks location -i /kmvkefw 2>/dev/null)
+  R_DIR=$($SPACK location -i /kmvkefw 2>/dev/null)
   export R_LIBS=$(find $R_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1)
   ${R_DIR}/bin/Rscript script.R  # gráficos en sbatch: ggsave() o png()/dev.off() (NO X11). Partición cpu.
   CRITICO heredoc: usar << 'REOF' (con comillas). Dentro de heredoc quoted, NO poner \ antes de $: escribir data$col NO data\$col.
 
 Apptainer 1.4.1 (contenedores Singularity-compatible, hash /utpbedt — actualizado 22/8, el viejo /jemmbsj ya no existe):
-  APPT=$($SPACK --no-locks location -i /utpbedt 2>/dev/null)
+  APPT=$($SPACK location -i /utpbedt 2>/dev/null)
   export PATH=${APPT}/bin:$PATH
   apptainer exec imagen.sif mi_prog; apptainer run docker://ubuntu:22.04 bash; apptainer pull docker://tensorflow/tensorflow:latest-gpu
   Para GPU: partición gpu + --nv flag (apptainer exec --nv imagen.sif prog). Imágenes .sif en /mnt/gpu-data/$USER/ o /mnt/cpu-data/$USER/ (no /tmp).
@@ -186,7 +190,7 @@ Apptainer 1.4.1 (contenedores Singularity-compatible, hash /utpbedt — actualiz
 Geant4 11.3.2: SÍ instalado en spack-2026b (no es Python, ver particle-physics.txt para carga/ejemplos/rutas reales).
 
 GSL 2.8 (GNU Scientific Library, hash /mq2eqdc — actualizado 22/8, el viejo /ldeaug34 ya no existe):
-  GSL=$($SPACK --no-locks location -i /mq2eqdc 2>/dev/null)
+  GSL=$($SPACK location -i /mq2eqdc 2>/dev/null)
   gcc -I${GSL}/include prog.c -L${GSL}/lib -lgsl -lgslcblas -Wl,-rpath,${GSL}/lib -o prog
   Con AOCC: clang -O3 -march=znver4 -I${GSL}/include prog.c -L${GSL}/lib -lgsl -lgslcblas -Wl,-rpath,${GSL}/lib -o prog
   Interpolación, integración (qags/qag), ODEIV2, álgebra lineal, FFT, RNG. Partición cpu.
@@ -209,24 +213,24 @@ GSL 2.8 (GNU Scientific Library, hash /mq2eqdc — actualizado 22/8, el viejo /l
       printf("raiz: %f\n", gsl_root_fsolver_root(s));
 
 AOCC 5.0.0 (AMD clang/flang optimizados AMD, hash vs4buop):
-  AOCC=$($SPACK --no-locks location -i /vs4buop 2>/dev/null)
+  AOCC=$($SPACK location -i /vs4buop 2>/dev/null)
   export PATH=${AOCC}/bin:$PATH   # CRITICO: este export es lo que pone clang en PATH. NO usar spack load para AOCC.
   clang/clang++/flang -O3 -march=znver4. AOCC 5.0 = AMD clang 17.0.6 (LLVM). Partición cpu.
   Para compilar con GSL+AOCC: export PATH=${AOCC}/bin:$PATH (luego clang, NO gcc).
 
 MPICH 4.3.2 (MPI alternativo; OpenMPI es la preferida, hash 2lx4n56):
-  MPICH=$($SPACK --no-locks location -i /2lx4n56 2>/dev/null)
+  MPICH=$($SPACK location -i /2lx4n56 2>/dev/null)
   export PATH=${MPICH}/bin:$PATH; export LD_LIBRARY_PATH=${MPICH}/lib:${LD_LIBRARY_PATH}
   mpicc prog.c -o prog; mpiexec -np $SLURM_NTASKS ./prog. Partición cpu.
 
 CuDNN 9.8.0 (kernels DNN en C/C++, SOLO gpu+cuda@12.6.2/yziqg5b, hash v5jki3y):
-  CUDNN=$($SPACK --no-locks location -i /v5jki3y 2>/dev/null)
-  CUDA_DIR=$($SPACK --no-locks location -i /yziqg5b 2>/dev/null)
+  CUDNN=$($SPACK location -i /v5jki3y 2>/dev/null)
+  CUDA_DIR=$($SPACK location -i /yziqg5b 2>/dev/null)
   export LD_LIBRARY_PATH=${CUDNN}/lib:${CUDA_DIR}/lib64:${LD_LIBRARY_PATH}
   nvcc -I${CUDNN}/include -I${CUDA_DIR}/include ... -L${CUDNN}/lib -lcudnn. PyTorch/TF ya traen cuDNN incluido.
 
 GDAL 3.10.2 (geoespacial C/C++, hash indvym5 — ÚNICO hash en el store al 1/8, verificar si sigue así ya que el 3.11.5 que se había consolidado en la tarea #26 del plan de unificación spack desapareció, posible efecto lateral de `spack gc`, sin confirmar todavía):
-  GDAL=$($SPACK --no-locks location -i /indvym5 2>/dev/null)
+  GDAL=$($SPACK location -i /indvym5 2>/dev/null)
   gcc -I${GDAL}/include prog.c -L${GDAL}/lib -lgdal -Wl,-rpath,${GDAL}/lib -o prog
   NOTA: py-rasterio está ROTO (.so.36 vs .so.37); para Python geoespacial usar py-geopandas.
 
@@ -239,7 +243,10 @@ JupyterLab: NO INSTALADO al revisar el 1/8 (ausente del store, motivo no confirm
 Rust 1.86.0 (hash 7a2bbni, gcc14): eval $(spack load --sh /7a2bbni); cargo build/run. Reconstruido el 1/8 (chocaba compilando su LLVM/lld embebido con AOCC contra libstdc++ de gcc14, real bug, resuelto forzando gcc14 completo). Partición cpu.
 Go, Node.js: NO INSTALADOS al revisar el 1/8 (ausentes del store, motivo no confirmado — posiblemente ya estaban así antes de la migración de hoy). Avisar al usuario que no están disponibles, no inventar el comando.
 
-PDF con LaTeX: TEXLIVE ROTO desde el 1/8 (build fallido, sin hash válido todavía — softadm lo anotó de baja prioridad). NO usar spack load texlive ni ningún hash viejo. Alternativa mientras tanto: generar el PDF con matplotlib (fig.savefig('doc.pdf')) o pedirle a softadm que lo reconstruya si el usuario específicamente necesita LaTeX.
+PDF con LaTeX: texlive 20260301 (hash /wyqdig2, reinstalado 30/8 — el build fallaba desde el 1/8 por falta de espacio en el stage por defecto de /dev/shm con el resource texmf-dist de ~14G, ya resuelto).
+  TEXLIVE_DIR=$($SPACK location -i /wyqdig2 2>/dev/null)
+  export PATH=${TEXLIVE_DIR}/bin/x86_64-linux:$PATH
+  pdflatex -interaction=nonstopmode documento.tex
 Heredoc bash: comillas (<<'EOF') evitan expansión de $/\ (el bot auto-quotea si falta). Marcadores distintos por bloque: <<'LMPEOF' LAMMPS, <<'PYEOF' Python, <<'TEXEOF' LaTeX.
   LaTeX en heredoc <<'TEXEOF': backslash SIMPLE — escribir \documentclass, \begin{document}, \section (NO \\documentclass ni \\begin). Con comillas el shell no toca los backslashes.
   Si necesitas variables bash dentro del heredoc: escribir el .py o .tex con Python usando f-strings o sed.
