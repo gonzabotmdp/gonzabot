@@ -23,6 +23,14 @@ SPACK en sbatch: los jobs batch NO heredan funciones de shell.
   export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config
   source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
 
+  NOVEDAD 2/9 (confirmado en vivo, salloc+ssh reales, job 12190-12194): para
+  sesiones INTERACTIVAS (salloc solo, salloc+ssh al nodo, o srun --pty) YA NO
+  hace falta correr las 2 líneas de arriba a mano — se arregló el bashrc/zshrc
+  GLOBAL de Qlustar (bug real: apuntaba al spack de sistema viejo /usr/share/
+  spack, no al store real). Validado bash Y zsh, login Y no-login, salloc
+  directo Y ssh-after-salloc. Las 2 líneas de arriba SIGUEN siendo obligatorias
+  en sbatch (los jobs batch no leen bashrc/zshrc — no cambia, confirmado).
+
   ⚠ BUG REAL 30/8 (confirmado en un nodo de cómputo real, no solo teoría):
   "spack env activate .../rebuild-full" ESTRECHA la visibilidad de paquetes
   a solo los miembros de ESE environment. Con env activo, "spack location -i
@@ -49,16 +57,44 @@ STORE NUEVO (spack-2026b): store default para todos los usuarios (el viejo queda
   ⚠ lammps y gromacs NO están acá (bug real 30/8: esta lista los mencionaba y contradecía la
   sección DESAMBIGUACIÓN de abajo — "matches multiple packages" confirmado con gromacs) — para
   esos dos usar SIEMPRE el hash explícito de md-sim.txt, nunca "spack load lammps/gromacs" bare.
-  ÚNICA EXCEPCIÓN A PROPÓSITO: "spack load py-numpy" sigue dando "matches multiple
-  packages" — es intencional (2 ecosistemas reales distintos, pandas+performance vs
-  numba/scipy), pedirle al usuario que especifique versión/hash/compilador puntualmente.
+  ÚNICA EXCEPCIÓN A PROPÓSITO: "spack load py-numpy"/"py-scipy" siguen dando "matches
+  multiple packages" — intencional, 3 ECOSISTEMAS reales distintos (actualizado 2/9,
+  versión final tras verificar el constraint real de tensorflow):
+    1) pandas+numba+dask — py-numpy@2.3.5 (canónico histórico, tested).
+    2) numba/scipy standalone — también contra py-numpy@2.3.5.
+    3) TensorFlow/JAX/Keras — py-numpy@2.5.1 + py-scipy@1.18.0, sobre python@3.13.13
+       (NO 3.14.5) — EXCEPCIÓN REAL Y PERMANENTE, no deuda: py-tensorflow@2.20.0 declara
+       depends_on("python@3.9:3.13") en su propia receta (verificado con spack info +
+       confirmado con el concretizer real: "Cannot satisfy 'python@:3.14' y
+       'python@3.9:3.13'"). Ningún tensorflow estable soporta python 3.14 todavía (issue
+       upstream tensorflow/tensorflow#102890, abierto, sin resolver). NO intentar
+       reconstruir esta rama contra 3.14.5 — falla directo en la concretización.
+  Pedirle al usuario que especifique versión/hash/compilador puntualmente.
+
+  python@3.13.13 tiene 2 hashes, AMBOS necesarios (verificado con spack uninstall -y sin
+  --force, no reducibles): wdary5r (%aocc, sirve al lado JAX — py-jaxlib, py-scipy@1.18.0,
+  py-h5py, py-ml-dtypes, py-pythran) y 6u5cadl (%gcc14, sirve a AMBOS hashes de
+  py-tensorflow, py-tensorboard, py-grpcio, py-protobuf). No es redundancia — TensorFlow
+  y JAX están compilados contra ramas de compilador distintas. No confundir con el
+  canónico python@3.14.5/palxeba (el resto del stock).
 
 SPACK LOAD — DESAMBIGUACIÓN:
   Si falla un spack load con "Permission denied": problema de permisos puntual, no del wrapper ni del hash — avisar al usuario, no adivinar workaround.
   PROBADO Y FUNCIONA spack load pkg (sin hash), test funcional real: fftw, r, octave, julia (rama
     especial), wannier90, elk, cuda (12.6.2, A100),
-    valgrind, py-pandas, py-numpy, gdal, hdf5, netcdf-c, proj, py-sympy, py-matplotlib.
-    py-torch y texlive NO DISPONIBLES desde el 1/8 (ver notas en python.txt) — no incluir en spack load.
+    valgrind, py-pandas, gdal, hdf5, netcdf-c, proj, py-sympy, py-matplotlib.
+    py-numpy y py-scipy NO están en esta lista (ver nota de arriba, "matches multiple packages"
+    a propósito — 3 ecosistemas reales) — pedir versión/hash puntual, nunca bare.
+    py-pillow y py-setuptools TAMPOCO están (duplicados exactos con dependents reales de
+      ambos lados, deuda aceptada como fftw/hdf5, no reducible) — "matches multiple packages"
+      con py-pillow (3 hashes: 12.3.0 %aocc ×2 + %gcc14 ×1) y py-setuptools (80.9.0 ×2 +
+      83.0.0 ×2). Usar hash explícito: py-pillow /ksmsau4 (aocc) o /23r7zyv (gcc14);
+      py-setuptools /d36sxh6 (83.0.0, más nueva, preferir salvo que algo pida 80.9.0 puntual).
+    py-torch SÍ disponible bare (actualizado 4/9, la nota de "reinstalación +cuda en curso"
+      quedó vieja y se abandonó) — pero es CPU-only (~cuda), avisar si el usuario necesita
+      GPU real (ver detalle completo en python.txt, sección PyTorch).
+    texlive SÍ disponible desde el 30/8 (hash /wyqdig2, ver detalle en python.txt) — ya no está
+      roto, no seguir avisando que falta.
   Resuelven sin ambigüedad pero sin test funcional todavía (binario/lib no probado en caso real):
     casa, cp2k, cudnn, arrow, py-tensorflow, py-tensorboard, netlib-scalapack. (nccl YA NO ESTÁ instalado, sacado 22/8)
   NO usar spack load pkg sin hash (motivo real, no capricho):

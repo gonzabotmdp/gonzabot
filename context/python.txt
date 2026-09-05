@@ -139,7 +139,21 @@ py-dask 2026.7.1 (python 3.14, cómputo paralelo+datos grandes): eval $(spack lo
 py-xarray 2025.7.1 (python 3.14, datos multidimensionales): eval $(spack load --sh py-xarray); $PYTHON script.py. Deps: pandas, numpy. Partición cpu.
 py-pandas 2.3.3 (python 3.14, dataframes): eval $(spack load --sh py-pandas); $PYTHON script.py. Partición cpu.
   ALTERNATIVA si falla: cargar scipy.env (incluye numpy) y agregar pandas con spack load --sh.
-PyTorch: NO INSTALADO desde el borrado masivo de python viejo del 1/8 — migración a python 3.14 pausada explícitamente sin supervisión humana. NO usar torch.env (roto, referencia python borrado). Avisar al usuario que no está disponible, no inventar el comando.
+PyTorch: actualizado 4/9 — la nota vieja de "NO INSTALADO desde el 1/8" quedó obsoleta. Estado real: `spack load py-torch` da py-torch@2.13.0 **CPU-only** (~cuda, sin soporte GPU) — sí disponible para uso general, avisar al usuario que es CPU-only si lo pide para GPU. PyTorch con GPU/CUDA real NO tiene todavía una instalación de uso general en el cluster (solo existen instalaciones privadas de proyectos internos, no ofrecerlas ni inventar su ruta). Si un investigador necesita PyTorch+GPU (ej. potenciales ML para materia condensada), avisar que no hay opción general todavía y que hay que pedir la instalación a softadm/gonzalo. torch.env sigue roto (referencia python borrado del 1/8), no usarlo.
+
+Stack ML/deep learning (agregado 4/9, disponible vía spack para cualquier usuario, hash exacto SIEMPRE — sin ambigüedad de compilador):
+  nccl@2.31.2-1 /kshfy5g (+cuda, para multi-GPU con PyTorch/similares)
+  cudnn@9.8.0.87-12 /5fvzava
+  ffmpeg@8.1 /jftyden (para preprocesar video/audio de datos experimentales)
+  opencv@4.13.0 /fgme5fh (+cuda+cudnn+cublas+cufft — análisis de imágenes con GPU: microscopía, visión por computadora)
+  py-einops@0.8.2 /mywvvvq
+  py-safetensors@0.6.2 /4gtlur6
+  py-transformers@4.48.3 /xqotfqx (HuggingFace — modelos de lenguaje/NLP, también hay modelos científicos pre-entrenados en ese ecosistema)
+  py-huggingface-hub@0.26.2 /b24j7hn
+  py-sentencepiece@0.2.1 /v4t2bsk (tokenizador, dependencia típica de modelos HuggingFace)
+  py-imageio@2.37.3 /ca5vhnk
+  py-av@18.1.0 /weuo63h (decodeo de video cuadro a cuadro, útil para análisis de datos en video)
+  Todo esto es CPU o GPU según el paquete (nccl/opencv sí tienen CUDA real, py-torch NO — ver nota de PyTorch arriba). NO asumir que estos paquetes solucionan la falta de PyTorch+GPU — son piezas del ecosistema pero sin un PyTorch con CUDA de uso general, no arman un pipeline de deep learning con GPU completo todavía.
 
 py-matplotlib 3.10.7 (python 3.14, gráficos headless):
   source /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env  # setea PYTHON + PYTHONPATH. Regenerado y validado el 1/8.

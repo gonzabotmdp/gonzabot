@@ -1587,6 +1587,30 @@ def _fix_sbatch(text: str) -> str:
                              "visibilidad de paquetes al environment, y un hash válido "
                              "fuera de él falla con 'matches no installed packages' — "
                              "sacar 'spack env activate' cuando se usa un hash directo")
+        # Bug real 5/9 (gonzabot propuso esto en vivo): gzip comprime un archivo y
+        # después se le saca el sufijo .gz con un mv/rename SIN descomprimir —
+        # el archivo queda con contenido gzip pero el nombre/extensión original,
+        # corrupto para cualquier lector que espere el formato sin comprimir
+        # (ej. numpy.load en un .npz).
+        if (_re.search(r'\bgzip\s+(?!-d\b|-dc\b)\S', block)
+                and _re.search(r'%\.gz\}', block)
+                and not _re.search(r'\bgunzip\b|\bgzip\s+-d', block)):
+            warns.append("gzip comprime y después se saca el sufijo .gz con mv/rename "
+                         "SIN descomprimir (falta gunzip/gzip -d) — el archivo queda "
+                         "con contenido gzip pero extensión original, corrupto para "
+                         "quien lo lea esperando el formato sin comprimir")
+        # Bug real 5/9 (gonzabot afirmó esto en vivo, texto engañoso aunque el script en
+        # sí no rompe nada): "gzip *.npz" deja archivos .npz.gz que NO se pueden abrir
+        # directo con np.load — hace falta descomprimir antes (gunzip) o pasar un
+        # gzip.GzipFile a np.load. Avisar SIEMPRE que se comprima un .npz/.npy con gzip,
+        # sin exigir que el propio bloque haga algo mal (es un recordatorio, no un error).
+        if (_re.search(r'\bgzip\s+(?!-d\b|-dc\b)\S', block)
+                and _re.search(r'\.np[yz]\b', block)
+                and not _re.search(r'\bgunzip\b|\bgzip\s+-d|GzipFile', block)):
+            warns.append("gzip sobre .npz/.npy: el archivo resultante (.npz.gz) NO se "
+                         "puede abrir directo con np.load — hay que descomprimir antes "
+                         "(gunzip) o usar np.load(gzip.GzipFile('archivo.npz.gz')) para "
+                         "leerlo comprimido sin un paso separado")
         return warns
 
     def _lint_lammps(block: str) -> list[str]:
@@ -1924,7 +1948,7 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("source $SPACK_ROOT/setup-env.sh\necho hola"))
     _t("workdir: SÍ se inyecta si el source usa variable ($VAR, no ruta relativa)",
        "WORKDIR=" in r)
-    r = _fix_sbatch(B.format("lmp -in gchoque_paper.lmp -var k -50.0"))
+    r = _fix_sbatch(B.format("lmp -in usuario4_paper.lmp -var k -50.0"))
     _t("workdir: NO se inyecta si hay 'lmp -in archivo.lmp' relativo (bug real 28/8, usuario4)",
        "WORKDIR=" not in r)
     r = _fix_sbatch(B.format("lmp -in /mnt/cpu-data/gonzalo/archivo.lmp"))
@@ -2064,6 +2088,23 @@ def _selftest() -> int:
                      "#SBATCH --gres=gpu:nvidia-a100-80gb-pcie:1\n"
                      "eval $(spack load --sh gromacs@2024.3%gcc@14.2.0+cuda)\n```")
     _t("lint: --gres=gpu con spec +cuda → sin warning (patrón correcto)", "⚠" not in r)
+    r = _fix_sbatch(B.format(
+        "find . -name \"*.npz\" -exec gzip {} \\;\n"
+        "find . -name \"*.npz.gz\" -exec sh -c 'mv \"$1\" \"${1%.gz}\"' _ {} \\;"))
+    _t("lint: gzip + mv sacando .gz sin gunzip (bug real 5/9, deja el .npz corrupto)",
+       "SIN descomprimir" in r)
+    r = _fix_sbatch(B.format(
+        "find . -name \"*.npz\" -exec gzip {} \\;\n"
+        "find . -name \"*.npz.gz\" -exec gunzip {} \\;"))
+    _t("lint: gzip + gunzip real → sin warning (patrón correcto)", "⚠" not in r)
+    r = _fix_sbatch(B.format("gzip resultados_realization0000.npz"))
+    _t("lint: gzip *.npz sin gunzip/GzipFile en el bloque → nota de cómo releerlo (bug real 5/9)",
+       "NO se puede abrir directo con np.load" in r)
+    r = _fix_sbatch(B.format(
+        "gzip resultados_realization0000.npz\n"
+        "python3 -c \"import gzip,numpy as np; np.load(gzip.GzipFile('resultados_realization0000.npz.gz'))\""))
+    _t("lint: gzip *.npz + GzipFile en el mismo bloque → sin warning (ya sabe cómo releerlo)",
+       "⚠" not in r)
     r = _fix_sbatch(B.format(
         "VG5ODAZJ=$(/apps/local/spack/spack-2026b/spack/bin/spack location -i vg5odazj 2>/dev/null)"))
     _t("lint: hash real de spack sin '/' inicial (bug real 30/8, spack lo lee como nombre de paquete)",
@@ -3454,6 +3495,7 @@ def repl(new_session: bool = False):
 
                 # 1. Obtener paths de logs y script via scontrol (job activo o reciente)
                 _stdout_path = _stderr_path = _cmd_path = ""
+                _job_qos = _job_state = _job_reason = ""
                 try:
                     sc = _spdiag.run(["scontrol", "show", "job", job_id],
                                      capture_output=True, text=True, timeout=10)
@@ -3464,6 +3506,16 @@ def repl(new_session: bool = False):
                     if _m: _stderr_path = _m.group(1)
                     _m = _re_diag2.search(r'Command=(\S+)', sc_out)
                     if _m: _cmd_path = _m.group(1).split()[0]
+                    # Bug real 5/9: se descartaba QOS/JobState/Reason de scontrol —
+                    # el modelo nunca sabía que era un job scavenger cancelado por
+                    # preempción y alucinaba causas a partir de warnings "(ignored)"
+                    # de CUDA/MPI que no tienen nada que ver con la cancelación real.
+                    _m = _re_diag2.search(r'\bQOS=(\S+)', sc_out)
+                    if _m: _job_qos = _m.group(1)
+                    _m = _re_diag2.search(r'JobState=(\S+)', sc_out)
+                    if _m: _job_state = _m.group(1)
+                    _m = _re_diag2.search(r'Reason=(\S+)', sc_out)
+                    if _m: _job_reason = _m.group(1)
                 except Exception:
                     pass
 
@@ -3575,6 +3627,32 @@ def repl(new_session: bool = False):
                         "normal. Tu respuesta TIENE que mencionar esto explícitamente y explicar "
                         "la causa probable (ej. --mem insuficiente para OOM) — NUNCA digas 'el job "
                         "terminó bien' cuando aparece esta detección.")
+                # Bug real 5/9: "CANCELLED ... DUE TO SIGNAL" en el log es Slurm matando
+                # el job desde AFUERA (casi siempre preempción real de scavenger, o un
+                # scancel manual) — NO tiene relación con warnings benignos del programa
+                # (ej. "(ignored)" de CUDA/MPI en nodos sin GPU). Sin esta aclaración el
+                # modelo conecta cosas sueltas del log y alucina una causa técnica falsa.
+                _cancelled_by_signal = bool(_re_diag2.search(
+                    r'CANCELLED AT .* DUE TO SIGNAL', log_content, _re_diag2.IGNORECASE))
+                if _cancelled_by_signal:
+                    if _job_qos == "scavenger" or "scavenger" in log_content.lower()[:200]:
+                        _fail_warning += (
+                            "\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene \"CANCELLED ... DUE TO "
+                            "SIGNAL\" y el job es QOS scavenger — esto es Slurm matando el job "
+                            "DESDE AFUERA, casi siempre PREEMPCIÓN real (otro job de mayor "
+                            "prioridad necesitó el nodo), NO un bug del programa. Los warnings "
+                            "marcados \"(ignored)\" en el log (ej. CUDA/MPI en nodos sin GPU) "
+                            "son benignos y NO causan esta cancelación — NO inventar una causa "
+                            "técnica conectándolos con la señal. Explicar que es preempción de "
+                            "scavenger (esperable, prioridad 50, oportunista) y no un error a "
+                            "corregir en el script.")
+                    else:
+                        _fail_warning += (
+                            "\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene \"CANCELLED ... DUE TO "
+                            "SIGNAL\" — Slurm mató el job desde afuera (scancel manual, límite "
+                            "de tiempo/memoria excedido, o similar). NO inventar una causa "
+                            "técnica del programa (ej. warnings benignos marcados 'ignored') "
+                            "para esto sin evidencia real en el log.")
                 diag_msg = (f"Logs del job {job_id}:{script_section}\n\n"
                             f"{log_content}\n\n"
                             f"Analizá los logs. Si hay errores explicá qué falló y cómo corregirlo. "
