@@ -23,6 +23,8 @@ Commands (type inside the prompt):
   /compact                   resume la conversación y libera contexto
   /clear                     limpia los mensajes de la sesión (el historial queda en DB)
   /model                     muestra el modelo y endpoint actual
+  /raw                       activa/desactiva bloques de código sin recuadro (más
+                             fácil de copiar en terminales básicas como la de Windows)
   /help                      muestra esta ayuda
   ~/.gonzabot/context.txt    contexto personal (área, software, rol — se carga al inicio de sesión)
   Ctrl-D / /exit             salir
@@ -171,6 +173,7 @@ def _ensure_echo():
 _HINTS = "\x1b[2m  ↑↓ historial  ·  ctrl+l limpiar  ·  ctrl+c cancelar\x1b[0m"
 _ESC_PASTE_PENDING: list[str] = []  # paste detectado durante streaming → inyectar en próximo _raw_input
 _SB_ACTIVE = False        # status bar activa
+_RAW_MODE = False         # /raw: bloques de código sin recuadro (copy/paste en Windows)
 _ALTSCREEN_ACTIVE = False # alternate screen (no se usa — mantener False)
 _SESSION_TOKENS = 0  # tokens acumulados en la sesión
 _console: "_RichConsole | None" = None   # instancia global de rich Console
@@ -1611,6 +1614,24 @@ def _fix_sbatch(text: str) -> str:
                          "puede abrir directo con np.load — hay que descomprimir antes "
                          "(gunzip) o usar np.load(gzip.GzipFile('archivo.npz.gz')) para "
                          "leerlo comprimido sin un paso separado")
+        # Bug real 5/9 (reporte de usuario real): "spack load
+        # py-numpy py-scipy py-matplotlib" bare falla — py-numpy/py-scipy son
+        # ambiguos a propósito (3 ecosistemas, "matches multiple packages") y
+        # py-matplotlib tiene su propio env file documentado que YA incluye
+        # numpy+scipy juntos. El modelo a veces genera esto igual (variabilidad),
+        # así que hace falta atraparlo determinísticamente, no confiar en que
+        # siempre elija bien.
+        _bare_ambiguous = {"py-numpy", "py-scipy", "py-matplotlib", "py-pandas"}
+        for m in _re.finditer(r'\bspack\s+load\s+(?:--sh\s+)?([\w\s.-]+)', block):
+            _pkgs = set(m.group(1).split())
+            _hit = _pkgs & _bare_ambiguous
+            if _hit:
+                warns.append(f"'spack load {' '.join(sorted(_hit))}' bare falla o es "
+                             f"ambiguo (py-numpy/py-scipy dan 'matches multiple packages', "
+                             f"3 ecosistemas reales) — usar "
+                             f"'source /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env' "
+                             f"(ya incluye numpy+scipy+matplotlib) o el hash exacto de cada uno")
+                break
         return warns
 
     def _lint_lammps(block: str) -> list[str]:
@@ -2105,6 +2126,12 @@ def _selftest() -> int:
         "python3 -c \"import gzip,numpy as np; np.load(gzip.GzipFile('resultados_realization0000.npz.gz'))\""))
     _t("lint: gzip *.npz + GzipFile en el mismo bloque → sin warning (ya sabe cómo releerlo)",
        "⚠" not in r)
+    r = _fix_sbatch(B.format("spack load py-numpy py-scipy py-matplotlib"))
+    _t("lint: 'spack load py-numpy py-scipy py-matplotlib' bare (bug real 5/9, reporte "
+       "de usuario real) → avisa que es ambiguo/roto y sugiere matplotlib.env",
+       "matplotlib.env" in r and "matches multiple packages" in r)
+    r = _fix_sbatch(B.format("source /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env"))
+    _t("lint: matplotlib.env (patrón correcto) → sin warning", "⚠" not in r)
     r = _fix_sbatch(B.format(
         "VG5ODAZJ=$(/apps/local/spack/spack-2026b/spack/bin/spack location -i vg5odazj 2>/dev/null)"))
     _t("lint: hash real de spack sin '/' inicial (bug real 30/8, spack lo lee como nombre de paquete)",
@@ -2737,8 +2764,13 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
             _lv[0] = None
 
     if not silent:
-        if user_aborted.is_set() and full_text:
-            print(_c(YEL, " [ESC]"))
+        if user_aborted.is_set():
+            # Bug real 5/9 (usuarios reportan "aprieto Ctrl-C y no sé si funcionó o
+            # está roto"): Ctrl-C a mitad de una respuesta solo cancela ESA respuesta,
+            # no cierra gonzabot — sin aviso explícito la gente no lo sabe. Mostrar
+            # siempre algo, incluso si full_text está vacío (Ctrl-C apretado muy al
+            # principio, antes de que llegue texto).
+            print(_c(YEL, " [cancelado — Ctrl-C de nuevo en el prompt para salir]"))
         elif _console is None:
             print()  # newline after streaming (live mode no lo necesita)
     text = "".join(full_text)
@@ -2845,15 +2877,23 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                 if _part.startswith("```"):
                     if code_idx < len(_rich_blocks):
                         _rb_lang, _rb_lines, _rb_title = _rich_blocks[code_idx]
-                        lexer = _LANG_DISPLAY.get(_rb_lang.lower(), _rb_lang or "text")
-                        syn   = _Syn("\n".join(_rb_lines), lexer, theme="monokai",
-                                     line_numbers=False, word_wrap=False)
                         _ref_num  = code_idx + 1
                         _ref_lbl  = f"#REF{_ref_num}" if _n_blocks > 1 else "#REF"
-                        _cp_hint  = f"[dim] ⎘ /copy {_ref_num} [/dim]" if _n_blocks > 1 else "[dim] ⎘ /copy [/dim]"
-                        _lp       = f"[dim]{_rb_lang}[/dim] " if _rb_lang else ""
-                        _console.print(_Pan(syn, title=f"{_lp}[bold cyan]{_ref_lbl}[/bold cyan]{_cp_hint}",
-                                            border_style="cyan", padding=(0, 1)))
+                        if _RAW_MODE:
+                            # Sin Panel: texto plano, nada de bordes que se seleccionen
+                            # junto con el código al copiar/pegar (bug real 5/9).
+                            _lbl_plain = f"{_ref_lbl} ({_rb_lang})" if _rb_lang else _ref_lbl
+                            _console.print(f"[dim cyan]--- {_lbl_plain} ---[/dim cyan]")
+                            _console.print("\n".join(_rb_lines), markup=False, highlight=False)
+                            _console.print(f"[dim cyan]--- fin {_ref_lbl} ---[/dim cyan]")
+                        else:
+                            lexer = _LANG_DISPLAY.get(_rb_lang.lower(), _rb_lang or "text")
+                            syn   = _Syn("\n".join(_rb_lines), lexer, theme="monokai",
+                                         line_numbers=False, word_wrap=False)
+                            _cp_hint  = f"[dim] ⎘ /copy {_ref_num} [/dim]" if _n_blocks > 1 else "[dim] ⎘ /copy [/dim]"
+                            _lp       = f"[dim]{_rb_lang}[/dim] " if _rb_lang else ""
+                            _console.print(_Pan(syn, title=f"{_lp}[bold cyan]{_ref_lbl}[/bold cyan]{_cp_hint}",
+                                                border_style="cyan", padding=(0, 1)))
                         code_idx += 1
                 else:
                     _ps = _part.strip()
@@ -2921,6 +2961,8 @@ Comandos:
   /history <keyword ...>     Busca en el historial e inyecta resultados como contexto
   /history <session_id>      Carga una sesión completa como contexto (formato: YYYYMMDD-HHMMSS)
   /model                     Muestra el modelo y endpoint actual
+  /raw                       Activa/desactiva bloques de código sin recuadro (más
+                             fácil de copiar en terminales básicas como la de Windows)
   /help                      Muestra esta ayuda
   Ctrl-D / /exit             Salir
 
@@ -3034,7 +3076,7 @@ def repl(new_session: bool = False):
         _KNOWN_CMDS = {
             "/exit", "/quit", "/q", "/help", "/queue", "/save", "/saveall", "/copy",
             "/edit", "/diff", "/audit", "/diagnose", "/history", "/compact",
-            "/clear", "/paste", "/load", "/branch", "/model",
+            "/clear", "/paste", "/load", "/branch", "/model", "/raw",
         }
         _first_slash_word = user_input.split(None, 1)[0].lower() if user_input.startswith("/") else ""
         if _first_slash_word in _KNOWN_CMDS:
@@ -3049,6 +3091,21 @@ def repl(new_session: bool = False):
 
             elif cmd == "/help":
                 print(HELP_TEXT)
+
+            elif cmd == "/raw":
+                # Bug real 5/9 (reporte de usuario real): en terminales
+                # básicas (ej. la de Windows por default) seleccionar con el mouse para
+                # copiar agarra también los bordes del recuadro de rich.Panel — molesto,
+                # hay que borrarlos a mano después. /raw saca el recuadro de los bloques
+                # de código (texto plano, fácil de seleccionar) sin tocar /saveall.
+                global _RAW_MODE
+                _RAW_MODE = not _RAW_MODE
+                if _RAW_MODE:
+                    print(_c(GRN, "Modo raw activado — los bloques de código salen sin "
+                                  "recuadro, más fácil de copiar en terminales básicas."))
+                else:
+                    print(_c(GRN, "Modo raw desactivado — vuelven los recuadros con "
+                                  "resaltado de sintaxis."))
 
             elif cmd == "/model":
                 print(f"  Endpoint: {VLLM_BASE}")
@@ -4670,6 +4727,12 @@ def repl(new_session: bool = False):
         print()
 
     _sb_teardown()
+    # Bug real 5/9 (reporte de usuario real): al salir queda toda
+    # la charla vieja en el scroll de la terminal — molesto para deslizar y para
+    # copiar (queda el marco de los bloques). Limpiar pantalla real (no solo el
+    # contexto de la conversación, eso ya lo hace /clear) antes del mensaje final.
+    sys.stdout.write("\x1b[2J\x1b[H")
+    sys.stdout.flush()
     print(_c(DIM, "Hasta luego."))
     con.close()
 
