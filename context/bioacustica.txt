@@ -1,0 +1,31 @@
+# MANTENIMIENTO: bioacústica marina (PAMGuard). Agregado 7/9/2026, primer
+# paquete Maven/Java del store spack-2026b.
+# Editar SIEMPRE bioacustica-dev.txt → testear → \cp a shared/.../bioacustica.txt
+
+⚠ PAMGuard es una app GUI (arranca una interfaz gráfica, igual que casaviewer/plotms/imview de
+CASA) — NUNCA en sbatch batch (ni `java -jar pamguard.jar` ni ningún wrapper), necesita X11:
+sesión interactiva con `srun --x11` o `ssh -Y`. Si el usuario pide un sbatch para correrlo
+"en background", avisar que no va a funcionar así — la app necesita pantalla.
+
+PAMGuard 2.02.19 — detección/clasificación de ballenas, delfines y ruido ambiente (bioacústica
+marina). Un solo build sirve para CPU y GPU (a diferencia de LAMMPS/GROMACS no hace falta
+bifurcar — los módulos base son Java puro, el módulo opcional de deep learning detecta GPU en
+runtime, sin necesitar un hash aparte):
+
+  salloc -p cpu --x11 --time=HH:MM:SS   # o desde un ssh -Y a un nodo con job activo
+  spack load pamguard   # bare, sin ambigüedad — un solo hash /cfwxlsq hoy
+  pamguard               # binario, arranca la interfaz (NO java -jar directo)
+  # NO construir una ruta manual tipo ${PAMGUARD_DIR}/bin/pamguard ni "spack location -i
+  # /hash" para esto — a diferencia de LAMMPS/CASA/GROMACS, acá NO hace falta: "spack load
+  # pamguard" ya deja el binario "pamguard" solo, directo en el PATH. Inventar una ruta manual
+  # (ej. algo bajo /opt/... o /var/spack/environments/...) es alucinación, no existe así.
+
+GPU: confirmado funcionando en A100 real (no simulado) — PyTorch y ONNX Runtime GPU al 100%.
+TensorFlow queda en CPU (limitación conocida del módulo de deep learning de PAMGuard, no
+bloqueante — avisar al usuario si pregunta específicamente por TF+GPU acá, no prometer que anda).
+
+⚠ GOTCHA real (si en el futuro se instala algo más con DJL — Deep Java Library — o similar):
+si la librería ya trae su propio cuDNN empaquetado (ej. pytorch-native-cuXXX lo incluye), NO
+poner un cuDNN del sistema en LD_LIBRARY_PATH — lo tapa con una versión ABI-incompatible y
+rompe con "undefined symbol". No es específico de PAMGuard, aplica a cualquier stack Java/DJL
+con GPU que se instale después.

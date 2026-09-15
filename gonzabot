@@ -1055,12 +1055,15 @@ _RE_GENOMICA = re.compile(
 _RE_CASA = re.compile(
     r'\bcasa\b|casaviewer|casalith|mpicasa|\btclean\b|\bflagdata\b', re.IGNORECASE)
 _RE_OTROSLANG = re.compile(r'fortran|\boctave\b', re.IGNORECASE)
+_RE_BIOACUSTICA = re.compile(
+    r'pamguard|bioac[uú]stic|\bballena|\bdelf[ií]n|whale|dolphin|'
+    r'acustica.*marin|marin.*acustic', re.IGNORECASE)
 _RE_PYTHON = re.compile(
     r'python|numpy|scipy|matplotlib|pandas|sklearn|torch|jax\b|cupy|numba|mpi4py|'
     r'jupyter|geopandas|spglib|statsmodels|dask|xarray|pymatgen|phonopy|'
     r'py-|\.py\b|tidyverse|ggplot|rscript|\br\b|apptainer|singularity|'
     r'gsl\b|pycharm|gnuplot|paraview|ovito|adios|oneapi|intel.*compil|icx\b|ifx\b|'
-    r'grace\b|xmgrace|tensorflow|'
+    r'grace\b|xmgrace|tensorflow|kuenm|makurhini|'
     # bug real 30/8: "pdf con latex" no cargaba python.txt (única sección con la
     # nota "TEXLIVE ROTO desde el 1/8") — el modelo alucinaba un pdflatex que falla.
     r'\blatex|pdflatex|texlive|\.tex\b',
@@ -1076,7 +1079,8 @@ _RE_SPACK = re.compile(
     r'wannier90|geant4?|cern|potfit|cuda|nvcc|julia|nvhpc|nccl|fortran|\boctave\b|'
     r'\bmpi\b|mpirun|mpiexec|mpicc|cp2k|openfoam|vasp|namd|plumed|valgrind|'
     r'\bcasa\b|casaviewer|casalith|mpicasa|\btclean\b|\bflagdata\b|'
-    r'trimmomatic|spades|quast|busco|gen[oó]mic|spack',
+    r'trimmomatic|spades|quast|busco|gen[oó]mic|spack|'
+    r'pamguard|bioac[uú]stic|\bballena|\bdelf[ií]n|whale|dolphin',
     re.IGNORECASE
 )
 
@@ -1093,6 +1097,7 @@ _SEGMENTS: list[tuple[str, "re.Pattern[str] | None"]] = [
     ("genomica", _RE_GENOMICA),
     ("casa", _RE_CASA),
     ("otros-lang", _RE_OTROSLANG),
+    ("bioacustica", _RE_BIOACUSTICA),
     ("python", _RE_PYTHON),
 ]
 
@@ -1515,14 +1520,31 @@ def _fix_sbatch(text: str) -> str:
         warns = []
         created = set(_re.findall(r'>\s*(\S+)\s*$', block, _re.M))
         created |= set(_re.findall(r'\bcp\s+\S+\s+(\S+)', block))
+        _sourced_paths = set()
         for m in _re.finditer(r'^\s*(?:source|\.)\s+(/(?:mnt|apps|usr|data)/\S+?)(?:\s|$)',
                               block, _re.M):
             path = m.group(1)
+            _sourced_paths.add(path)
             if path in created:
                 continue
             if not os.path.exists(path):
                 warns.append(f"'{path}' no existe en el filesystem — "
                              f"verificar la ruta antes de sourcearla")
+        # Mismo chequeo que arriba pero para binarios invocados DIRECTO (no via
+        # source) con una ruta absoluta hardcodeada — bug real 15/9 (probado en
+        # vivo: el modelo inventó "/opt/apps/local/spack/.../environments/pamguard/
+        # bin/pamguard" en vez del "pamguard" bare que ya queda en PATH tras
+        # "spack load pamguard"). Genérico, no específico de PAMGuard.
+        for m in _re.finditer(r'(?:^|&&|;|\|)\s*(/(?:mnt|apps|usr|data|opt)/\S+?)'
+                              r'(?:\s|$)', block, _re.M):
+            path = m.group(1)
+            if path in created or path in _sourced_paths:
+                continue
+            if not os.path.exists(path):
+                warns.append(f"'{path}' no existe en el filesystem — parece una ruta "
+                             f"inventada, verificar antes de invocarla directo (¿el "
+                             f"paquete no queda mejor con 'spack load' + comando bare, "
+                             f"o con '$SPACK location -i /hash'?)")
         # No restringido a sufijo _DIR/_BIN: bug real 30/8 (SPACK/AOCC bare,
         # sin sufijo, usados en un sbatch de GSL sin nunca asignarlos).
         _STD_ENV_VARS = {"HOME", "USER", "PATH", "PWD", "OLDPWD", "TMPDIR",
@@ -1632,6 +1654,34 @@ def _fix_sbatch(text: str) -> str:
                              f"'source /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env' "
                              f"(ya incluye numpy+scipy+matplotlib) o el hash exacto de cada uno")
                 break
+        # Bug real 15/9 (probado en vivo con "pamware"→pamguard): apps GUI metidas
+        # en un #SBATCH batch normal, sin avisar que necesitan pantalla. El contexto
+        # solo (bioacustica.txt/casa.txt) no alcanzó para que el modelo lo evitara
+        # de forma confiable — hace falta atraparlo determinísticamente, no confiar
+        # en que el modelo respete la instrucción siempre (misma lección que
+        # bare_ambiguous arriba).
+        if _re.search(r'^\s*#SBATCH\b', block, _re.M):
+            _gui_apps = {"pamguard", "casaviewer", "plotms", "imview"}
+            _gui_hit = None
+            for m in _re.finditer(r'(?:^|&&|;|\|)\s*([\w./-]+)', block, _re.M):
+                _cmd = m.group(1).rsplit('/', 1)[-1]
+                if _cmd in _gui_apps:
+                    _gui_hit = _cmd
+                    break
+            # Evasión real vista en vivo 15/9: en vez de invocar el binario directo,
+            # el modelo a veces hace "java -jar PamGuard.jar" — el comando visible
+            # es "java", no "pamguard", así que el match de arriba no lo agarra.
+            if not _gui_hit:
+                _m2 = _re.search(r'\bjava\b[^\n]*-jar\s+\S*(' +
+                                 '|'.join(_gui_apps) + r')\S*', block, _re.IGNORECASE)
+                if _m2:
+                    _gui_hit = _m2.group(1).lower()
+            if _gui_hit:
+                    warns.append(f"'{_gui_hit}' es una app GUI (arranca una interfaz gráfica) "
+                                 f"metida en un sbatch batch normal — NO va a funcionar así, "
+                                 f"necesita sesión interactiva con pantalla: "
+                                 f"'salloc -p cpu --x11 --time=HH:MM:SS' (o 'ssh -Y' a un nodo "
+                                 f"con job activo) y correrla ahí directo, nunca en #SBATCH")
         return warns
 
     def _lint_lammps(block: str) -> list[str]:
@@ -2133,6 +2183,28 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("source /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env"))
     _t("lint: matplotlib.env (patrón correcto) → sin warning", "⚠" not in r)
     r = _fix_sbatch(B.format(
+        "spack load pamguard\n"
+        "pamguard --input /ruta/archivos.wav"))
+    _t("lint: app GUI (pamguard) metida en #SBATCH batch (bug real 15/9, probado en vivo "
+       "con 'pamware'→pamguard) → avisa que necesita salloc --x11, nunca sbatch",
+       "GUI" in r and "--x11" in r)
+    r = _fix_sbatch("```bash\nsalloc -p cpu --x11 --time=01:00:00\n```")
+    _t("lint: pamguard/casaviewer fuera de un bloque #SBATCH (ej. solo el salloc) → "
+       "sin warning (no hay ninguna app GUI invocada acá)", "⚠" not in r)
+    r = _fix_sbatch(B.format("java -jar /path/to/PamGuard.jar"))
+    _t("lint: 'java -jar PamGuard.jar' en #SBATCH (evasión real vista en vivo 15/9 — el "
+       "comando visible es 'java', no 'pamguard') → igual avisa GUI/--x11",
+       "GUI" in r and "--x11" in r)
+    r = _fix_sbatch(B.format(
+        "spack load pamguard\n"
+        "/opt/apps/local/spack/spack-2026b/spack/var/spack/environments/pamguard/bin/pamguard"))
+    _t("lint: ruta de binario inventada (bug real 15/9, el modelo alucinó este path exacto "
+       "en vivo en vez del 'pamguard' bare) → avisa que no existe en el filesystem",
+       "no existe en el filesystem" in r)
+    r = _fix_sbatch(B.format("/apps/local/spack/spack-2026b/spack/bin/spack --version"))
+    _t("lint: ruta real y existente invocada directo → sin warning (no es alucinación)",
+       "⚠" not in r)
+    r = _fix_sbatch(B.format(
         "VG5ODAZJ=$(/apps/local/spack/spack-2026b/spack/bin/spack location -i vg5odazj 2>/dev/null)"))
     _t("lint: hash real de spack sin '/' inicial (bug real 30/8, spack lo lee como nombre de paquete)",
        "sin '/'" in r and "/vg5odazj" in r)
@@ -2259,6 +2331,15 @@ def _selftest() -> int:
     _t("_RE_QUEUE_OPT: pregunta genérica sin intención de optimizar recursos "
        "→ sin falso positivo",
        not bool(_RE_QUEUE_OPT.search("como compilo un programa con gcc")))
+    _t("_RE_BIOACUSTICA: 'pamguard' dispara carga de bioacustica.txt (agregado 7/9, "
+       "primer paquete Maven/Java del store)",
+       bool(_RE_BIOACUSTICA.search("como cargo pamguard para detectar ballenas")))
+    _t("_RE_BIOACUSTICA: sin mención de bioacústica/pamguard → sin falso positivo",
+       not bool(_RE_BIOACUSTICA.search("como compilo un programa con gcc")))
+    _t("_RE_PYTHON: 'kuenm'/'makurhini' solos (sin decir R) disparan carga de python.txt "
+       "(agregado 7/9, evita alucinar hash de R para estos paquetes)",
+       bool(_RE_PYTHON.search("como corro un modelo de nicho con kuenm"))
+       and bool(_RE_PYTHON.search("necesito makurhini para conectividad de paisaje")))
     _core_candidate = next((p for p in (CONTEXT_DIR / "core-dev.txt", CONTEXT_DIR / "core.txt") if p.exists()), None)
     _CTX_CORE_TEXT = _core_candidate.read_text(encoding="utf-8", errors="replace") if _core_candidate else ""
     _t("core.txt: la regla mpirun-vs-srun vive acá (siempre cargado, no depende "
