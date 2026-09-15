@@ -112,7 +112,19 @@ contextos largos. Reporte y repro standalone:
   `cd $WORKDIR` inyectado sobre rutas relativas que ya funcionaban, `\$`
   espurios fuera de heredoc, `module load` con nombre de paquete ambiguo en
   Spack, separadores decorativos de comentario mal interpretados como
-  alucinación de hash, etc.), con batería de tests (`gonzabot --selftest`).
+  alucinación de hash, software GUI metido en `#SBATCH` cuando necesita
+  sesión interactiva con X11, cualquier ruta absoluta hardcodeada que no
+  existe en el filesystem real, etc.), con batería de tests
+  (`gonzabot --selftest`).
+- Lección aprendida a las malas: una instrucción puntual, específica de un
+  segmento ("este software GUI necesita sesión interactiva, no `sbatch`")
+  perdió siempre contra una regla más fuerte, siempre cargada, redactada
+  como absoluta ("todo corre vía `sbatch`, sin excepciones") — el modelo
+  seguía generando scripts batch igual. Arreglarlo de raíz significó editar
+  la excepción DENTRO de la regla absoluta, no agregar una nota que compita
+  desde otro lado. El lint determinístico de arriba quedó igual como
+  respaldo — el contexto puede orientar al modelo, pero solo el código lo
+  garantiza.
 - `gonzabot-watcher.sh` — cron liviano que enciende el servicio vLLM bajo
   demanda (por flag file) si no está corriendo. El apagado por inactividad
   lo hace el propio job de vLLM (ver `tutorial/vllm-service.sbatch`), no
@@ -230,6 +242,28 @@ hardware). Aclaración honesta: es una sola corrida de una sola composición
 (50B de las nueve del paper) — una demo de la capacidad real de gonzabot,
 no una validación independiente estadísticamente rigurosa (para eso harían
 falta varias semillas).
+
+## Contribuciones upstream
+
+Mantener andando de verdad el stack de Spack que gonzabot documenta, para
+el software real que corren nuestros usuarios, sacó a la luz bugs
+genuinos río arriba — varios ya mandados como PR a
+[spack/spack-packages](https://github.com/spack/spack-packages):
+
+- `grace`: detección de Motif fallando en builds con Xpm empaquetado, más
+  un fix de estrictez de GCC 14. Pasó por revisión real (`CHANGES_REQUESTED`
+  → corregido → aprobado, "LGTM!") de un mantenedor de Spack en IDRIS (un
+  centro nacional de HPC francés).
+- `octave`: un bug de lógica booleana en OpenGL/FLTK y dependencias GL/GLU
+  faltantes para la variante `+qt`.
+- `lammps`: `CUDA_HOST_COMPILER` sin definir para el build de GPU basado
+  en el `FindCUDA` legado.
+
+También fuera de Spack: un bug de convención de argumento `strlen` en
+LAPACK/LAPACKE en [potfit/potfit](https://github.com/potfit/potfit), y un
+error de redefinición por header duplicado en el build CUDA/CUPTI de
+TensorFlow
+([tensorflow/tensorflow#126059](https://github.com/tensorflow/tensorflow/pull/126059)).
 
 ## Tutorial: cómo lo armamos
 

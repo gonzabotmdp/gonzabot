@@ -110,7 +110,19 @@ Report and standalone repro:
   heredocs, `cd $WORKDIR` injected over relative paths that already
   worked, stray `\$` outside heredocs, `module load` with an ambiguous
   Spack package name, decorative comment separators misread as hash
-  hallucination, etc.), with a test suite (`gonzabot --selftest`).
+  hallucination, GUI software batched into `#SBATCH` when it needs an
+  interactive X11 session instead, any hardcoded absolute path that
+  doesn't actually exist on disk, etc.), with a test suite
+  (`gonzabot --selftest`).
+- Lesson learned the hard way: a narrow, segment-specific instruction
+  ("this one GUI package needs an interactive session, not `sbatch`")
+  lost every time against a stronger, always-loaded rule phrased as
+  absolute ("everything runs via `sbatch`, no exceptions") — the model
+  kept generating batch scripts for it regardless. Fixing it required
+  editing the exception into the absolute rule itself, not adding a
+  competing note elsewhere. The deterministic lint above stayed in
+  place as a backstop either way — context can steer the model, but
+  only code enforces.
 - `gonzabot-watcher.sh` — a lightweight cron that starts the vLLM service
   on demand (via a flag file) if it isn't running. Shutdown on idle is
   handled by the vLLM job itself (see
@@ -174,6 +186,26 @@ independent MD runs (seed, LAMMPS version, hardware). Honest caveat: this
 is a single run of a single composition (50B out of the paper's nine) —
 a demo of gonzabot's real-world capability, not a statistically rigorous
 independent validation (that would need multiple seeds).
+
+## Upstream contributions
+
+Keeping the Spack stack gonzabot documents actually working, for the real
+software our users run, has surfaced genuine upstream bugs — several
+already sent back as PRs to [spack/spack-packages](https://github.com/spack/spack-packages):
+
+- `grace`: Motif detection failing on Xpm-bundled builds, plus a GCC 14
+  strictness fix — went through real review (`CHANGES_REQUESTED` →
+  revised → approved, "LGTM!") from a Spack maintainer at IDRIS (a French
+  national HPC center).
+- `octave`: an OpenGL/FLTK boolean-logic bug and missing GL/GLU deps for
+  the `+qt` variant.
+- `lammps`: `CUDA_HOST_COMPILER` unset for the legacy `FindCUDA`-based GPU
+  build.
+
+Also outside Spack: a LAPACK/LAPACKE `strlen`-argument convention bug in
+[potfit/potfit](https://github.com/potfit/potfit), and a duplicate-header
+redefinition error in TensorFlow's CUDA/CUPTI build
+([tensorflow/tensorflow#126059](https://github.com/tensorflow/tensorflow/pull/126059)).
 
 ## Requirements
 

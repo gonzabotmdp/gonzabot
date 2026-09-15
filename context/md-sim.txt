@@ -5,11 +5,18 @@
 
 --- LAMMPS CPU ---
 
-lammps@20250722.4 (/3xvrevx, AOCC, ~cuda) — recomendado, MPI puro. NUNCA "spack load lammps" a
-  secas — salió del wrapper de desambiguación a propósito (decisión softadm 22/8: CPU/GPU es
-  bifurcación real, no debe resolverse en silencio), usar el hash explícito:
+lammps@20250722.4 (/mgsqgyo, AOCC, ~cuda, +fep — actualizado 7/9, hash viejo /3xvrevx sin +fep
+  se borró) — recomendado, MPI puro. Paquete FEP (Free Energy Perturbation) disponible para
+  cálculos de energía libre por perturbación.
+  RECOMENDADO (actualizado 7/9): "spack load lammps-cpu" — alias ESTABLE en preferred-hashes.conf
+  que no cambia aunque el hash real sí cambie en el próximo rebuild (softadm solo actualiza esa
+  línea central, el script del usuario no se rompe). Para GPU: "spack load lammps-gpu".
+  "spack load lammps" a secas HOY resuelve a CPU (mismo hash que lammps-cpu) — pero es
+  comportamiento sin política firme (venía de una decisión vieja de sacarlo del wrapper que
+  nunca se aplicó del todo), no confiar en que siga así — usar SIEMPRE lammps-cpu/lammps-gpu
+  explícito, o el hash si hace falta:
   SPACK=/apps/local/spack/spack-2026b/spack/bin/spack
-  LAMMPS_DIR=$($SPACK location -i /3xvrevx 2>/dev/null)
+  LAMMPS_DIR=$($SPACK location -i /mgsqgyo 2>/dev/null)
   OMPI_DIR=$($SPACK location -i /2cgnkug 2>/dev/null)
   export PATH=${LAMMPS_DIR}/bin:${OMPI_DIR}/bin:$PATH
   POT=${LAMMPS_DIR}/share/lammps/potentials   # 256 potenciales ya incluidos, ej: pair_coeff * * ${POT}/Al_jnp.eam
@@ -31,9 +38,11 @@ log.lammps: NUNCA np.loadtxt() directo — el log tiene texto. Parsear así: `in
 
 --- LAMMPS GPU ---
 
-lammps@20250722.4 (/ung45dg, GCC14+cuda) ⚠ build GPU actual quedó en GCC14, no AOCC+cuda como
-  antes (regresión reportada a softadm 22/8, sin fecha de fix confirmada):
-  LAMMPS_DIR=$($SPACK location -i /ung45dg 2>/dev/null)
+lammps@20250722.4 (/odhttgc, GCC14+cuda, +fep — actualizado 7/9, hash viejo /ung45dg sin +fep se
+  borró) — mismo paquete FEP que la versión CPU. RECOMENDADO: "spack load lammps-gpu" (alias
+  estable, ver nota completa en la sección CPU de arriba). ⚠ build GPU sigue en GCC14, no
+  AOCC+cuda como antes (regresión reportada a softadm 22/8, sin fecha de fix confirmada):
+  LAMMPS_DIR=$($SPACK location -i /odhttgc 2>/dev/null)
   CUDA_DIR=$($SPACK location -i /okkjtu2 2>/dev/null)
   export PATH=${LAMMPS_DIR}/bin:${CUDA_DIR}/bin:$PATH
   export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1
