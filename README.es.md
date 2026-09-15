@@ -112,7 +112,19 @@ contextos largos. Reporte y repro standalone:
   `cd $WORKDIR` inyectado sobre rutas relativas que ya funcionaban, `\$`
   espurios fuera de heredoc, `module load` con nombre de paquete ambiguo en
   Spack, separadores decorativos de comentario mal interpretados como
-  alucinación de hash, etc.), con batería de tests (`gonzabot --selftest`).
+  alucinación de hash, software GUI metido en `#SBATCH` cuando necesita
+  sesión interactiva con X11, cualquier ruta absoluta hardcodeada que no
+  existe en el filesystem real, etc.), con batería de tests
+  (`gonzabot --selftest`).
+- Lección aprendida a las malas: una instrucción puntual, específica de un
+  segmento ("este software GUI necesita sesión interactiva, no `sbatch`")
+  perdió siempre contra una regla más fuerte, siempre cargada, redactada
+  como absoluta ("todo corre vía `sbatch`, sin excepciones") — el modelo
+  seguía generando scripts batch igual. Arreglarlo de raíz significó editar
+  la excepción DENTRO de la regla absoluta, no agregar una nota que compita
+  desde otro lado. El lint determinístico de arriba quedó igual como
+  respaldo — el contexto puede orientar al modelo, pero solo el código lo
+  garantiza.
 - `gonzabot-watcher.sh` — cron liviano que enciende el servicio vLLM bajo
   demanda (por flag file) si no está corriendo. El apagado por inactividad
   lo hace el propio job de vLLM (ver `tutorial/vllm-service.sbatch`), no

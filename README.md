@@ -110,7 +110,19 @@ Report and standalone repro:
   heredocs, `cd $WORKDIR` injected over relative paths that already
   worked, stray `\$` outside heredocs, `module load` with an ambiguous
   Spack package name, decorative comment separators misread as hash
-  hallucination, etc.), with a test suite (`gonzabot --selftest`).
+  hallucination, GUI software batched into `#SBATCH` when it needs an
+  interactive X11 session instead, any hardcoded absolute path that
+  doesn't actually exist on disk, etc.), with a test suite
+  (`gonzabot --selftest`).
+- Lesson learned the hard way: a narrow, segment-specific instruction
+  ("this one GUI package needs an interactive session, not `sbatch`")
+  lost every time against a stronger, always-loaded rule phrased as
+  absolute ("everything runs via `sbatch`, no exceptions") — the model
+  kept generating batch scripts for it regardless. Fixing it required
+  editing the exception into the absolute rule itself, not adding a
+  competing note elsewhere. The deterministic lint above stayed in
+  place as a backstop either way — context can steer the model, but
+  only code enforces.
 - `gonzabot-watcher.sh` — a lightweight cron that starts the vLLM service
   on demand (via a flag file) if it isn't running. Shutdown on idle is
   handled by the vLLM job itself (see
