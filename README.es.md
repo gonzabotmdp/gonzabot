@@ -243,6 +243,28 @@ hardware). Aclaración honesta: es una sola corrida de una sola composición
 no una validación independiente estadísticamente rigurosa (para eso harían
 falta varias semillas).
 
+## Contribuciones upstream
+
+Mantener andando de verdad el stack de Spack que gonzabot documenta, para
+el software real que corren nuestros usuarios, sacó a la luz bugs
+genuinos río arriba — varios ya mandados como PR a
+[spack/spack-packages](https://github.com/spack/spack-packages):
+
+- `grace`: detección de Motif fallando en builds con Xpm empaquetado, más
+  un fix de estrictez de GCC 14. Pasó por revisión real (`CHANGES_REQUESTED`
+  → corregido → aprobado, "LGTM!") de un mantenedor de Spack en IDRIS (un
+  centro nacional de HPC francés).
+- `octave`: un bug de lógica booleana en OpenGL/FLTK y dependencias GL/GLU
+  faltantes para la variante `+qt`.
+- `lammps`: `CUDA_HOST_COMPILER` sin definir para el build de GPU basado
+  en el `FindCUDA` legado.
+
+También fuera de Spack: un bug de convención de argumento `strlen` en
+LAPACK/LAPACKE en [potfit/potfit](https://github.com/potfit/potfit), y un
+error de redefinición por header duplicado en el build CUDA/CUPTI de
+TensorFlow
+([tensorflow/tensorflow#126059](https://github.com/tensorflow/tensorflow/pull/126059)).
+
 ## Tutorial: cómo lo armamos
 
 [`tutorial/`](tutorial/) tiene la bitácora real y los scripts que usamos

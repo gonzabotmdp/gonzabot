@@ -187,6 +187,26 @@ is a single run of a single composition (50B out of the paper's nine) —
 a demo of gonzabot's real-world capability, not a statistically rigorous
 independent validation (that would need multiple seeds).
 
+## Upstream contributions
+
+Keeping the Spack stack gonzabot documents actually working, for the real
+software our users run, has surfaced genuine upstream bugs — several
+already sent back as PRs to [spack/spack-packages](https://github.com/spack/spack-packages):
+
+- `grace`: Motif detection failing on Xpm-bundled builds, plus a GCC 14
+  strictness fix — went through real review (`CHANGES_REQUESTED` →
+  revised → approved, "LGTM!") from a Spack maintainer at IDRIS (a French
+  national HPC center).
+- `octave`: an OpenGL/FLTK boolean-logic bug and missing GL/GLU deps for
+  the `+qt` variant.
+- `lammps`: `CUDA_HOST_COMPILER` unset for the legacy `FindCUDA`-based GPU
+  build.
+
+Also outside Spack: a LAPACK/LAPACKE `strlen`-argument convention bug in
+[potfit/potfit](https://github.com/potfit/potfit), and a duplicate-header
+redefinition error in TensorFlow's CUDA/CUPTI build
+([tensorflow/tensorflow#126059](https://github.com/tensorflow/tensorflow/pull/126059)).
+
 ## Requirements
 
 - **Python 3.10+** (uses PEP 604 union types, e.g. `str | None`, without
