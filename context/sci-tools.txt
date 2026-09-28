@@ -1,0 +1,128 @@
+# MANTENIMIENTO: herramientas científicas NO-Python que antes vivían en python.txt (separado
+# 28/9 — cargar TODO python.txt para preguntas de gnuplot/R/GSL/etc empujaba el contexto a la
+# zona donde GLM-4.5-Air filtra razonamiento interno, ver nota en python.txt). Este archivo:
+# graficación interactiva (gnuplot/Grace/ParaView/OVITO/PyCharm), R+paquetes, y libs C/C++
+# (GSL/ADIOS2/Apptainer/MPICH/GDAL/AOCC/Intel), más Rust/Go/Node/LaTeX. Mismo formato que
+# python.txt: hash corto o env file + patrón de uso. Editar sci-tools-dev.txt → testear →
+# \cp a shared/.../sci-tools.txt
+
+PyCharm 2025.1.3 (IDE Python con X11): instalado en /apps/local/spack/opt/pycharm/pycharm-2025.1.3
+  (visible en nodos compute y ql-front). NUNCA "spack load pycharm" en nodos de cómputo (DB lock):
+    source /mnt/cpu-data/shared/ifimar-ai/envs/pycharm.env
+  O directamente: export PATH=/apps/local/spack/opt/pycharm/pycharm-2025.1.3/bin:$PATH
+  En ql-front: spack load pycharm; pycharm.sh (requiere ssh -X/-Y)
+  En nodo compute: srun --partition=cpu --ntasks=1 --cpus-per-task=4 --mem=16G --time=04:00:00 --x11 --pty bash → source /mnt/cpu-data/shared/ifimar-ai/envs/pycharm.env; pycharm.sh &
+
+gnuplot 6.0.0: ⚠ NUNCA ofrecer "source gnuplot.env" — apunta al store viejo, YA NO EXISTE.
+  Dos alias estables en preferred-hashes.conf (no cambian aunque el hash real cambie después):
+    spack load gnuplot      # headless, +cairo, sin qt — para terminales a archivo (pngcairo/
+                             # pdfcairo/epscairo/svg/dumb), la mayoría de los casos
+    spack load gnuplot-qt   # /2gg3xpa, %aocc, +qt REAL — ventana interactiva, requiere
+                             # ssh -X/-Y o VNC del lado del usuario, avisarle siempre.
+  Patrón headless (el más común): gnuplot -e "set terminal pngcairo; set output 'out.png'; plot 'datos.dat'"
+    (o un script .gp con esas líneas, gnuplot script.gp)
+  Patrón interactivo: srun --partition=cpu --x11 --pty bash → spack load gnuplot-qt; gnuplot →
+    set terminal qt; plot ...
+
+Grace 5.1.25 / xmgrace (graficación científica 2D):
+  source /mnt/cpu-data/shared/ifimar-ai/envs/grace.env   # setea PATH y GRACE_HOME (grace.env = symlink de xmgrace.env)
+  Batch (sin X11): gracebat datos.dat -hardcopy -hdevice PNG -printfile salida.png
+  Interactivo (con X11): srun --partition=cpu --x11 --pty bash → source .../xmgrace.env; xmgrace datos.dat
+  Formato: archivos .agr (nativo). gracebat -nxy datos.dat -hdevice EPS -printfile out.eps
+  CRITICO: xmgrace GUI necesita ssh -X/-Y (igual que gnuplot). Partición cpu.
+
+ParaView: ⚠ NO DISPONIBLE. Sacado de spack-2026b a propósito, el env file viejo (paraview.env)
+  apunta a un build borrado — no hay forma real de correrlo hoy. Si lo piden, avisar que no
+  está instalado, sin fecha de reinstalación. NUNCA generar sbatch, NUNCA usar el hash /4oatdsf
+  ni source paraview.env aunque el .env todavía exista en disco, su contenido es inválido.
+
+OVITO: ⚠ NO INSTALADO — `spack find ovito` no devuelve nada. Si lo piden, avisar que no está
+  disponible y no inventar el comando.
+
+ADIOS2 2.10.2 (I/O paralelo de alto rendimiento):
+  ADIOS_DIR=$($SPACK location -i adios2 2>/dev/null)
+  export PATH=${ADIOS_DIR}/bin:$PATH; export LD_LIBRARY_PATH=${ADIOS_DIR}/lib:${LD_LIBRARY_PATH}
+  Python: export PYTHONPATH=${ADIOS_DIR}/lib/python3.11/site-packages:$PYTHONPATH; import adios2
+  Binarios: adios2_iotest, adios2_reorganize, adios2_reorganize_mpi. Partición cpu.
+
+Intel oneAPI Compilers: DESINSTALADO A PROPÓSITO (decisión consciente del plan de unificación
+  spack, para que no se cuele como dependencia de grpc/tensorflow). Si piden icx/icpx/ifx,
+  avisar que no está y consultar antes de reinstalar.
+
+Intel MPI: ⚠ NO INSTALADO — `spack find intel-oneapi-mpi` no devuelve nada (se fue junto con
+  Intel oneAPI Compilers, mismo motivo). Si lo piden, avisar que no está disponible.
+  Códigos del cluster compilados con OpenMPI — openmpi único en spack-2026b ahora: /2cgnkug.
+
+R 4.5.2 (tidyverse 2.0.0, r-sf 1.0-16, r-terra 1.7-78). Usar SIEMPRE "spack load r" bare (vía
+  preferred-hashes.conf ya resuelve al hash bueno) o el hash explícito /3xnipqp:
+  ⚠ CRÍTICO: /aktpqec (otro hash de r@4.5.2 que también existe) tiene un bug real de BLAS
+  silencioso — cae a libRblas.so interno en vez de openblas, sin ningún error visible, solo
+  resultados de álgebra lineal lentos/distintos. NUNCA usar ese hash, siempre /3xnipqp.
+  R_DIR=$($SPACK location -i /3xnipqp 2>/dev/null)
+  export R_LIBS=$(find $R_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1)
+  ${R_DIR}/bin/Rscript script.R  # gráficos en sbatch: ggsave() o png()/dev.off() (NO X11). Partición cpu.
+  CRITICO heredoc: usar << 'REOF' (con comillas). Dentro de heredoc quoted, NO poner \ antes de $: escribir data$col NO data\$col.
+
+r-kuenm 1.1.3 (modelado de nicho ecológico, MaxEnt) y r-makurhini 2026-09-07 (conectividad de
+  paisaje) — corren sobre el R con BLAS arreglado de arriba (/3xnipqp):
+  KUENM_DIR=$($SPACK location -i /grccyrj 2>/dev/null)      # r-kuenm
+  MAKURHINI_DIR=$($SPACK location -i /p6r6ylu 2>/dev/null)  # r-makurhini
+  export R_LIBS=$(find $R_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1):$(find $KUENM_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1):$(find $MAKURHINI_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1)
+  ${R_DIR}/bin/Rscript script.R  # library(kuenm) / library(makurhini) adentro del script
+
+Apptainer 1.4.1 (contenedores Singularity-compatible, hash /utpbedt — actualizado 22/8, el viejo /jemmbsj ya no existe):
+  APPT=$($SPACK location -i /utpbedt 2>/dev/null)
+  export PATH=${APPT}/bin:$PATH
+  apptainer exec imagen.sif mi_prog; apptainer run docker://ubuntu:22.04 bash; apptainer pull docker://tensorflow/tensorflow:latest-gpu
+  Para GPU: partición gpu + --nv flag (apptainer exec --nv imagen.sif prog). Imágenes .sif en /mnt/gpu-data/$USER/ o /mnt/cpu-data/$USER/ (no /tmp).
+
+GSL 2.8 (GNU Scientific Library, hash /mq2eqdc):
+  GSL=$($SPACK location -i /mq2eqdc 2>/dev/null)
+  gcc -I${GSL}/include prog.c -L${GSL}/lib -lgsl -lgslcblas -Wl,-rpath,${GSL}/lib -o prog
+  Con AOCC: clang -O3 -march=znver4 -I${GSL}/include prog.c -L${GSL}/lib -lgsl -lgslcblas -Wl,-rpath,${GSL}/lib -o prog
+  Interpolación, integración (qags/qag), ODEIV2, álgebra lineal, FFT, RNG. Partición cpu.
+  Includes obligatorios: #include <gsl/gsl_errno.h> (GSL_CONTINUE, GSL_SUCCESS). Para Bessel:
+  #include <gsl/gsl_sf_bessel.h> (obligatorio, sin él gsl_sf_bessel_J0 no compila).
+  gsl_integration_qags requiere workspace — NO pasar 1e-8 donde va el workspace:
+    gsl_integration_workspace *w = gsl_integration_workspace_alloc(1000);
+    gsl_integration_qags(&F, a, b, 0, 1e-7, 1000, w, &result, &abserr);
+    gsl_integration_workspace_free(w);
+  CRITICO gsl_function: requiere double f(double x, void *params). Las gsl_sf_*() tienen firma
+    distinta (ej: gsl_sf_bessel_J0 tiene "const double", NO "void*") y NO se asignan directo,
+    siempre wrapper: double J0_wrapper(double x, void *params) { return gsl_sf_bessel_J0(x); }
+    gsl_function F = { .function = J0_wrapper, .params = NULL };
+    Dentro del loop del solver: NO llamar gsl_sf_bessel_J0(r) directo — usar solo las funciones
+    del solver (gsl_root_fsolver_root/_x_lower/_x_upper). Loop correcto:
+      do { iter++; gsl_root_fsolver_iterate(s);
+           status=gsl_root_test_interval(gsl_root_fsolver_x_lower(s),gsl_root_fsolver_x_upper(s),0,1e-10);
+      } while(status==GSL_CONTINUE && iter<max_iter);
+
+AOCC 5.0.0 (AMD clang/flang): nombre bare — resuelve solo, un único hash instalado, sin
+  ambigüedad, confirmado con `spack location -i aocc`:
+  AOCC=$($SPACK location -i aocc 2>/dev/null)
+  export PATH=${AOCC}/bin:$PATH   # CRITICO: este export es lo que pone clang en PATH. NO usar spack load para AOCC.
+  clang/clang++/flang -O3 -march=znver4. AOCC 5.0 = AMD clang 17.0.6 (LLVM). Partición cpu.
+  Para compilar con GSL+AOCC: export PATH=${AOCC}/bin:$PATH (luego clang, NO gcc).
+
+MPICH 5.0.1 (MPI alternativo; OpenMPI es la preferida): nombre bare, resuelve solo sin ambigüedad:
+  MPICH=$($SPACK location -i mpich 2>/dev/null)
+  export PATH=${MPICH}/bin:$PATH; export LD_LIBRARY_PATH=${MPICH}/lib:${LD_LIBRARY_PATH}
+  mpicc prog.c -o prog; mpiexec -np $SLURM_NTASKS ./prog. Partición cpu.
+
+GDAL 3.13.2 (geoespacial C/C++): nombre bare, resuelve solo sin ambigüedad:
+  GDAL=$($SPACK location -i gdal 2>/dev/null)
+  gcc -I${GDAL}/include prog.c -L${GDAL}/lib -lgdal -Wl,-rpath,${GDAL}/lib -o prog
+  NOTA: py-rasterio (python.txt) usa esto por debajo.
+
+Rust 1.97.1 (hash /7od5dmo, ~dev, gcc14 — hay un segundo build +dev en /as3euzv con
+  herramientas extra de desarrollo si hace falta, el de arriba alcanza para uso normal):
+  eval $(spack load --sh /7od5dmo); cargo build/run. Partición cpu.
+Go, Node.js: NO INSTALADOS. Avisar al usuario que no están disponibles, no inventar el comando.
+
+PDF con LaTeX: texlive 20260301 (hash /wyqdig2).
+  TEXLIVE_DIR=$($SPACK location -i /wyqdig2 2>/dev/null)
+  export PATH=${TEXLIVE_DIR}/bin/x86_64-linux:$PATH
+  pdflatex -interaction=nonstopmode documento.tex
+Heredoc bash: comillas (<<'EOF') evitan expansión de $/\ (el bot auto-quotea si falta). Marcadores distintos por bloque: <<'LMPEOF' LAMMPS, <<'PYEOF' Python, <<'TEXEOF' LaTeX.
+  LaTeX en heredoc <<'TEXEOF': backslash SIMPLE — escribir \documentclass, \begin{document}, \section (NO \\documentclass ni \\begin). Con comillas el shell no toca los backslashes.
+  Si necesitas variables bash dentro del heredoc: escribir el .py o .tex con Python usando f-strings o sed.

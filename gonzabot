@@ -175,7 +175,14 @@ _ESC_PASTE_PENDING: list[str] = []  # paste detectado durante streaming → inye
 _SB_ACTIVE = False        # status bar activa
 _RAW_MODE = False         # /raw: bloques de código sin recuadro (copy/paste en Windows)
 _ALTSCREEN_ACTIVE = False # alternate screen (no se usa — mantener False)
-_SESSION_TOKENS = 0  # tokens acumulados en la sesión
+_SESSION_TOKENS = 0  # tokens acumulados en TODA la sesión (nunca baja, ni con /compact —
+                      # /compact también gasta tokens al generar su propio resumen)
+_CURRENT_CTX_CHARS = 0  # tamaño real del último mensajes_to_send del chat PRINCIPAL (no
+                      # de /branch ni otros side-calls) — ESTE es el que /compact reduce.
+                      # Bug real 18/9: el usuario probó /compact, vio que _SESSION_TOKENS
+                      # (el de arriba) seguía subiendo, y asumió que /compact no funcionó
+                      # — estaba mirando la métrica equivocada. Separado para que el status
+                      # bar pueda mostrar las dos cosas sin confundirlas.
 _console: "_RichConsole | None" = None   # instancia global de rich Console
 _live: "_RichLive | None" = None         # instancia global de rich Live
 # Bloques de código de la última respuesta: [(lang, code, title)]  — para /save N /diff N /edit N
@@ -185,10 +192,16 @@ _LAST_CODE_BLOCKS: "list[tuple[str,str,str]]" = []
 def _make_status() -> "_RichText":
     """Arma el renderable del status bar para rich Live."""
     tok = _SESSION_TOKENS
+    ctx = _CURRENT_CTX_CHARS // 4
     tok_s = (f"  {tok/1000:.1f}k tok" if tok >= 1000
              else f"  {tok} tok" if tok > 0 else "")
+    # Mostrar el contexto ACTUAL por separado del acumulado -- son cosas distintas
+    # (ver comentario de _CURRENT_CTX_CHARS) y mostrar solo "tok" confundía si bajó
+    # de verdad tras un /compact (bug real 18/9).
+    ctx_s = (f"  ctx~{ctx/1000:.1f}k" if ctx >= 1000
+             else f"  ctx~{ctx}" if ctx > 0 else "")
     left = _RichText(no_wrap=True)
-    left.append(f" gonzabot · {MODEL}{tok_s}", style="dim cyan")
+    left.append(f" gonzabot · {MODEL}{ctx_s}{tok_s}", style="dim cyan")
     right = _RichText("↑↓ hist  ·  ctrl+l  ·  ctrl+c  ", justify="right", style="dim")
     return _RichColumns([left, right], expand=True)
 
@@ -323,7 +336,6 @@ def _raw_input(prompt: str) -> str:
             _sb_draw()
         if _is_sbatch and extra.lower() == "s":
             import tempfile as _tf
-            # Reconstruir desde lines para evitar artefactos del .strip()
             sb_text = "\n".join(lines)
             if not sb_text.startswith("#!"):
                 sb_text = "#!/bin/bash\n" + sb_text.lstrip("\n")
@@ -413,6 +425,7 @@ def _raw_input(prompt: str) -> str:
                         seq, esc = esc, ""
                         if seq == "\x1b[200~":
                             # ── Bracketed paste ─────────────────────────────
+                            # Chars que llegaron en el mismo chunk que el start marker
                             _bp_leftover = ch[_ci + 1:]
                             pbuf: list[str] = []
                             pesc = ""   # ventana deslizante últimos 6 chars
@@ -1061,10 +1074,18 @@ _RE_BIOACUSTICA = re.compile(
 _RE_PYTHON = re.compile(
     r'python|numpy|scipy|matplotlib|pandas|sklearn|torch|jax\b|cupy|numba|mpi4py|'
     r'jupyter|geopandas|spglib|statsmodels|dask|xarray|pymatgen|phonopy|'
-    r'py-|\.py\b|tidyverse|ggplot|rscript|\br\b|apptainer|singularity|'
+    r'py-|\.py\b|tensorflow|deepmd',
+    re.IGNORECASE
+)
+# sci-tools.txt: herramientas científicas NO-Python (separado de python.txt 28/9 -- cargar
+# TODO python.txt para una pregunta de gnuplot/R/GSL empujaba el contexto a la zona donde
+# GLM-4.5-Air filtra razonamiento interno, ver nota en el propio sci-tools.txt).
+_RE_SCITOOLS = re.compile(
+    r'tidyverse|ggplot|rscript|\br\b|apptainer|singularity|'
     r'gsl\b|pycharm|gnuplot|paraview|ovito|adios|oneapi|intel.*compil|icx\b|ifx\b|'
-    r'grace\b|xmgrace|tensorflow|kuenm|makurhini|'
-    # bug real 30/8: "pdf con latex" no cargaba python.txt (única sección con la
+    r'grace\b|xmgrace|kuenm|makurhini|\brust\b|\bcargo\b|mpich|gdal|'
+    r'\baocc\b|'
+    # bug real 30/8: "pdf con latex" no cargaba este segmento (única sección con la
     # nota "TEXLIVE ROTO desde el 1/8") — el modelo alucinaba un pdflatex que falla.
     r'\blatex|pdflatex|texlive|\.tex\b',
     re.IGNORECASE
@@ -1073,7 +1094,6 @@ _RE_PYTHON = re.compile(
 # cualquier pedido de software compilado (no-Python) — unión de los triggers
 # de arriba más extras sin sección propia (cp2k/openfoam/vasp/namd/plumed/
 # valgrind: sin contenido dedicado, pero listados en el inventario de spack).
-# Incluye \bmpi\b y mpicc (fix 29/8 que nunca se había sincronizado a prod).
 _RE_SPACK = re.compile(
     r'lammps|gromacs|amber(?!bar)|espresso|pw\.x|ph\.x|abinit|siesta|elk\b|'
     r'wannier90|geant4?|cern|potfit|cuda|nvcc|julia|nvhpc|nccl|fortran|\boctave\b|'
@@ -1099,6 +1119,7 @@ _SEGMENTS: list[tuple[str, "re.Pattern[str] | None"]] = [
     ("otros-lang", _RE_OTROSLANG),
     ("bioacustica", _RE_BIOACUSTICA),
     ("python", _RE_PYTHON),
+    ("sci-tools", _RE_SCITOOLS),
 ]
 
 
@@ -1146,7 +1167,7 @@ def _ctx_for_probe(probe: str, include_python: bool = True) -> str:
     for name, rx in _SEGMENTS:
         if name == "core":
             continue
-        if name == "python" and not include_python:
+        if name in ("python", "sci-tools") and not include_python:
             continue
         if rx and rx.search(probe) and _CTX.get(name):
             ctx += "\n\n" + _CTX[name]
@@ -1399,11 +1420,11 @@ def _fix_sbatch(text: str) -> str:
         # "source config.sh" en un script con 114 jobs reales corriendo; (2) "lmp -in
         # archivo.lmp" con el archivo real que el usuario cargó con /load — mismo patrón,
         # comando distinto. No tocar el directorio en ninguno de los dos casos.
-        if _re.search(r'^\s*(?:source|\.)\s+(?!["\']?[/$])\S', block, _re.M):
-            return block
         # El nombre puede tener una variable a mitad (ej. "-in script_k${k}.lmp", caso real
         # usuario4 29/8: un loop genera N archivos .lmp con el valor de un parámetro en el
         # nombre) — [\w${}.-]+ cubre eso además del nombre literal simple.
+        if _re.search(r'^\s*(?:source|\.)\s+(?!["\']?[/$])\S', block, _re.M):
+            return block
         if _re.search(r'-in\s+(?!["\']?[/$])[\w${}.-]+\.(?:lmp|lammps|in)\b', block):
             return block
         pm = _re.search(r'--partition[= ](gpu|cpu|scavenger)', block)
@@ -1450,7 +1471,6 @@ def _fix_sbatch(text: str) -> str:
         real que necesita expansión — quotearlo deja literales "${N}" sin resolver
         en los N archivos generados. Ahí no se toca."""
         _CODE_EXT = r'\.(in|lmp|lammps|tex|py|jl|m|R|C|cpp|f90|f95|pwi|fdf|mdin)\b'
-
         assigned = set(_re.findall(r'^\s*([A-Za-z_]\w*)\s*=[^=]', block, _re.M))
         assigned |= set(_re.findall(r'\bfor\s+(\w+)\s+in\b', block))
 
@@ -1518,14 +1538,41 @@ def _fix_sbatch(text: str) -> str:
         asignadas en el mismo bloque. Ambos son alucinaciones típicas de software
         poco frecuente en el contexto (ej. paquete nuevo recién instalado)."""
         warns = []
+        # Bug real 28/9 (visto en vivo probando la conversión LAMMPS CPU->GPU): el modelo
+        # usó "#SBATCH --workdir=...$SLURM_JOB_ID" -- las variables de shell NO se expanden
+        # en directivas #SBATCH (esas líneas las procesa Slurm antes de que exista un shell),
+        # queda literal "...$SLURM_JOB_ID" como parte del path. Regla ya existía en prosa en
+        # core.txt pero nunca como chequeo determinístico -- la prosa no alcanzó acá.
+        for m in _re.finditer(r'^\s*#SBATCH\s+--(workdir|chdir)=?\s*(\S*)', block, _re.M):
+            warns.append(
+                f"'#SBATCH --{m.group(1)}={m.group(2)}' — las variables de shell (como "
+                f"$SLURM_JOB_ID o $USER) NO se expanden en directivas #SBATCH, Slurm las "
+                f"procesa antes de que exista un shell. Sacar esta línea y usar WORKDIR=...; "
+                f"mkdir -p $WORKDIR; cd $WORKDIR como comando normal en el body del script.")
         created = set(_re.findall(r'>\s*(\S+)\s*$', block, _re.M))
         created |= set(_re.findall(r'\bcp\s+\S+\s+(\S+)', block))
+        # env files que EXISTEN en disco pero apuntan a un store viejo muerto por
+        # dentro -- os.path.exists() no alcanza acá, el archivo está ahí pero su
+        # contenido es inválido. Bug real 28/9 (usuario real cl-externos): el
+        # modelo sugirió "source .../gnuplot.env" a pesar de que python.txt dice
+        # explícito "NUNCA ofrecer 'source gnuplot.env' — roto". Lista sincronizada
+        # con la sección "PATRÓN ENV FILE" de python.txt -- si se arregla alguno
+        # ahí, sacarlo también de acá.
+        _BROKEN_ENV_FILES = {"geopandas.env", "mpi4py.env", "paraview.env",
+                              "gnuplot.env", "grace.env", "xmgrace.env",
+                              "tensorflow.env", "pycharm.env"}
         _sourced_paths = set()
         for m in _re.finditer(r'^\s*(?:source|\.)\s+(/(?:mnt|apps|usr|data)/\S+?)(?:\s|$)',
                               block, _re.M):
             path = m.group(1)
             _sourced_paths.add(path)
             if path in created:
+                continue
+            if os.path.basename(path) in _BROKEN_ENV_FILES:
+                warns.append(f"'source {path}' — ese .env está roto (apunta al store viejo "
+                             f"muerto, aunque el archivo exista en disco) — ver python.txt "
+                             f"para la alternativa que sí funciona (spack load directo con "
+                             f"hash, o avisar que el paquete no está disponible)")
                 continue
             if not os.path.exists(path):
                 warns.append(f"'{path}' no existe en el filesystem — "
@@ -1598,6 +1645,25 @@ def _fix_sbatch(text: str) -> str:
                 warns.append(f"'location -i {tok}' sin '/' — es un hash de spack, sin la "
                              f"barra spack lo interpreta como nombre de paquete y falla: "
                              f"usar '/{tok}'")
+        # Bug real 24/9 (usuario real cl-externos, reportado por Gonzalo): mismo bug de
+        # arriba pero un nivel de indirección más lejos -- el hash se asigna primero a una
+        # variable sin '/' (ej. R_HASH=3xnipqp) y recién después se usa como
+        # "location -i $R_HASH". El chequeo de arriba se salta a propósito cualquier token
+        # que empiece con '$' (no puede saber el valor en el caso general) -- pero acá el
+        # valor SÍ está a la vista, en una asignación simple más arriba en el mismo script.
+        for m in _re.finditer(r'\blocation\s+-i\s+\$\{?(\w+)\}?', block):
+            varname = m.group(1)
+            am = _re.search(rf'^\s*{_re.escape(varname)}=["\']?([^\s"\']+)', block, _re.M)
+            if am is None:
+                continue
+            val = am.group(1)
+            if val.startswith('/') or val.startswith('$'):
+                continue
+            if any(val.startswith(p) or p.startswith(val) for p in _hash_prefixes):
+                warns.append(f"'{varname}={val}' sin '/' inicial, usado después como "
+                             f"'location -i ${varname}' — es un hash de spack, spack lo "
+                             f"interpreta como nombre de paquete y falla: usar "
+                             f"'{varname}=/{val}'")
         # Bug real 30/8 (confirmado en un nodo de cómputo real): "spack env activate
         # .../rebuild-full" ESTRECHA la visibilidad de paquetes a los miembros de ESE
         # environment — un hash real y válido, pero de un paquete fuera del environment,
@@ -1769,6 +1835,56 @@ def _fix_sbatch(text: str) -> str:
                          "real, sin mpirun no reparte ranks (NUNCA -ntmpi con este build)")
         return warns
 
+    def _lint_process_lifecycle(block: str) -> list[str]:
+        """Bug real 28/9 (usuario real — Alejandro Alés, dos jobs LAMMPS que no
+        generaban resultados, reportado por Gonzalo): dos formas distintas de matar
+        un job antes de que produzca nada, ninguna con mensaje de error visible."""
+        warns = []
+        # (a) Comando de fondo ('&' al final de línea, no '&&') sin 'wait' después en
+        # el script -- el batch script llega a EOF apenas lo lanza, Slurm considera
+        # terminado el step y mata el proceso en background junto con toda la
+        # allocation, casi siempre antes de que alcance a producir output real.
+        # Caso real: "mpirun ... lmp -in ... &" como último comando, sin wait -- el
+        # .out quedaba con el eco de una línea de debug (o directamente vacío) y
+        # nada más, sin ningún mensaje de error que lo delate.
+        lines = block.splitlines()
+        for i, ln in enumerate(lines):
+            if _re.search(r'(?<!&)&\s*$', ln):
+                tail = "\n".join(lines[i + 1:])
+                if not _re.search(r'\bwait\b', tail):
+                    warns.append(
+                        f"comando en segundo plano ('{ln.strip()[-40:]}' termina en '&') "
+                        f"sin 'wait' después en el script — el batch script llega a EOF "
+                        f"apenas lo lanza, Slurm da el step por terminado y mata el "
+                        f"proceso en background (casi siempre antes de que produzca "
+                        f"output real, sin ningún error visible). Sacar el '&' (correr "
+                        f"en foreground) o agregar 'wait' inmediatamente después.")
+        # (b) 'spack load' usado pero la línea que sourcea setup-env.sh está
+        # comentada o ausente -- sin sourcear, "spack" no existe como función de
+        # shell (el binario crudo no puede modificar el shell actual) y "spack load"
+        # falla. Caso real: el usuario tenía la línea de source, pero comentada con
+        # '#' -- a diferencia del bug ya documentado de ".sh sin source adelante",
+        # acá el source SÍ estaba escrito, solo que deshabilitado. NO aplica a la forma
+        # "eval $(spack load --sh pkg)" -- patrón distinto, documentado aparte, y los
+        # tests existentes de esa forma no incluyen preamble de source a propósito.
+        if _re.search(r'\bspack\s+load\b(?!\s+--sh)', block):
+            has_active_source = False
+            for ln in lines:
+                stripped = ln.strip()
+                if stripped.startswith('#'):
+                    continue
+                if _re.search(r'^(?:source|\.)\s+\S*setup-env\.sh\b', stripped):
+                    has_active_source = True
+                    break
+            if not has_active_source:
+                warns.append(
+                    "'spack load' usado pero no hay una línea activa (sin comentar) que "
+                    "sourcee setup-env.sh — si esa línea está comentada con '#' o falta "
+                    "del todo, 'spack' no existe como función de shell y 'spack load' "
+                    "falla sin más aviso. Agregar/descomentar: "
+                    "source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh")
+        return warns
+
     # module name → (hash spack, nombre variable). Ver hpc.txt para la fuente de verdad.
     _MODULE_ALIASES = {
         "octave":    ("okdqlkti", "OCTAVE_DIR"),
@@ -1865,6 +1981,7 @@ def _fix_sbatch(text: str) -> str:
             if is_bash:
                 warns += _lint_filesystem(body)
                 warns += _lint_gromacs(body)
+                warns += _lint_process_lifecycle(body)
             if warns:
                 tail = "\n" + "\n".join(f"⚠ {w}" for w in dict.fromkeys(warns))
         return f"{fence}\n{body}\n```{tail}"
@@ -2160,6 +2277,60 @@ def _selftest() -> int:
                      "eval $(spack load --sh gromacs@2024.3%gcc@14.2.0+cuda)\n```")
     _t("lint: --gres=gpu con spec +cuda → sin warning (patrón correcto)", "⚠" not in r)
     r = _fix_sbatch(B.format(
+        "VG5ODAZJ=$(/apps/local/spack/spack-2026b/spack/bin/spack location -i vg5odazj 2>/dev/null)"))
+    _t("lint: hash real de spack sin '/' inicial (bug real 30/8, spack lo lee como nombre de paquete)",
+       "sin '/'" in r and "/vg5odazj" in r)
+    r = _fix_sbatch(B.format(
+        "R_HASH=3xnipqp\n"
+        "R_DIR=$(/apps/local/spack/spack-2026b/spack/bin/spack location -i $R_HASH 2>/dev/null)"))
+    _t("lint: hash sin '/' asignado a variable, usado como 'location -i $VAR' (bug real 24/9, "
+       "usuario real cl-externos con job fallido) — un nivel de indirección más que el caso de arriba",
+       "sin '/'" in r and "/3xnipqp" in r)
+    r = _fix_sbatch(B.format(
+        "mpirun \\\n"
+        "  --bind-to core \\\n"
+        "  lmp -in in.heatflux &\n"))
+    _t("lint: comando en background ('&') sin 'wait' después (bug real 28/9, usuario real "
+       "Alejandro Alés, dos jobs LAMMPS que morían sin output ni error visible)",
+       "wait" in r and "background" in r)
+    r = _fix_sbatch(B.format(
+        "mpirun \\\n"
+        "  --bind-to core \\\n"
+        "  lmp -in in.heatflux &\n"
+        "wait\n"))
+    _t("lint: comando en background CON 'wait' después → sin warning (patrón correcto)",
+       "sin 'wait'" not in r)
+    r = _fix_sbatch(B.format(
+        "# source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh\n"
+        "spack load lammps@20250722.4/mgsqgyo\n"))
+    _t("lint: 'spack load' con la línea de source comentada (bug real 28/9, mismo caso Alés — "
+       "distinto del bug ya conocido de '.sh sin source adelante': acá el source SÍ estaba "
+       "escrito, solo deshabilitado con '#')",
+       "spack load" in r and ("comentada" in r or "no hay una línea activa" in r))
+    r = _fix_sbatch(B.format(
+        "source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh\n"
+        "spack load lammps@20250722.4/mgsqgyo\n"))
+    _t("lint: 'spack load' con source activo → sin warning (patrón correcto)",
+       "no hay una línea activa" not in r)
+    r = _fix_sbatch(B.format(
+        "source /mnt/cpu-data/shared/ifimar-ai/envs/gnuplot.env\ngnuplot"))
+    _t("lint: source a un .env roto que SÍ existe en disco (bug real 28/9, usuario real "
+       "cl-externos -- el modelo lo sugirió a pesar de la REGLA explícita en python.txt)",
+       "está roto" in r and "spack load" in r)
+    r = _fix_sbatch(B.format(
+        "spack load gnuplot-qt\ngnuplot"))
+    _t("lint: 'spack load gnuplot-qt' (patrón correcto, sin .env roto) → sin warning de env roto",
+       "está roto" not in r)
+    r = _fix_sbatch("```bash\n#!/bin/bash\n#SBATCH --partition=gpu\n"
+                     "#SBATCH --workdir=/mnt/gpu-data/$USER/job_$SLURM_JOB_ID\necho hola\n```")
+    _t("lint: '#SBATCH --workdir=...' con variable de shell (bug real 28/9, visto en vivo "
+       "probando la conversión LAMMPS CPU->GPU — las #SBATCH no expanden variables)",
+       "NO se expanden en directivas #SBATCH" in r)
+    r = _fix_sbatch(B.format(
+        "WORKDIR=/mnt/cpu-data/$USER/job_$SLURM_JOB_ID\nmkdir -p $WORKDIR\ncd $WORKDIR\necho hola"))
+    _t("lint: WORKDIR como variable normal en el body (patrón correcto) → sin warning de workdir",
+       "NO se expanden en directivas #SBATCH" not in r)
+    r = _fix_sbatch(B.format(
         "find . -name \"*.npz\" -exec gzip {} \\;\n"
         "find . -name \"*.npz.gz\" -exec sh -c 'mv \"$1\" \"${1%.gz}\"' _ {} \\;"))
     _t("lint: gzip + mv sacando .gz sin gunzip (bug real 5/9, deja el .npz corrupto)",
@@ -2204,10 +2375,6 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("/apps/local/spack/spack-2026b/spack/bin/spack --version"))
     _t("lint: ruta real y existente invocada directo → sin warning (no es alucinación)",
        "⚠" not in r)
-    r = _fix_sbatch(B.format(
-        "VG5ODAZJ=$(/apps/local/spack/spack-2026b/spack/bin/spack location -i vg5odazj 2>/dev/null)"))
-    _t("lint: hash real de spack sin '/' inicial (bug real 30/8, spack lo lee como nombre de paquete)",
-       "sin '/'" in r and "/vg5odazj" in r)
     r = _fix_sbatch(B.format(
         "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
         "GROMACS_DIR=$($SPACK location -i /vg5odaz 2>/dev/null)"))
@@ -2308,12 +2475,12 @@ def _selftest() -> int:
        bool(_RE_SPACK.search("quiero correr un test de MPI en la particion cpu")))
     _t("_RE_SPACK: 'mpicc' también dispara carga de spack.txt",
        bool(_RE_SPACK.search("como compilo con mpicc")))
-    _t("_RE_PYTHON: 'latex'/'pdf con latex' dispara carga de python.txt (bug real "
+    _t("_RE_SCITOOLS: 'latex'/'pdf con latex' dispara carga de sci-tools.txt (bug real "
        "30/8: 'quiero un pdf con latex' no cargaba la nota TEXLIVE ROTO, el bot "
-       "alucinaba un pdflatex que falla)",
-       bool(_RE_PYTHON.search("quiero armar un resumen en pdf con latex")))
-    _t("_RE_PYTHON: 'pdflatex' también dispara carga de python.txt",
-       bool(_RE_PYTHON.search("como corro pdflatex en el cluster")))
+       "alucinaba un pdflatex que falla; movido de python.txt a sci-tools.txt 28/9)",
+       bool(_RE_SCITOOLS.search("quiero armar un resumen en pdf con latex")))
+    _t("_RE_SCITOOLS: 'pdflatex' también dispara carga de sci-tools.txt",
+       bool(_RE_SCITOOLS.search("como corro pdflatex en el cluster")))
     _t("_RE_GPUCUSTOM/_RE_SPACK: 'nvcc' solo (sin decir 'cuda') dispara carga "
        "de gpu-custom.txt/spack.txt (bug real 31/8: 'como cargo nvcc en gpu' "
        "no cargaba ningún contexto real, el bot alucinó una versión de CUDA "
@@ -2336,10 +2503,22 @@ def _selftest() -> int:
        bool(_RE_BIOACUSTICA.search("como cargo pamguard para detectar ballenas")))
     _t("_RE_BIOACUSTICA: sin mención de bioacústica/pamguard → sin falso positivo",
        not bool(_RE_BIOACUSTICA.search("como compilo un programa con gcc")))
-    _t("_RE_PYTHON: 'kuenm'/'makurhini' solos (sin decir R) disparan carga de python.txt "
-       "(agregado 7/9, evita alucinar hash de R para estos paquetes)",
-       bool(_RE_PYTHON.search("como corro un modelo de nicho con kuenm"))
-       and bool(_RE_PYTHON.search("necesito makurhini para conectividad de paisaje")))
+    _t("_RE_SCITOOLS: 'kuenm'/'makurhini' solos (sin decir R) disparan carga de "
+       "sci-tools.txt (agregado 7/9, evita alucinar hash de R para estos paquetes; "
+       "movido de python.txt a sci-tools.txt 28/9)",
+       bool(_RE_SCITOOLS.search("como corro un modelo de nicho con kuenm"))
+       and bool(_RE_SCITOOLS.search("necesito makurhini para conectividad de paisaje")))
+    _t("split python.txt/sci-tools.txt (bug real 28/9, usuario real cl-externos -- "
+       "reasoning leak reproducido 3/3, ctx~13.7k con python.txt completo cargado para "
+       "una pregunta de gnuplot): pregunta de gnuplot NO dispara _RE_PYTHON (así no carga "
+       "de más numpy/scipy/pandas/etc que no tienen nada que ver)",
+       not bool(_RE_PYTHON.search("quiero abrir gnuplot con ventana interactiva x11"))
+       and bool(_RE_SCITOOLS.search("quiero abrir gnuplot con ventana interactiva x11")))
+    _t("split python.txt/sci-tools.txt: pregunta de numpy/pandas NO dispara "
+       "_RE_SCITOOLS (así no carga de más gnuplot/R/GSL/Apptainer que no tienen nada "
+       "que ver)",
+       bool(_RE_PYTHON.search("como uso numpy y pandas para procesar estos datos"))
+       and not bool(_RE_SCITOOLS.search("como uso numpy y pandas para procesar estos datos")))
     _core_candidate = next((p for p in (CONTEXT_DIR / "core-dev.txt", CONTEXT_DIR / "core.txt") if p.exists()), None)
     _CTX_CORE_TEXT = _core_candidate.read_text(encoding="utf-8", errors="replace") if _core_candidate else ""
     _t("core.txt: la regla mpirun-vs-srun vive acá (siempre cargado, no depende "
@@ -2365,9 +2544,13 @@ def _selftest() -> int:
 # de vLLM (glm4_moe_reasoning_parser.py, rama "thinking is disabled") nunca ve
 # el token_id esperado y deja "<think>" como texto crudo en el campo content
 # que gonzabot renderiza. Medido: ~50% de las veces a ~17K tokens de contexto
-# real. Fix que SÍ funciona (14/14 en tests): forzar el prefijo "<think>\n" vía
-# continue_final_message le saca al modelo la decisión ambigua de "abro
-# razonamiento o no".
+# real, SIN relación con prefix-caching ni con requests concurrentes (descartado
+# con tests aislados). Bug real de vLLM (issue vllm-project/vllm#29763,
+# relacionado pero no idéntico -- ese parcheaba un as_list() que no alcanza
+# solo, confirmado en vivo). Fix que SÍ funciona (14/14 en tests): forzar el
+# prefijo "<think>\n" vía continue_final_message le saca al modelo la decisión
+# ambigua de "abro razonamiento o no" -- una vez que ya está "adentro" de
+# <think>, el parser lo detecta bien y el resto funciona normal.
 _REASONING_MODELS = {"glm45-air"}
 
 
@@ -2388,6 +2571,7 @@ def _build_request(messages: list[dict], max_tokens: int = 8000) -> Request:
         "max_tokens": max_tokens,
     }
     if MODEL in _REASONING_MODELS and messages and messages[-1].get("role") != "assistant":
+        # No mutar la lista original (se reutiliza para historial/context_msgs)
         body["messages"] = list(messages) + [{"role": "assistant", "content": "<think>\n"}]
         body["continue_final_message"] = True
         body["add_generation_prompt"] = False
@@ -2506,16 +2690,18 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                 try:
                     ready = _sel_esc.select([sys.stdin], [], [], 0.05)[0]
                 except OSError:
-                    continue
+                    continue  # SIGWINCH u otra señal → reintentar select
                 if not ready:
                     continue
                 ch = os.read(fd, 1).decode("utf-8", errors="replace")
                 if ch == "\x1b":
+                    # Distinguir ESC solo (cancelar) de secuencia de escape (flechas, etc.)
                     try:
                         has_more = _sel_esc.select([sys.stdin], [], [], 0.08)[0]
                     except OSError:
                         has_more = False
                     if has_more:
+                        # Es flecha u otra secuencia CSI → consumir y seguir
                         rest = os.read(fd, 1).decode("utf-8", errors="replace")
                         if rest in ("[", "O"):
                             seq_tail = ""
@@ -2540,6 +2726,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                                 except OSError:
                                     pass
                         continue
+                    # Sin bytes a continuación → ESC solo → cancelar respuesta
                     user_aborted.set()
                     stop.set()
                     break
@@ -2836,7 +3023,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
         stop.set()
         first_token.set()
         resp.close()
-        esc_thread.join(timeout=0.3)
+        esc_thread.join(timeout=0.3)   # esperar restauración del terminal antes de continuar
         if _prose_acc:   # flush prosa dentro del Live (transient) — evita double-print con post-render
             _emit(" ".join(_prose_acc) + "\n")
             _prose_acc.clear()
@@ -3011,6 +3198,48 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
         else:
             print()
 
+    # Bug real de vLLM (18/9, ver comentario de _REASONING_MODELS más arriba): el parser de
+    # razonamiento a veces no separa reasoning_content de content a partir de cierto contexto
+    # largo (~50% de fallo medido a partir de ~17K tokens) -- cuando pasa, el "pensamiento" del
+    # modelo queda mezclado en la respuesta visible como si fuera la respuesta real. Detección
+    # heurística (NO borra nada, solo avisa -- borrar texto real es más riesgoso que dejarlo):
+    # el texto arranca hablando de "el usuario" en tercera persona en vez de dirigirse al
+    # usuario directo, combinado con un verbo de planificación en primera persona ("debo",
+    # "necesito", "voy a") -- patrón que gonzabot nunca genera en una respuesta final real
+    # (REGLA ABSOLUTA de estilo: nunca intro, nunca meta-comentario).
+    if MODEL in _REASONING_MODELS and not silent and text:
+        _head = text[:500].lower()  # 500, no 200 -- probado contra fugas reales de esta
+                                    # sesión: "debo responder..." suele venir después del
+                                    # primer párrafo narrando qué pidió "el usuario", 200
+                                    # no le daba tiempo a aparecer, 500 sí (validado offline)
+        if re.search(r'\bel usuario\b', _head) and re.search(
+                r'\b(debo|necesito|voy a|tengo que)\b', _head):
+            # Bug real 28/9 (usuario real cl-externos, reportado por Gonzalo): en
+            # sesión nueva con 1 sola pregunta, "/compact" responde "Poco historial para
+            # compactar" y no hace nada -- el aviso de acá le sugería un remedio que en
+            # ese caso no sirve para nada, porque el contexto largo no viene del HISTORIAL
+            # de la conversación sino del preamble estático (core.txt + segmento activado,
+            # ej. python.txt) que se manda en TODA request desde el primer mensaje. Mismo
+            # umbral que usa "/compact" (len(context_msgs) < 4) para decidir qué consejo
+            # es real.
+            _hist_len = sum(1 for m in messages[:-1] if m.get("role") in ("user", "assistant"))
+            if _hist_len < 4:
+                _msg = ("⚠ Esto puede ser una fuga de razonamiento interno del modelo (bug "
+                        "conocido de vLLM a contexto largo, no la respuesta real). Acá NO "
+                        "viene del historial de la conversación (es sesión nueva), así que "
+                        "/compact no va a ayudar — probá repetir la misma pregunta tal cual, "
+                        "o avisale a Gonzalo si se repite siempre con el mismo tema.")
+            else:
+                _msg = ("⚠ Esto puede ser una fuga de razonamiento interno del modelo (bug "
+                        "conocido de vLLM a contexto largo, no la respuesta real) — probá "
+                        "/compact para bajar el contexto y volvé a preguntar.")
+            if _console is not None:
+                _console.print(f" {_msg}", style="yellow", markup=False)
+                _console.print()
+            else:
+                print(_c(YEL, f" {_msg}"))
+                print()
+
     return text
 
 
@@ -3072,6 +3301,7 @@ Modelo:   {MODEL}
 
 
 def repl(new_session: bool = False):
+    global _CURRENT_CTX_CHARS
     con = init_db()
     session_id = new_session_id()
 
@@ -3222,6 +3452,12 @@ def repl(new_session: bool = False):
                             {"role": "user",      "content": f"[Resumen de la sesión anterior]\n{summary}"},
                             {"role": "assistant", "content": "Entendido, continúo desde ese punto."}
                         ]
+                        # Actualizar ya mismo el contexto "actual" mostrado en el status bar
+                        # (no esperar al próximo turno) -- sin esto, justo después de /compact
+                        # seguía mostrando el tamaño VIEJO hasta el siguiente mensaje, y el
+                        # usuario podía creer (con razón) que no había bajado nada (bug real 18/9).
+                        _CURRENT_CTX_CHARS = (len(system_msg.get("content", ""))
+                                              + sum(len(m.get("content", "")) for m in context_msgs))
                         print()
                         print(_c(CYAN, "▶ ") + summary.strip())
                         print()
@@ -3229,6 +3465,7 @@ def repl(new_session: bool = False):
                     except RuntimeError as e:
                         if "__GARBAGE" in str(e):
                             context_msgs = []
+                            _CURRENT_CTX_CHARS = 0
                             print(_c(YEL, "Contexto demasiado largo para resumir — historial limpiado. Podés continuar."))
                         else:
                             print(_c(RED, f"Error: {e}"))
@@ -3236,6 +3473,7 @@ def repl(new_session: bool = False):
             elif cmd == "/clear":
                 context_msgs = []
                 extra_context = []
+                _CURRENT_CTX_CHARS = 0
                 print(_c(GRN, "Sesión limpiada."))
 
             elif cmd == "/history":
@@ -3791,6 +4029,22 @@ def repl(new_session: bool = False):
                             "de tiempo/memoria excedido, o similar). NO inventar una causa "
                             "técnica del programa (ej. warnings benignos marcados 'ignored') "
                             "para esto sin evidencia real en el log.")
+                # Bug real 16/9 (reporte de usuario real): "Munge encode failed... 108 bytes"
+                # + "REQUEST_HET_JOB_ALLOC_INFO" es un límite de path de socket UNIX (108
+                # bytes, límite del kernel), NO algo que necesite intervención de un admin —
+                # sin esto el modelo puede alucinar que hay que "reiniciar algo" (ya pasó:
+                # el usuario recibió justo esa sugerencia incorrecta de otra fuente).
+                if _re_diag2.search(r'Munge encode failed.*108 bytes|'
+                                    r'REQUEST_HET_JOB_ALLOC_INFO', log_content):
+                    _fail_warning += (
+                        "\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene el error de Munge de "
+                        "\"108 bytes\"/REQUEST_HET_JOB_ALLOC_INFO — es el límite del kernel "
+                        "Linux para el path de un socket UNIX (sockaddr_un.sun_path), que se "
+                        "supera cuando la sesión interactiva (salloc/srun/mpirun) se pide desde "
+                        "un directorio muy profundo/largo. Fix real y confirmado por un usuario "
+                        "afectado: pedir la sesión desde un directorio más corto (el home, o "
+                        "cerca de la raíz de /mnt/cpu-data/<usuario>). NO requiere que ningún "
+                        "admin reinicie nada — NUNCA sugerir eso.")
                 diag_msg = (f"Logs del job {job_id}:{script_section}\n\n"
                             f"{log_content}\n\n"
                             f"Analizá los logs. Si hay errores explicá qué falló y cómo corregirlo. "
@@ -3826,17 +4080,25 @@ def repl(new_session: bool = False):
                 import re as _re, subprocess as _sp3, tempfile as _tmp2
 
                 def _fix_diff_counts(diff_text: str) -> str:
-                    """Recalcula los contadores @@ -N,M +N,M @@ que el LLM suele calcular mal."""
+                    """Recalcula los contadores @@ -N,M +N,M @@ que el LLM suele calcular mal.
+                    El lado "+N,M" (y a veces hasta el ",M" del lado "-") puede faltar del
+                    todo, no solo estar mal calculado -- bug real 21/9, reporte de usuario
+                    real ("/branch genera rutas que no sirven... casi funcional"): el modelo
+                    generó "@@ -1,7 @@" sin ningún "+N,M", `patch` lo rechaza directo con
+                    "malformed patch" y esa branch nunca llegaba a compilar. El regex viejo
+                    exigía que el "+N,M" ya estuviera bien formado para poder arreglar los
+                    números -- si faltaba entero, no hacía nada y lo dejaba pasar roto."""
                     lines = diff_text.splitlines(keepends=True)
                     out = []
                     i = 0
                     while i < len(lines):
                         m = _re.match(
-                            r'^(@@ -)(\d+),\d+( \+)(\d+),\d+( @@.*)',
+                            r'^(@@ -)(\d+)(?:,\d+)?(?:\s+\+\d+(?:,\d+)?)?(\s*@@.*)',
                             lines[i]
                         )
                         if m:
-                            old_start, new_start = int(m.group(2)), int(m.group(4))
+                            old_start = int(m.group(2))
+                            tail = m.group(3)
                             hunk = []
                             i += 1
                             while i < len(lines) and not _re.match(r'^(@@|---|\+\+\+)', lines[i]):
@@ -3844,10 +4106,11 @@ def repl(new_session: bool = False):
                                 i += 1
                             old_count = sum(1 for l in hunk if l and l[0] not in ('+', '\\'))
                             new_count = sum(1 for l in hunk if l and l[0] not in ('-', '\\'))
+                            # new_start = old_start es el default correcto para el primer hunk
+                            # (que es todo lo que /branch genera hoy, un solo hunk por diff).
                             out.append(
-                                f'{m.group(1)}{old_start},{old_count}'
-                                f'{m.group(3)}{new_start},{new_count}'
-                                f'{m.group(5)}\n'
+                                f'{m.group(1)}{old_start},{old_count} '
+                                f'+{old_start},{new_count}{tail}\n'
                             )
                             out.extend(hunk)
                         else:
@@ -4172,7 +4435,13 @@ def repl(new_session: bool = False):
                     continue
 
                 # ── subcomando principal: generar branches ────────────────────
-                src_path = Path(arg).expanduser()
+                # .resolve() es clave: sin esto, un path relativo (ej. "/branch
+                # archivo.py" desde donde sea que arrancó gonzabot, no desde donde
+                # está el archivo real) deja src_path.parent como "." -- eso se
+                # filtra directo al WORKDIR/BRANCHDIR del sbatch generado más abajo,
+                # y en el nodo de cómputo "." no apunta a nada útil (bug real 21/9,
+                # reporte de usuario real: "genera rutas que no sirven").
+                src_path = Path(arg).expanduser().resolve()
                 if not src_path.exists():
                     print(_c(RED, f"Archivo no encontrado: {src_path}"))
                     continue
@@ -4229,11 +4498,22 @@ def repl(new_session: bool = False):
 
                 if use_diff:
                     import shutil as _shutil_br
-                    diff_blocks = _re.findall(r"```diff\n(.*?)```", reply_br, _re.DOTALL)
+                    # \Z en vez de exigir el cierre ``` -- bug real 24/9 (visto en vivo probando
+                    # /branch con mipymal.py): el modelo a veces no cierra el último bloque
+                    # ```diff (sin relación con max_tokens, la respuesta era corta), el regex
+                    # viejo exigía "```" de cierre y esa branch desaparecía en silencio, sin
+                    # ningún error ni aviso -- el usuario veía "Someter 2 branch(es)" sin saber
+                    # que pidió 3. Con \Z, el último bloque sin cerrar se toma hasta el final.
+                    diff_blocks = _re.findall(r"```diff\n(.*?)(?:```|\Z)", reply_br, _re.DOTALL)
                     if not diff_blocks:
                         print(_c(YEL, "\nNo encontré bloques ```diff``` en la respuesta."))
                         print(_c(DIM, "El modelo no generó diffs. Intentá de nuevo."))
                         continue
+                    _n_branch_headers = len(_re.findall(r"(?im)^#{0,3}\s*branch\s+\d", reply_br))
+                    if _n_branch_headers > len(diff_blocks):
+                        print(_c(YEL, f"\n⚠ El modelo anunció {_n_branch_headers} branches pero "
+                                      f"solo se pudieron extraer {len(diff_blocks)} diffs válidos "
+                                      f"(bloque mal formado o incompleto) — revisá antes de someter."))
                     for idx, diff_text in enumerate(diff_blocks, 1):
                         bname = f"branch_{idx}{lang_cfg['ext']}"
                         bpath = branch_dir / bname
@@ -4435,6 +4715,27 @@ def repl(new_session: bool = False):
                             resumen = f"{len(content):,} caracteres"
                     extra_context.append(f"[Contexto cargado: {label}]\n{content_stored}")
                     print(_c(GRN, f"Cargado: {label} ({resumen})"))
+                    # Lint determinístico inmediato para scripts bash/sbatch -- bug real
+                    # 28/9 (usuario real, dos jobs LAMMPS de Alejandro Alés que no
+                    # generaban resultados): al recibir un /load + una pregunta genérica,
+                    # el modelo no siempre reproduce el script en un bloque ```bash en su
+                    # respuesta -- y sin eso, _fix_sbatch nunca corre sobre el contenido
+                    # cargado, así que sus lints (spack sin source activo, comando en
+                    # background sin wait, etc.) nunca se disparan. Correrlos ACÁ, de
+                    # una, en vez de depender de que el modelo decida re-emitir el código
+                    # -- mismo patrón ya usado en /diagnose para warnings determinísticos.
+                    if re.search(r'#SBATCH|^#!.*bash', content, re.M):
+                        # load_resource() antepone "### <nombre>\n" a TODO lo que carga,
+                        # incluso un solo archivo -- _fix_sbatch detecta "es bash" chequeando
+                        # que el bloque EMPIECE con #!/bin/bash o #SBATCH, así que con ese
+                        # prefijo nunca lo reconocía como bash y el lint quedaba mudo siempre.
+                        _load_body = re.sub(r'^### .+\n', '', content, count=1)
+                        _load_lint_out = _fix_sbatch(f"```bash\n{_load_body}\n```")
+                        _load_warns = [l for l in _load_lint_out.splitlines() if l.startswith("⚠ ")]
+                        if _load_warns:
+                            print(_c(YEL, "\nDetección automática (sin esperar al modelo):"))
+                            for w in dict.fromkeys(_load_warns):
+                                print(_c(YEL, f"  {w}"))
                 except RuntimeError as e:
                     print(_c(RED, f"Error: {e}"))
 
@@ -4703,6 +5004,8 @@ def repl(new_session: bool = False):
 
         messages_to_send.extend(context_msgs)
         messages_to_send.append({"role": "user", "content": _user_content})
+
+        _CURRENT_CTX_CHARS = sum(len(m.get("content", "")) for m in messages_to_send)
 
         save_message(con, session_id, "user", user_input)
 

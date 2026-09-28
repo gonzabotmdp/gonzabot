@@ -23,7 +23,11 @@ CUDA/C/Fortran, proyecto MULTI-ARCHIVO (codigo.cu + compile.sbatch + run.sbatch 
 
 CUDA kernels numéricos: verificar estabilidad. Ecuaciones de onda (SWE, acústica): Leapfrog (NO Forward Euler — inestable para todo k). CFL: c*dt/dx < 1/sqrt(dims). Forward Euler → NaN o ruido exponencial en 100-1000 pasos.
 
-NCCL: NO INSTALADO (sacado 22/8). Si un usuario pide multi-GPU con NCCL, avisar que no está disponible — alternativa: MPI.jl (Julia) o comunicación manual entre procesos.
+NCCL: SÍ está instalado (corregido 24/9 — la nota vieja de "sacado 22/8" quedó obsoleta,
+  se reinstaló el 4/9 junto con el resto del stack ML/deep learning y nunca se actualizó
+  acá, contradecía directo a python.txt que ya lo tenía bien documentado): nccl@2.31.2-1,
+  hash /kshfy5g, +cuda, para multi-GPU con PyTorch/similares. Ver python.txt sección
+  "Stack ML/deep learning" para el resto del stack relacionado (cudnn, etc.).
 
 --- JULIA ---
 

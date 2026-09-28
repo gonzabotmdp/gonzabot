@@ -51,7 +51,7 @@ SPACK en sbatch: los jobs batch NO heredan funciones de shell.
       <paquete>)" — es lo que le da a esos nombres pelados un solo candidato.
   ⚠ NUNCA mezclar con rutas del store viejo (/usr/share/spack). NUNCA inventar el path si el paquete no está en la lista de abajo — avisar que no está validado ahí todavía.
 
-STORE NUEVO (spack-2026b): store default para todos los usuarios (el viejo queda legacy/respaldo). VTK y paraview: SACADOS a propósito — NO ofrecerlos, no están en ningún store (nota completa en python.txt). Octave: sin GUI/gnuplot todavía.
+STORE NUEVO (spack-2026b): store default para todos los usuarios (el viejo queda legacy/respaldo). VTK y paraview: SACADOS a propósito — NO ofrecerlos, no están en ningún store (nota completa en python.txt). Octave: SÍ tiene GUI/gnuplot desde el 11/9 (corregido 24/9, esta nota estaba desactualizada — ver otros-lang.txt para el detalle real, probado en vivo).
   "spack load fftw/netcdf-c/openblas/py-pandas" (sin hash, nombre pelado) ya
   resuelven solos vía preferred-hashes.conf — probado exit 0. "spack load gnuplot/hdf5" también.
   ⚠ lammps y gromacs NO están acá (bug real 30/8: esta lista los mencionaba y contradecía la

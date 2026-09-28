@@ -1,9 +1,14 @@
-# MANTENIMIENTO DE ESTE ARCHIVO:
-# Formato compacto: una línea por paquete con env file o hash corto + $PYTHON variable.
-# Regla de oro: si un paquete usa env file → source /mnt/cpu-data/shared/ifimar-ai/envs/<pkg>.env
-# Si no tiene env file → source setup-env.sh + eval $(spack load --sh pkg) (wrapper resuelve hashes canónicos)
-# Para paquetes nuevos: probar que el env file funcione antes de agregarlo acá.
-# Mantener < 20KB. Editar python-dev.txt → testear → \cp a shared/.../python.txt
+# MANTENIMIENTO: una línea por paquete, env file o hash corto + $PYTHON variable. Regla de
+# oro: con env file → source /mnt/cpu-data/shared/ifimar-ai/envs/<pkg>.env; sin env file →
+# source setup-env.sh + eval $(spack load --sh pkg). Paquete nuevo: probar el env file antes
+# de agregarlo. Mantener < 20KB. Editar python-dev.txt → testear → \cp a shared/.../python.txt
+# NOTA 28/9: este archivo es SOLO paquetes Python (numpy/scipy/pandas/geopandas/mpi4py/CuPy/
+# ML-stack/DeePMD/JAX/Jupyter/PyTorch/etc). Todo lo NO-Python que antes vivía acá (gnuplot,
+# Grace/xmgrace, ParaView, OVITO, PyCharm, GSL, ADIOS2, Apptainer, MPICH, GDAL, AOCC, Intel
+# oneAPI/MPI, R+kuenm+makurhini, Rust, Go/Node, LaTeX/texlive) se movió a sci-tools.txt — se
+# separó porque cargar TODO python.txt para una pregunta de gnuplot empujaba el contexto a la
+# zona donde GLM-4.5-Air filtra razonamiento interno a la respuesta visible (bug real 28/9,
+# reproducido 3/3 veces con un usuario externo real). No volver a mezclar sin pensarlo dos veces.
 
 --- REGLA FUNDAMENTAL Python en el cluster ---
 NUNCA sugerir correr python3/python directamente en ql-front. ql-front es nodo de login, NO de cómputo.
@@ -28,121 +33,51 @@ $PYTHON script.py
 Alternativa interactiva (SOLO para pruebas rápidas): srun --partition=cpu --ntasks=1 --cpus-per-task=2 --mem=4G --time=00:30:00 --pty bash → luego source .env y python3 script.py
 ---
 
-PyCharm 2025.1.3 (IDE Python con X11) — validado 2026-06-26:
-  Instalado en /apps/local/spack/opt/pycharm/pycharm-2025.1.3 (visible en nodos compute y ql-front).
-  NUNCA usar "spack load pycharm" en nodos de cómputo (DB lock). Usar env file o PATH directo:
-    source /mnt/cpu-data/shared/ifimar-ai/envs/pycharm.env
-  O directamente: export PATH=/apps/local/spack/opt/pycharm/pycharm-2025.1.3/bin:$PATH
-
-  En ql-front: spack load pycharm; pycharm.sh (requiere ssh -X/-Y)
-  En nodo compute: srun --partition=cpu --ntasks=1 --cpus-per-task=4 --mem=16G --time=04:00:00 --x11 --pty bash → source /mnt/cpu-data/shared/ifimar-ai/envs/pycharm.env; pycharm.sh &
-
-gnuplot 6.0.0 — actualizado 11/9 (la nota vieja de "interactivo con X11" y el hash /c74haun
-  eran ambos incorrectos; DESPUÉS se instaló un build real con +qt, esta es la versión final):
-  ⚠ NUNCA ofrecer "source gnuplot.env" — apunta al store viejo /usr/share/spack, YA NO EXISTE.
-  Dos alias estables en preferred-hashes.conf (no cambian aunque el hash real cambie después):
-    spack load gnuplot      # headless, +cairo, sin qt — para terminales a archivo (pngcairo/
-                             # pdfcairo/epscairo/svg/dumb), la mayoría de los casos
-    spack load gnuplot-qt   # /2gg3xpa, %aocc, +qt REAL (confirmado con "set terminal": aparece
-                             # "qt  Qt cross-platform interactive terminal") — para el usuario
-                             # que necesita ventana interactiva. Requiere ssh -X/-Y o VNC de su
-                             # lado para verla — avisarle esto siempre, gonzabot no puede
-                             # garantizar que su cliente ssh tenga X forwarding.
-  Patrón headless (el más común): gnuplot -e "set terminal pngcairo; set output 'out.png'; plot 'datos.dat'"
-    (o un script .gp con esas líneas, gnuplot script.gp)
-  Patrón interactivo: srun --partition=cpu --x11 --pty bash → spack load gnuplot-qt; gnuplot →
-    set terminal qt; plot ...
-
-Grace 5.1.25 / xmgrace (graficación científica 2D):
-  source /mnt/cpu-data/shared/ifimar-ai/envs/grace.env   # setea PATH y GRACE_HOME (grace.env = symlink de xmgrace.env)
-  Batch (sin X11): gracebat datos.dat -hardcopy -hdevice PNG -printfile salida.png
-  Interactivo (con X11): srun --partition=cpu --x11 --pty bash → source .../xmgrace.env; xmgrace datos.dat
-  Formato: archivos .agr (nativo). gracebat -nxy datos.dat -hdevice EPS -printfile out.eps
-  CRITICO: xmgrace GUI necesita ssh -X/-Y (igual que gnuplot). Partición cpu.
-
-ParaView: ⚠ NO DISPONIBLE. Sacado de spack-2026b por decisión del usuario (13/8/2026) y el env file viejo (paraview.env) apunta a un build del store viejo que ya fue borrado del disco (confirmado 27/8: directorio inexistente) — no hay forma real de correrlo hoy en ningún store. Si lo piden, avisar que no está instalado y no hay fecha de reinstalación. NUNCA generar sbatch, NUNCA usar el hash /4oatdsf ni source paraview.env — aunque el archivo .env todavía exista en disco, su contenido es inválido.
-
-OVITO 3.6.0 (visualización/análisis MD, headless) — PATRÓN B:
-  OVITO_DIR=$($SPACK location -i /d7rmircc 2>/dev/null)
-  export PATH=${OVITO_DIR}/bin:$PATH
-  ovitos script.py   # Python scripting mode (análisis batch, sin GUI).
-  Partición cpu.
-
-ADIOS2 2.10.2 (I/O paralelo de alto rendimiento) — PATRÓN B:
-  ADIOS_DIR=$($SPACK location -i adios2 2>/dev/null)
-  export PATH=${ADIOS_DIR}/bin:$PATH; export LD_LIBRARY_PATH=${ADIOS_DIR}/lib:${LD_LIBRARY_PATH}
-  Python: export PYTHONPATH=${ADIOS_DIR}/lib/python3.11/site-packages:$PYTHONPATH; import adios2
-  Binarios: adios2_iotest, adios2_reorganize, adios2_reorganize_mpi. Partición cpu.
-
-Intel oneAPI Compilers: DESINSTALADO A PROPÓSITO el 1/8 (0 dependents reales, sacado del medio para evitar que se colara como dependencia de grpc/tensorflow). Si un usuario específicamente necesita icx/icpx/ifx, avisar que no está y consultar antes de reinstalar — no es un bug, fue decisión consciente del plan de unificación spack.
-
-Intel MPI 2021.14.0 (alternativa a OpenMPI):
-  IMPI_BASE=$($SPACK location -i /bc46wpeg 2>/dev/null); IMPI_DIR=${IMPI_BASE}/mpi/2021.14
-  export PATH=${IMPI_DIR}/bin:$PATH; export LD_LIBRARY_PATH=${IMPI_DIR}/lib:${LD_LIBRARY_PATH}
-  NOTA: códigos del cluster compilados con OpenMPI — openmpi único en spack-2026b ahora: /2cgnkug (los hashes viejos /5qsncbu y /mft7jna ya no existen). Intel MPI solo si el código lo requiere.
-
-PATRÓN ENV FILE — OBLIGATORIO para: numpy, scipy, matplotlib, geopandas, mpi4py (estos NO funcionan con spack load --sh):
+PATRÓN ENV FILE — OBLIGATORIO para: numpy, scipy, matplotlib, geopandas, mpi4py (NO funcionan con spack load --sh):
   source /mnt/cpu-data/shared/ifimar-ai/envs/<paquete>.env   # SIEMPRE env file para estos. NUNCA eval spack load.
   $PYTHON script.py   # $PYTHON queda definido dentro del env file; NUNCA "python3" del sistema.
-  numpy.env y scipy.env: ROTOS desde el 1/8, arreglados en vivo 22/8 (apuntaban al store viejo,
-    ahora usan el mismo venv validado de matplotlib.env). ⚠ geopandas.env, mpi4py.env,
-    paraview.env, gnuplot.env, grace.env/xmgrace.env, tensorflow.env y pycharm.env están ROTOS
-    ahora mismo (mismo store viejo muerto, detectado 22/8, NO arreglados todavía) — si el usuario
-    pide alguno de estos, avisar que está temporalmente fuera de servicio, no generar el sbatch
-    como si funcionara. statsmodels, torch y spglib siguen sin estar instalados — sus .env fallan
-    con un mensaje de error explícito en vez de silenciosamente apuntar a paths borrados (ver sus
-    secciones para el porqué) — ESE comportamiento sí está bien, no tocar.
-  TensorFlow+GPU: RESUELTO 23/8, RE-CONFIRMADO 11/9 con job GPU real (A100, detecta
-    PhysicalDevice GPU:0 de verdad, no simulado). NUNCA ofrecer "source tensorflow.env" — sigue
-    roto (apunta al store viejo /usr/share/spack, ya no existe, confirmado 11/9 que ese path
-    directamente no existe más). Usar SIEMPRE spack load directo con el hash, alcanza solo (sin
-    env file, confirmado que funciona igual que numpy — ver patrón en spack.txt):
+  numpy.env y scipy.env: OK, mismo venv validado que matplotlib.env. ⚠ geopandas.env y
+    mpi4py.env están ROTOS (apuntan al store viejo muerto) — avisar que está fuera de
+    servicio, no generar el sbatch como si funcionara. statsmodels, torch y spglib siguen sin
+    instalarse, sus .env fallan con error explícito (bien, no tocar). (tensorflow.env también
+    roto, ver sección TensorFlow más abajo para la alternativa que sí funciona.)
+  TensorFlow+GPU: funciona (validado con job GPU real, A100, detecta PhysicalDevice GPU:0).
+    NUNCA "source tensorflow.env" — roto. Usar spack load directo con el hash (sin env file):
     spack load /3ja5px2   # py-tensorflow@2.20.0 %aocc +cuda +xla, cuda_arch=80
     python3 -c "import tensorflow as tf; ..."   # ya queda en PATH/PYTHONPATH, sin más pasos
-    Depende de py-numpy@2.5.1 (%aocc) → python@3.13.13, el mismo ecosistema TF/JAX/Keras de
-    spack.txt — NO es el numpy canónico de pandas/scipy, es normal y esperado.
-    Detalle técnico histórico: el driver NVIDIA (550.144.03, tope oficial CUDA 12.4) rechazaba
-    el PTX que TF generaba en runtime (kernel_gen/XLA) porque TF 2.20 usa un toolchain CUDA
-    "hermético" propio (bazel baja su nvcc/ptxas independiente del CUDA de Spack) — fijado a
-    HERMETIC_CUDA_VERSION=12.4.1 en el build. NO afecta el CUDA canónico de Spack (sigue 12.6.2
-    para todo lo demás).
+    Depende de py-numpy@2.5.1 (%aocc) → python@3.13.13, ecosistema TF/JAX/Keras de spack.txt
+    — NO es el numpy canónico de pandas/scipy, normal y esperado.
 
-DeePMD-kit 3.2.0 (potenciales interatómicos por deep learning, github.com/deepmodeling/deepmd-kit)
-  — validado real 23/8, GPU A100, CUDA disponible, matmul real OK, EXIT_CODE 0:
-  ⚠ El comando SIEMPRE es "dp" (dp train, dp --version, dp freeze) — NUNCA "deepmd" como nombre
-    de comando, ese binario no existe (confundido en vivo 23/8 con "deepmd train/deepmd --version").
-  Entrenamiento/CLI Python (dp train, dp freeze, dp test, etc.) — venv propio, NO es "spack load":
+DeePMD-kit 3.2.0 (potenciales interatómicos por deep learning) — validado real, GPU A100,
+  CUDA disponible, matmul real OK, EXIT_CODE 0:
+  ⚠ El comando SIEMPRE es "dp" (dp train, dp --version, dp freeze) — NUNCA "deepmd", ese
+    binario no existe. Entrenamiento/CLI — venv propio, NO es "spack load":
     source /apps/local/spack/opt/deepmd-kit/venv/bin/activate
-    dp train input.json   # requiere input.json + datos de entrenamiento en formato .npy (deepmd)
-  Backend: PyTorch 2.6.0+cu124 (elegido a propósito 23/8 sobre TensorFlow — backend de primera
-    clase igual, evita depender del build de TF que dio problemas la misma noche, ver nota arriba).
-  Integración C++ con LAMMPS/GROMACS (plugin pair_style deepmd): $SPACK location -i /mt4k2fm
-    (deepmdkit@3.1.3) — separado del venv de arriba, es la vía C++/compilada, no Python.
-    ⚠ Conectar esto con LAMMPS requiere recompilar LAMMPS con +plugin+ml-hdnnp (o similar) — NO
-    hecho todavía, no hay caso de uso real esperándolo (ver hpc.txt sección LAMMPS si se necesita).
-  Partición gpu, --gres=gpu:1. CPU-only también posible (sin --gres) pero sin validar aún.
+    dp train input.json   # requiere input.json + datos de entrenamiento en formato .npy
+  Backend: PyTorch 2.6.0+cu124. Integración C++ con LAMMPS/GROMACS (plugin pair_style deepmd):
+    $SPACK location -i /mt4k2fm (deepmdkit@3.1.3) — separado del venv, vía C++/compilada.
+    ⚠ Conectarlo con LAMMPS requiere recompilar con +plugin+ml-hdnnp — NO hecho, sin caso de
+    uso esperándolo (ver md-sim.txt sección LAMMPS si se necesita).
+  Partición gpu, --gres=gpu:1. CPU-only también posible (sin --gres) pero sin validar.
 
 py-numpy 2.3.5 (python 3.14, álgebra lineal básica):
-  source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env  # NUNCA spack load --sh (da lock). Setea PYTHON + PYTHONPATH. Arreglado en vivo 22/8.
+  source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env  # NUNCA spack load --sh (da lock). Setea PYTHON + PYTHONPATH.
   $PYTHON script.py
 py-scipy 1.16.3 (python 3.14) + py-numpy 2.3.5 — cómputo científico:
-  source /mnt/cpu-data/shared/ifimar-ai/envs/scipy.env  # setea PYTHON + PYTHONPATH. Arreglado en vivo 22/8 (mismo venv que matplotlib.env, ya incluye numpy+scipy+matplotlib juntos).
+  source /mnt/cpu-data/shared/ifimar-ai/envs/scipy.env  # setea PYTHON + PYTHONPATH (mismo venv que matplotlib.env, ya incluye numpy+scipy+matplotlib juntos).
   $PYTHON script.py
-  NOTA: numpy.env/scipy.env ahora usan el mismo venv que matplotlib.env — si el script usa matplotlib, ya está disponible, no hace falta sourcear un segundo .env.
+  NOTA: numpy.env/scipy.env usan el mismo venv que matplotlib.env — si el script usa matplotlib, ya está disponible, no hace falta sourcear un segundo .env.
 
 Python científico — patrón spack (python 3.14 por default): para paquetes NO en la lista de env files de arriba:
-  SPACK=/apps/local/spack/spack-2026b/spack/bin/spack  # store viejo (/usr/share/spack) vacío desde el 22/8, NUNCA usarlo
-  PYTHON=$($SPACK location -i /cr5vvdl 2>/dev/null)/bin/python3  # python 3.14 target, AOCC
+  SPACK=/apps/local/spack/spack-2026b/spack/bin/spack  # store viejo vacío, NUNCA usarlo
+  PYTHON=$($SPACK location -i /palxeba 2>/dev/null)/bin/python3  # python@3.14.5 target, AOCC
   export SPACK_USER_CACHE_PATH=/tmp/spack-${USER}-${SLURM_JOB_ID}; mkdir -p $SPACK_USER_CACHE_PATH
-  source /usr/share/spack/root/share/spack/setup-env.sh 2>/dev/null || true
+  source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
   eval $(spack load --sh py-<paquete>)   # setea PYTHONPATH+PATH con TODAS las deps
   $PYTHON script.py
-  CRITICO: SIEMPRE ejecutar con $PYTHON, NUNCA con "python3" del sistema. python 3.12 YA NO EXISTE (migrado el 1/8) — geopandas ahora usa python 3.13.8 (misma excepción que tensorflow, hash yzty22g), mpi4py ahora usa python 3.14 (cr5vvdl, igual que el resto). NO usar más $PYTHON312 en scripts nuevos, verificar con find_dep_hash antes si hay dudas.
-  CRITICO (corregido 30/8): "--no-locks" NO EXISTE en spack 1.2.2 (esta versión) — no aparece
-  en "spack --help" ni "spack location --help", y usarlo rompe el comando con "unrecognized
-  arguments:" (confirmado con un job real, texlive). La nota vieja sobre "DB lock"
-  quedó obsoleta con esta versión de spack — "spack location -i /hash" solo, sin flags, anda
-  bien en nodos de cómputo (confirmado en vivo). Usar $SPACK location -i /hash, SIN.
+  CRITICO: SIEMPRE ejecutar con $PYTHON, NUNCA con "python3" del sistema. python 3.12 YA NO EXISTE. Ver la sección de geopandas más abajo para su python real (NO es el mismo que este default).
+  CRITICO: "--no-locks" NO EXISTE en spack 1.2.2 (esta versión) — rompe con "unrecognized
+  arguments:". "spack location -i /hash" solo, sin flags, anda bien en nodos de cómputo.
   CRITICO: NO usar "spack env activate" ni "spack env create" en nodos de cómputo (fallan en sbatch).
 
 py-ase 3.26.0 (python 3.14, Atomic Simulation Env): eval $(spack load --sh py-ase); $PYTHON script.py. Deps: matplotlib, scipy, numpy. Partición cpu.
@@ -150,25 +85,50 @@ py-pymatgen: NO INSTALADO desde el borrado masivo de python viejo del 1/8. Avisa
 py-phonopy 1.10.0 (python 3.14, fonones/vibraciones): eval $(spack load --sh py-phonopy); $PYTHON script.py. Deps: matplotlib, scipy, numpy. Partición cpu.
 py-scikit-learn: NO INSTALADO desde el borrado masivo de python viejo del 1/8. Avisar al usuario que no está disponible, no inventar el comando.
 py-dask 2026.7.1 (python 3.14, cómputo paralelo+datos grandes): eval $(spack load --sh py-dask); $PYTHON script.py. Deps: pandas, pyarrow, distributed.
-  El bug viejo de import dask.dataframe (pyarrow ssl) NO fue re-verificado tras el rebuild del 1/8 (se reconstruyó por un segfault distinto con python 3.14, bump a esta versión) — probar dask.dataframe directo antes de asumir que sigue roto; si falla, usar dask.array como antes (da.arange/from_array/mean/std/etc.).
+  Si falla dask.dataframe (bug viejo, pyarrow ssl, no reverificado tras el último rebuild),
+  usar dask.array (da.arange/from_array/mean/std/etc.).
 py-xarray 2025.7.1 (python 3.14, datos multidimensionales): eval $(spack load --sh py-xarray); $PYTHON script.py. Deps: pandas, numpy. Partición cpu.
 py-pandas 2.3.3 (python 3.14, dataframes): eval $(spack load --sh py-pandas); $PYTHON script.py. Partición cpu.
   ALTERNATIVA si falla: cargar scipy.env (incluye numpy) y agregar pandas con spack load --sh.
-PyTorch: actualizado 4/9 — la nota vieja de "NO INSTALADO desde el 1/8" quedó obsoleta. Estado real: `spack load py-torch` da py-torch@2.13.0 **CPU-only** (~cuda, sin soporte GPU) — sí disponible para uso general, avisar al usuario que es CPU-only si lo pide para GPU. PyTorch con GPU/CUDA real NO tiene todavía una instalación de uso general en el cluster (solo existen instalaciones privadas de proyectos internos, no ofrecerlas ni inventar su ruta). Si un investigador necesita PyTorch+GPU (ej. potenciales ML para materia condensada), avisar que no hay opción general todavía y que hay que pedir la instalación a softadm/gonzalo. torch.env sigue roto (referencia python borrado del 1/8), no usarlo.
+PyTorch: `spack load py-torch` da py-torch@2.13.0 **CPU-only** (~cuda, sin soporte GPU) — sí
+  disponible para uso general, avisar que es CPU-only si lo piden para GPU. PyTorch con
+  GPU/CUDA real NO tiene instalación de uso general en el cluster (solo instalaciones privadas
+  de proyectos internos, no ofrecerlas ni inventar su ruta) — si hace falta, pedir a
+  softadm/gonzalo. torch.env sigue roto, no usarlo.
 
-Stack ML/deep learning (agregado 4/9, disponible vía spack para cualquier usuario, hash exacto SIEMPRE — sin ambigüedad de compilador):
-  nccl@2.31.2-1 /kshfy5g (+cuda, para multi-GPU con PyTorch/similares)
+CuPy 14.2.0 (NumPy/SciPy sobre GPU real, cubre parte del hueco de "no hay GPU compute de uso
+general" de arriba, aunque no es deep learning/PyTorch): NO vía Spack a propósito (py-cupy@14
+choca cython en su dependencia fastrlock; @13.6.0 pide nccl viejo, duplicaría el hash ya
+instalado — decisión real de softadm, no accidental). Instalado como venv con el wheel oficial
+pip `cupy-cuda12x`, reutilizando el CUDA de Spack sin duplicar el toolkit. Confirmado corriendo
+cómputo real en A100 (gpu-01), `cp.cuda.Device(0).compute_capability` → 80.
+  Activación (interactivo o dentro del sbatch, una sola línea):
+    source /apps/local/spack/opt/gpu-python/activate.sh
+  (si falla "No such file or directory" en esta ruta, puede haber cambiado, avisar al usuario
+  en vez de inventar una ruta vieja.)
+  Requiere GPU real — SIEMPRE --partition=gpu-scavenger (o gpu) + --qos=scavenger (o el QoS
+  que corresponda) + --gres=gpu:1. Tope 4 GPUs simultáneas por usuario en QOS scavenger.
+  Después de activar: `python3` normal, `import cupy as cp` — API casi idéntica a numpy
+  (cp.array, cp.sum, etc.), corre en GPU en vez de CPU. NO se carga con "spack load" (no es
+  un paquete de Spack a propósito).
+  py-numba (spack load py-numba, hash /gahuud2) convive sin conflicto en un venv/entorno
+  aparte — no hace falta mezclarlos salvo que el usuario lo pida.
+  Deliberadamente AFUERA por ahora (stack mucho más grande, no instalado): RAPIDS/cudf/cuml.
+
+Stack ML/deep learning (vía spack para cualquier usuario, hash exacto SIEMPRE — sin ambigüedad de compilador):
+  nccl@2.31.2-1 /kshfy5g (+cuda, multi-GPU con PyTorch/similares)
   cudnn@9.8.0.87-12 /5fvzava
-  ffmpeg@8.1 /jftyden (para preprocesar video/audio de datos experimentales)
-  opencv@4.13.0 /fgme5fh (+cuda+cudnn+cublas+cufft — análisis de imágenes con GPU: microscopía, visión por computadora)
-  py-einops@0.8.2 /mywvvvq
-  py-safetensors@0.6.2 /4gtlur6
-  py-transformers@4.48.3 /xqotfqx (HuggingFace — modelos de lenguaje/NLP, también hay modelos científicos pre-entrenados en ese ecosistema)
-  py-huggingface-hub@0.26.2 /b24j7hn
-  py-sentencepiece@0.2.1 /v4t2bsk (tokenizador, dependencia típica de modelos HuggingFace)
-  py-imageio@2.37.3 /ca5vhnk
-  py-av@18.1.0 /weuo63h (decodeo de video cuadro a cuadro, útil para análisis de datos en video)
-  Todo esto es CPU o GPU según el paquete (nccl/opencv sí tienen CUDA real, py-torch NO — ver nota de PyTorch arriba). NO asumir que estos paquetes solucionan la falta de PyTorch+GPU — son piezas del ecosistema pero sin un PyTorch con CUDA de uso general, no arman un pipeline de deep learning con GPU completo todavía.
+  ffmpeg@8.1 /jftyden (preprocesar video/audio de datos experimentales)
+  opencv@4.13.0 /fgme5fh (+cuda+cudnn+cublas+cufft — imágenes con GPU: microscopía, visión por computadora)
+  py-einops@0.8.2 /mywvvvq · py-safetensors@0.6.2 /4gtlur6
+  py-transformers@4.48.3 /xqotfqx (HuggingFace — NLP, también modelos científicos pre-entrenados)
+  py-huggingface-hub@0.26.2 /b24j7hn · py-sentencepiece@0.2.1 /v4t2bsk (tokenizador HuggingFace)
+  py-imageio@2.37.3 /ca5vhnk · py-av@18.1.0 /weuo63h (decodeo de video cuadro a cuadro)
+  nccl/opencv sí tienen CUDA real, py-torch NO (ver nota PyTorch arriba) — estos paquetes NO
+  resuelven la falta de PyTorch+GPU de uso general, son piezas sueltas del ecosistema.
+  CuDNN: hash /5fvzava, cudnn@9.8.0.87-12. PyTorch/TF ya lo traen incluido, no hace falta esto
+  salvo compilar C/C++ contra cuDNN directo — usar $SPACK location -i /5fvzava y el CUDA_DIR
+  de spack.txt (CUDA canónico /okkjtu2, cuda@12.6.2).
 
 py-matplotlib 3.10.7 (python 3.14, gráficos headless):
   source /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env  # setea PYTHON + PYTHONPATH. Regenerado y validado el 1/8.
@@ -178,122 +138,49 @@ py-matplotlib 3.10.7 (python 3.14, gráficos headless):
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
   CON statsmodels (GLM+plots): NO DISPONIBLE — py-statsmodels no está instalado, ver su sección.
-py-numba 0.63.0 (python 3.14, hash 7dmz5bl, AOCC, JIT CPU/GPU): eval $(spack load --sh py-numba); $PYTHON script.py. Partición cpu (o gpu para numba.cuda).
-  Consolidado a un solo hash el 1/8 (antes había un piloto 0.59.1/0.62.0rc2 con gcc@15.2.0, ya no existe).
-py-statsmodels: NO INSTALADO desde el borrado masivo de python viejo del 1/8. Avisar al usuario que no está disponible, no inventar el comando ni usar statsmodels.env/statsmodels-matplotlib.env (ambos rotos, apuntaban al python borrado). Si hace falta, consultar con softadm para reinstalar contra python 3.14.
+  mathtext: NO \displaystyle (ParseFatalException). Funciona: \frac{}{}, \left[\right], \varepsilon, \sigma, \pm.
+py-numba 0.66.0 (hash /gahuud2, %gcc14, JIT CPU/GPU): `spack load py-numba` bare resuelve
+  solo (un único hash instalado, sin ambigüedad): eval $(spack load --sh py-numba);
+  $PYTHON script.py. Partición cpu (o gpu para numba.cuda).
+  Para loops de Python puro con millones de iteraciones secuenciales (integradores ODE/SDE
+  paso a paso, Monte Carlo iterativo), agregar @njit a las funciones del loop da speedups
+  reales de 50-100x+ (validado: integrador de Heun, 500k pasos, 8.9s → 0.096s, ~93x). Primera
+  opción ante un loop `for i in range(N)` con N grande y trabajo por iteración chico.
+  ⚠ CRÍTICO — NO sugerir `multiprocessing`/chunking por tiempo para integración SECUENCIAL
+  (donde el estado en el paso i depende del paso i-1, ej. Euler/Heun/Runge-Kutta): partir el
+  rango temporal en chunks independientes con `Pool` arrancando cada uno desde
+  `initial_condition` NO reconstruye la trayectoria real — cada chunk sería una simulación
+  distinta empezando de cero. Válido solo si las iteraciones son independientes entre sí (ej.
+  barrido de parámetros). Para integración secuencial, Numba (@njit) es la opción correcta.
+py-statsmodels: NO INSTALADO. Avisar al usuario que no está disponible, no inventar el comando
+  ni usar statsmodels.env/statsmodels-matplotlib.env (ambos rotos). Si hace falta, consultar
+  con softadm para reinstalar contra python 3.14.
   Sintaxis de referencia para cuando vuelva a estar disponible: import statsmodels.formula.api as smf; import statsmodels.api as sm; smf.glm('y ~ x', data=df, family=sm.families.Poisson()).fit() — data SIEMPRE como keyword.
-py-geopandas 1.1.1 (python 3.14, igual que el resto — CORREGIDO el 1/8: ya NO usa python 3.13.8, se re-verificó contra el store real y su propio install path confirma python3.14):
-  source /mnt/cpu-data/shared/ifimar-ai/envs/geopandas.env  # regenerado y validado el 1/8 (import real con GeoDataFrame)
+py-geopandas 1.1.1 (python 3.14, igual que el resto):
+  source /mnt/cpu-data/shared/ifimar-ai/envs/geopandas.env  # regenerado y validado (import real con GeoDataFrame)
   $PYTHON script.py   # variable renombrada de $PYTHON312 (python 3.12 ya no existe en el cluster)
   Crear GeoDataFrame: from shapely.geometry import Point; gdf = gpd.GeoDataFrame(geometry=[Point(x,y) for x,y in zip(xs,ys)], crs='EPSG:22195')
   Buffer: NO hacer gdf.buffer(d) ni gdf.geometry.buffer(d) solos → retornan GeoSeries (perdés el tipo GeoDataFrame).
     CORRECTO: gdf_buf = gdf.set_geometry(gdf.geometry.buffer(5000))  # retorna GeoDataFrame con geometry buffereada
     o bien:   gdf_buf = gdf.copy(); gdf_buf['geometry'] = gdf.geometry.buffer(5000)  # alternativa
-  NOTA to_file (bug viejo, pre-1/8, NO reverificado): geopandas.to_file() podía fallar por mismatch libgdal.so.36/.so.37 con pyogrio — gdal/pyogrio/rasterio se reconstruyeron juntos el 1/8, probable que ya no aplique, pero probar antes de asumir. Fallback si sigue roto: WKT+CSV (gdf['wkt']=gdf.geometry.apply(lambda g: g.wkt); gdf.drop(columns='geometry').to_csv('out.csv')) o gdf.to_pickle('out.pkl').
+  NOTA to_file (bug viejo, no reverificado): geopandas.to_file() podía fallar por mismatch
+  libgdal.so.36/.so.37 con pyogrio — probar antes de asumir que sigue roto. Fallback: WKT+CSV
+  (gdf['wkt']=gdf.geometry.apply(lambda g: g.wkt); gdf.drop(columns='geometry').to_csv('out.csv')) o gdf.to_pickle('out.pkl').
   gpd.sjoin: gpd.sjoin(left, right[['geometry']], how='inner', predicate='intersects'). Índice izq en gdf.index, índice der en columna 'index_right'. Self-join: joined[joined.index != joined['index_right']].
   NOTA: spack load --sh no funciona (DB lock timeout). Partición cpu.
-py-spglib: NO INSTALADO desde el borrado masivo de python viejo del 1/8. Avisar al usuario que no está disponible, no inventar el comando.
-py-rasterio 1.4.3 (hash szebksj) — reconstruido el 1/8 junto con gdal/pyogrio/geopandas, ya no confirmado roto (verificar si el usuario reporta el bug viejo de .so.36/.so.37).
+py-spglib: NO INSTALADO. Avisar al usuario que no está disponible, no inventar el comando.
+py-rasterio 1.5.0: resuelve bare sin ambigüedad, no hace falta hash: spack load py-rasterio.
 py-fiona: NO INSTALADO. Avisar al usuario que no está disponible, no inventar el comando.
 
-py-mpi4py 4.1.1 (python 3.14, hash 7s7dddy — usa MPICH, NO OpenMPI, cambio del 1/8):
-  MPICH_DIR=$($SPACK location -i /2lx4n56 2>/dev/null)
+py-mpi4py 4.1.1 (hash /6ugxl7y — usa MPICH, NO OpenMPI):
+  MPICH_DIR=$($SPACK location -i mpich 2>/dev/null)  # bare, resuelve solo
   eval $(spack load --sh py-mpi4py 2>/dev/null) || true
   ${MPICH_DIR}/bin/mpirun -np ${SLURM_NTASKS} $PYTHON script.py
-  Partición cpu, WORKDIR /mnt/cpu-data/$USER/. mpi4py.env regenerado y validado el 1/8 (import real, mpi4py.MPI).
+  Partición cpu, WORKDIR /mnt/cpu-data/$USER/. mpi4py.env validado (import real, mpi4py.MPI).
 
-NOTA Python: pandas/scipy/numpy/matplotlib accesibles via eval $(spack load --sh py-dask) o py-ase etc. python 3.12 YA NO EXISTE — mpi4py y geopandas migraron a 3.14/3.13.8 respectivamente el 1/8, ver notas en cada sección.
+NOTA Python: pandas/scipy/numpy/matplotlib accesibles via eval $(spack load --sh py-dask) o py-ase etc. python 3.12 YA NO EXISTE.
 
-R 4.5.2 (tidyverse 2.0.0, r-sf 1.0-16, r-terra 1.7-78) — actualizado 7/9, el hash viejo
-  /kmvkefw documentado acá NO EXISTE MÁS en el store (bug real encontrado hoy, si alguien lo
-  pidió antes le daba un script roto). Usar SIEMPRE "spack load r" bare (vía
-  preferred-hashes.conf ya resuelve al hash bueno) o el hash explícito /3xnipqp:
-  ⚠ CRÍTICO: /aktpqec (otro hash de r@4.5.2 que también existe) tiene un bug real de BLAS
-  silencioso — cae a libRblas.so interno en vez de openblas, sin ningún error visible, solo
-  resultados de álgebra lineal lentos/distintos. NUNCA usar ese hash, siempre /3xnipqp.
-  R_DIR=$($SPACK location -i /3xnipqp 2>/dev/null)
-  export R_LIBS=$(find $R_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1)
-  ${R_DIR}/bin/Rscript script.R  # gráficos en sbatch: ggsave() o png()/dev.off() (NO X11). Partición cpu.
-  CRITICO heredoc: usar << 'REOF' (con comillas). Dentro de heredoc quoted, NO poner \ antes de $: escribir data$col NO data\$col.
+JAX: NO INSTALADO. Avisar al usuario que no está disponible, no inventar el comando.
 
-r-kuenm 1.1.3 (modelado de nicho ecológico, MaxEnt) y r-makurhini 2026-09-07 (conectividad de
-  paisaje) — agregados 7/9, corren sobre el R con BLAS arreglado de arriba (/3xnipqp):
-  KUENM_DIR=$($SPACK location -i /grccyrj 2>/dev/null)      # r-kuenm
-  MAKURHINI_DIR=$($SPACK location -i /p6r6ylu 2>/dev/null)  # r-makurhini
-  export R_LIBS=$(find $R_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1):$(find $KUENM_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1):$(find $MAKURHINI_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1)
-  ${R_DIR}/bin/Rscript script.R  # library(kuenm) / library(makurhini) adentro del script
-
-Apptainer 1.4.1 (contenedores Singularity-compatible, hash /utpbedt — actualizado 22/8, el viejo /jemmbsj ya no existe):
-  APPT=$($SPACK location -i /utpbedt 2>/dev/null)
-  export PATH=${APPT}/bin:$PATH
-  apptainer exec imagen.sif mi_prog; apptainer run docker://ubuntu:22.04 bash; apptainer pull docker://tensorflow/tensorflow:latest-gpu
-  Para GPU: partición gpu + --nv flag (apptainer exec --nv imagen.sif prog). Imágenes .sif en /mnt/gpu-data/$USER/ o /mnt/cpu-data/$USER/ (no /tmp).
-
-Geant4 11.3.2: SÍ instalado en spack-2026b (no es Python, ver particle-physics.txt para carga/ejemplos/rutas reales).
-
-GSL 2.8 (GNU Scientific Library, hash /mq2eqdc — actualizado 22/8, el viejo /ldeaug34 ya no existe):
-  GSL=$($SPACK location -i /mq2eqdc 2>/dev/null)
-  gcc -I${GSL}/include prog.c -L${GSL}/lib -lgsl -lgslcblas -Wl,-rpath,${GSL}/lib -o prog
-  Con AOCC: clang -O3 -march=znver4 -I${GSL}/include prog.c -L${GSL}/lib -lgsl -lgslcblas -Wl,-rpath,${GSL}/lib -o prog
-  Interpolación, integración (qags/qag), ODEIV2, álgebra lineal, FFT, RNG. Partición cpu.
-  Includes obligatorios: #include <gsl/gsl_errno.h> (para GSL_CONTINUE, GSL_SUCCESS).
-  Para Bessel: #include <gsl/gsl_sf_bessel.h> (obligatorio; sin él gsl_sf_bessel_J0 no compila).
-  gsl_integration_qags requiere workspace — patrón correcto (NO pasar 1e-8 donde va el workspace):
-    gsl_integration_workspace *w = gsl_integration_workspace_alloc(1000);
-    gsl_integration_qags(&F, a, b, 0, 1e-7, 1000, w, &result, &abserr);
-    gsl_integration_workspace_free(w);
-  CRITICO gsl_function: requiere double f(double x, void *params). Las gsl_sf_*() tienen firma distinta
-    (ej: gsl_sf_bessel_J0 tiene "const double", NO "void*") y NO se asignan directo. Siempre wrapper:
-      double J0_wrapper(double x, void *params) { return gsl_sf_bessel_J0(x); }
-      gsl_function F = { .function = J0_wrapper, .params = NULL };
-    Dentro del loop del solver: NO llamar gsl_sf_bessel_J0(r) directamente — usar solo las funciones del solver
-    (gsl_root_fsolver_root, gsl_root_fsolver_x_lower, gsl_root_fsolver_x_upper). Ej loop correcto:
-      do { iter++; gsl_root_fsolver_iterate(s);
-           double r=gsl_root_fsolver_root(s);
-           status=gsl_root_test_interval(gsl_root_fsolver_x_lower(s),gsl_root_fsolver_x_upper(s),0,1e-10);
-      } while(status==GSL_CONTINUE && iter<max_iter);
-      printf("raiz: %f\n", gsl_root_fsolver_root(s));
-
-AOCC 5.0.0 (AMD clang/flang optimizados AMD, hash vs4buop):
-  AOCC=$($SPACK location -i /vs4buop 2>/dev/null)
-  export PATH=${AOCC}/bin:$PATH   # CRITICO: este export es lo que pone clang en PATH. NO usar spack load para AOCC.
-  clang/clang++/flang -O3 -march=znver4. AOCC 5.0 = AMD clang 17.0.6 (LLVM). Partición cpu.
-  Para compilar con GSL+AOCC: export PATH=${AOCC}/bin:$PATH (luego clang, NO gcc).
-
-MPICH 4.3.2 (MPI alternativo; OpenMPI es la preferida, hash 2lx4n56):
-  MPICH=$($SPACK location -i /2lx4n56 2>/dev/null)
-  export PATH=${MPICH}/bin:$PATH; export LD_LIBRARY_PATH=${MPICH}/lib:${LD_LIBRARY_PATH}
-  mpicc prog.c -o prog; mpiexec -np $SLURM_NTASKS ./prog. Partición cpu.
-
-CuDNN 9.8.0 (kernels DNN en C/C++, SOLO gpu+cuda@12.6.2/yziqg5b, hash v5jki3y):
-  CUDNN=$($SPACK location -i /v5jki3y 2>/dev/null)
-  CUDA_DIR=$($SPACK location -i /yziqg5b 2>/dev/null)
-  export LD_LIBRARY_PATH=${CUDNN}/lib:${CUDA_DIR}/lib64:${LD_LIBRARY_PATH}
-  nvcc -I${CUDNN}/include -I${CUDA_DIR}/include ... -L${CUDNN}/lib -lcudnn. PyTorch/TF ya traen cuDNN incluido.
-
-GDAL 3.10.2 (geoespacial C/C++, hash indvym5 — ÚNICO hash en el store al 1/8, verificar si sigue así ya que el 3.11.5 que se había consolidado en la tarea #26 del plan de unificación spack desapareció, posible efecto lateral de `spack gc`, sin confirmar todavía):
-  GDAL=$($SPACK location -i /indvym5 2>/dev/null)
-  gcc -I${GDAL}/include prog.c -L${GDAL}/lib -lgdal -Wl,-rpath,${GDAL}/lib -o prog
-  NOTA: py-rasterio está ROTO (.so.36 vs .so.37); para Python geoespacial usar py-geopandas.
-
-CuPy: NO INSTALADO desde el borrado masivo de python viejo del 1/8 (dependía de python/tdgfkr3, ya borrado). Avisar al usuario que no está disponible, no inventar el comando.
-
-JAX: NO INSTALADO desde el borrado masivo de python viejo del 1/8 (dependía de python/tdgfkr3, ya borrado). Avisar al usuario que no está disponible, no inventar el comando.
-
-JupyterLab: NO INSTALADO al revisar el 1/8 (ausente del store, motivo no confirmado). Avisar al usuario que no está disponible antes de sugerirlo. ALTERNATIVA: usar /diagnose en gonzabot para ver notebooks guardados como scripts .py.
-
-Rust 1.86.0 (hash 7a2bbni, gcc14): eval $(spack load --sh /7a2bbni); cargo build/run. Reconstruido el 1/8 (chocaba compilando su LLVM/lld embebido con AOCC contra libstdc++ de gcc14, real bug, resuelto forzando gcc14 completo). Partición cpu.
-Go, Node.js: NO INSTALADOS al revisar el 1/8 (ausentes del store, motivo no confirmado — posiblemente ya estaban así antes de la migración de hoy). Avisar al usuario que no están disponibles, no inventar el comando.
-
-PDF con LaTeX: texlive 20260301 (hash /wyqdig2, reinstalado 30/8 — el build fallaba desde el 1/8 por falta de espacio en el stage por defecto de /dev/shm con el resource texmf-dist de ~14G, ya resuelto).
-  TEXLIVE_DIR=$($SPACK location -i /wyqdig2 2>/dev/null)
-  export PATH=${TEXLIVE_DIR}/bin/x86_64-linux:$PATH
-  pdflatex -interaction=nonstopmode documento.tex
-Heredoc bash: comillas (<<'EOF') evitan expansión de $/\ (el bot auto-quotea si falta). Marcadores distintos por bloque: <<'LMPEOF' LAMMPS, <<'PYEOF' Python, <<'TEXEOF' LaTeX.
-  LaTeX en heredoc <<'TEXEOF': backslash SIMPLE — escribir \documentclass, \begin{document}, \section (NO \\documentclass ni \\begin). Con comillas el shell no toca los backslashes.
-  Si necesitas variables bash dentro del heredoc: escribir el .py o .tex con Python usando f-strings o sed.
-matplotlib mathtext: NO \displaystyle (ParseFatalException). Funciona: \frac{}{}, \left[\right], \varepsilon, \sigma, \pm.
-
-Numba (py-numba, disponible en spack-2026b, spack load py-numba): para loops de Python puro con millones de iteraciones secuenciales (integradores ODE/SDE paso a paso, Monte Carlo iterativo), agregar @njit a las funciones del loop da speedups reales de 50-100x+ (validado 27/8: integrador de Heun, 500k pasos, 8.9s → 0.096s, ~93x). Es la primera opción a sugerir ante un loop `for i in range(N)` con N grande y trabajo por iteración chico.
-  ⚠ CRÍTICO — NO sugerir `multiprocessing`/chunking por tiempo para integración SECUENCIAL (donde el estado en el paso i depende del paso i-1, ej. cualquier integrador ODE/SDE tipo Euler/Heun/Runge-Kutta): partir el rango temporal en chunks independientes con `Pool` y cada chunk arrancando desde `initial_condition` NO reconstruye la trayectoria real — cada chunk sería una simulación distinta empezando de cero, no una continuación. Ese patrón de "paralelizar por chunks de tiempo" solo es válido si las iteraciones son independientes entre sí (ej. barrido de parámetros, no evolución temporal de un mismo estado). Para integración secuencial, Numba (@njit) es la opción correcta; multiprocessing NO sirve para acelerar el loop en sí.
-
+JupyterLab: NO INSTALADO (ausente del store). Avisar al usuario que no está disponible antes
+  de sugerirlo. ALTERNATIVA: usar /diagnose en gonzabot para ver notebooks guardados como scripts .py.

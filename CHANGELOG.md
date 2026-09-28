@@ -1,0 +1,84 @@
+# Changelog
+
+All notable changes to gonzabot are documented here. Format loosely follows
+[Keep a Changelog](https://keepachangelog.com/). Dates are when the change went
+into production on the IFIMAR cluster.
+
+## [1.2.0] - 2026-09-28
+
+### Added
+- Verified LAMMPS CPU→GPU conversion checklist in `md-sim.txt` (partition/gres/WORKDIR
+  changes, `-sf gpu -pk gpu N`, and which pair styles actually support `/gpu` in this
+  build) — tested end-to-end with a real run on an A100 before documenting it.
+- Deterministic lint for `#SBATCH --workdir=...`/`--chdir=...` with shell variables —
+  those directives are parsed by Slurm before any shell exists, so `$SLURM_JOB_ID`
+  never expands. Previously only documented as prose.
+- Deterministic lint for `source <file>.env` where the file exists on disk but is
+  known to point at a dead Spack store (`os.path.exists()` alone can't catch this).
+- Deterministic lints for a backgrounded job command (`&`) with no matching `wait`,
+  and for `spack load` used while the `setup-env.sh` source line is commented out.
+- Deterministic lint for a Spack hash assigned to a variable without its leading
+  `/` and then used via `location -i $VAR` (an indirection the existing
+  no-leading-slash lint didn't trace).
+- New `--qos` REGLA ABSOLUTA: always emit an explicit QOS in generated
+  `salloc`/`sbatch`, instead of silently relying on the Slurm default.
+- `/diagnose` now recognizes the Munge "108 bytes" socket-pathname error and
+  explains the real cause (a kernel `sockaddr_un` limit) instead of guessing.
+
+### Changed
+- Split `python.txt` into `python.txt` (Python packages only) and a new
+  `sci-tools.txt` (gnuplot, Grace, ParaView, OVITO, PyCharm, R, GSL, ADIOS2,
+  Apptainer, MPICH, GDAL, AOCC, Rust, LaTeX) — loading the full combined file for
+  an unrelated question (e.g. gnuplot) was pushing requests into the context range
+  where GLM-4.5-Air's reasoning leaks into the visible response (see
+  [vllm-project/vllm#29763](https://github.com/vllm-project/vllm/issues/29763)).
+  Reproduced the leak 3/3 times before the split, 0/3 after, for the same query.
+- The reasoning-leak detector's own advice used to always suggest `/compact`,
+  which does nothing in a fresh session with little history. It now checks for
+  that case and suggests something that actually helps.
+- `/branch`: relative file arguments are now resolved to absolute paths before
+  building `WORKDIR`/`BRANCHDIR` (a bare `.` was leaking into the generated sbatch).
+- `/branch`: the diff-block extractor now tolerates a trailing unclosed
+  ` ```diff ` fence instead of silently dropping that branch with no warning.
+
+### Fixed
+- Several stale Spack hashes across `core.txt`/`python.txt`/`md-sim.txt`/
+  `dft-qe.txt` that had gone dead after rebuilds, found by auditing every
+  documented hash against the live store instead of trusting the docs.
+- Simplified several packages (AOCC, MPICH, py-mpi4py, GDAL, py-rasterio,
+  py-numba, NCCL) from hash-pinned to bare package-name resolution, after
+  confirming each resolves unambiguously — removes a class of future staleness.
+
+## [1.1.0] - 2026-09-15
+
+### Added
+- Bioacoustics segment (PAMGuard — first Maven/Java package in the stack).
+- Lint catching GUI applications (PAMGuard, CASA viewer tools) submitted inside a
+  batch `#SBATCH` script instead of an interactive session with a display.
+- Lint catching hallucinated absolute paths invoked directly instead of the
+  `spack load` + bare-command pattern.
+- "Upstream contributions" section in both READMEs, documenting real PRs merged
+  into `spack/spack-packages`, `potfit/potfit`, and `tensorflow/tensorflow`
+  found while packaging this cluster's software stack.
+
+### Fixed
+- `/diagnose` no longer hallucinates a scavenger-preemption explanation for jobs
+  that failed for an unrelated reason.
+- A gzip/`.npz` lint that let a corruption bug through.
+- Several stale context notes caught during a routine audit.
+
+## [1.0.0] - 2026-08-30
+
+Initial public release.
+
+### Added
+- Core assistant: reviews `sbatch` scripts and interactive requests against the
+  cluster's real Slurm/Spack configuration before they run, combining
+  deterministic lints with an LLM (GLM-4.5-Air, migrated from
+  Qwen2.5-72B-Instruct-AWQ this release — see README for the comparison).
+- Context split into topic segments (`core`, `spack`, `md-sim`, `dft-qe`,
+  `particle-physics`, `gpu-custom`, `genomica`, `casa`, `otros-lang`, `python`),
+  each loaded only when its keywords are actually relevant to the request.
+- `/load`, `/save`, `/diff`, `/edit`, `/diagnose`, `/branch`, `/audit`, `/queue`,
+  `/history`, `/model`, `/run`, `/help`.
+- Multi-language docs (README + tutorial in English and Spanish).

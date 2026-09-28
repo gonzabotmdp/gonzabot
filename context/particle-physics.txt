@@ -19,18 +19,17 @@ Potfit (ajuste de potenciales interatómicos por force-matching, github.com/potf
     adentro del environment (gotcha real, mismo patrón que lammps standalone). Cargar así:
     export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config
     source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
-    eval $(spack load --sh potfit)   # "spack load potfit" bare YA RESUELVE (23/8, wrapper) → apot+mpi /xrahw33
+    eval $(spack load --sh potfit)   # "spack load potfit" bare YA RESUELVE (wrapper) → apot+mpi /xrahw33
     eval $(spack load --sh /xvyetef) # para model=kim, SIEMPRE hash explícito (bare da apot, no kim)
   model=apot +mpi (hash /xrahw33): binario potfit_apot_pair_lapack_mpi, openmpi /2cgnkug.
     mpirun -np $SLURM_NTASKS potfit_apot_pair_lapack_mpi archivo_parametros
     Analítico (parámetros de una forma funcional fija), paraleliza bien con MPI.
     CRÍTICO: NUNCA --ntasks=1 (potfit rechaza "not supported" con 1 solo proceso MPI) NI
       --ntasks > cantidad de configuraciones en el archivo config (rechaza con error claro
-      "more MPI processes than configurations"). Validado real 23/8: --ntasks=8 con 1 config
-      falla, --ntasks=2 con 2 configs corre bien (optimización Powell real, EXIT_CODE 0).
+      "more MPI processes than configurations") — validado real.
   model=kim ~mpi (hash /xvyetef): binario potfit_kim_lapack. SIN mpirun (serial):
     potfit_kim_lapack archivo_parametros
-    Usa modelos de OpenKIM (openkim.org). Validado real 22-23/8, job real EXIT_CODE 0 (128 átomos Ar, KIM ex_model_Ar_P_LJ).
+    Usa modelos de OpenKIM (openkim.org). Validado real, job EXIT_CODE 0.
   "archivo_parametros" (nombre libre, ej. param_file) es un archivo de texto que a su vez
     referencia los otros 3: "config <ref_config>" (estructuras+fuerzas de entrenamiento),
     "startpot <potencial_inicial.pot>", "endpot <potencial_optimizado.pot>". NINGUNO viene con

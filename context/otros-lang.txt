@@ -5,5 +5,11 @@
 
 Fortran: gfortran /usr/bin. OpenMP: gfortran -O2 -fopenmp + --ntasks=1 --cpus-per-task=N. integer default 32 bits → overflow silencioso → usar integer(8).
 
-Octave 9.1.0: spack load octave (wrapper); octave --no-gui script.m. Partición cpu.
-  ⚠ Sin GUI/gnuplot todavía (ver spack.txt, nota de STORE NUEVO).
+Octave 9.4.0: spack load octave (wrapper); octave --no-gui script.m. Partición cpu.
+  CORREGIDO 24/9: la nota vieja "sin GUI/gnuplot" ya no es cierta — el build actual tiene
+  +qt+gnuplot (reusa el Qt5 de la instalación de gnuplot+qt del 11/9), confirmado con un
+  plot real headless: graphics_toolkit("gnuplot") + print a SVG funciona (probado en vivo).
+  Para exportar a PNG hace falta Ghostscript (gs), que NO está instalado — usar SVG/PDF en
+  vez de PNG si falla "'gs' binary is not available", o pedir que se instale gs si hace
+  falta PNG sí o sí. Para GUI interactiva real (ventana Qt, no solo export a archivo) hace
+  falta sesión con X11 (salloc --x11 o ssh -Y), no probado en esta pasada.
