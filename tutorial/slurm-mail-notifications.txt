@@ -46,7 +46,7 @@ mailbox dedicado tipo hpc@tu-institucion.edu).
 
 Slurm llama a sendmail (ahora apuntado a ssmtp) cuando el job termina o
 falla — por eso gonzabot agrega estas dos líneas por defecto a cualquier
-sbatch que genera (ver context/hpc.txt).
+sbatch que genera (ver context/core.txt).
 
 === VERIFICAR ===
 

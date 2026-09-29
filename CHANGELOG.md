@@ -4,6 +4,31 @@ All notable changes to gonzabot are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/). Dates are when the change went
 into production on the IFIMAR cluster.
 
+## [1.3.2] - 2026-09-29
+
+### Fixed
+- A user checking the published `tutorial/vllm-service.sbatch` against the live
+  service found it still showed the pre-migration Qwen2.5-72B-Instruct-AWQ
+  config instead of the current GLM-4.5-Air one. Prompted a full from-scratch
+  audit of every published file rather than just that one:
+  - `tutorial/vllm-service.sbatch` rewritten to match the real running config
+    (current spack-2026b CUDA path, `--reasoning-parser glm45`,
+    `--enable-expert-parallel`, `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE`).
+  - Both tutorial READMEs updated: the Qwen model was presented as current
+    production instead of superseded history.
+  - `tutorial/spack-load-wrapper.txt`: activation path pointed at
+    `/usr/share/spack/setup-env.sh`, dead since the spack-2026b migration.
+  - `tutorial/slurm-mail-notifications.txt`: referenced `context/hpc.txt`,
+    renamed to `core.txt` a while back.
+  - More seriously, the same audit found this wasn't just stale docs: the code
+    path that auto-fixes multi-node scripts (LAMMPS, and module-load aliases
+    for CASA/GSL/CUDA/AOCC/ADIOS2/ROOT) was hardcoding the same dead
+    `/usr/share/spack/root/...` store and generating
+    `spack --no-locks location -i`, a flag spack 1.2.2 no longer has (renamed
+    to `--disable-locks`). Any script actually run through that auto-fix would
+    have failed against a spack binary and package hashes that don't exist
+    anymore. Fixed in code, not just examples — 118/118 selftest still passes.
+
 ## [1.3.1] - 2026-09-29
 
 ### Added

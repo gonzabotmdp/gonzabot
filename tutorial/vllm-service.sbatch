@@ -11,13 +11,16 @@
 #SBATCH --error=/mnt/gpu-data/shared/ifimar-ai/logs/vllm-%j.err
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-CUDA_DIR=/usr/share/spack/root/opt/spack/linux-ubuntu24.04-zen4/gcc-14.2.0/cuda-12.6.2-6wkrlaxd5q7zyvxge7vmp6gkhwa7gtno
-VENV=/mnt/gpu-data/shared/ifimar-ai/venv-020
-MODEL_DIR=/mnt/gpu-data/shared/models/Qwen2.5-72B-Instruct-AWQ
+# 30/8: migrado de Qwen2.5-72B a GLM-4.5-Air tras comparación sistemática
+# (ver README, sección "Comparación de modelos").
+CUDA_DIR=/apps/local/spack/spack-2026b/spack/opt/spack/linux-zen4/cuda-12.6.2-okkjtu2zsbs2foyor6iohlanp3lpcfyc
+VENV=/mnt/gpu-data/shared/ifimar-ai/venv-glm-test
+MODEL_DIR=/mnt/gpu-data/shared/ifimar-ai/models/GLM-4.5-Air-AWQ-4bit
 PORT=8000
 HOST=0.0.0.0
 
 export PATH=${CUDA_DIR}/bin:${VENV}/bin:$PATH
+export CUDA_HOME=${CUDA_DIR}
 export LD_LIBRARY_PATH=${CUDA_DIR}/lib64:${CUDA_DIR}/targets/x86_64-linux/lib:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
 export LIBRARY_PATH=${CUDA_DIR}/lib64/stubs:${LIBRARY_PATH}
 export VIRTUAL_ENV=${VENV}
@@ -26,6 +29,14 @@ export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export TORCH_COMPILE_DISABLE=1
 export TRITON_LIBCUDA_PATH=${CUDA_DIR}/lib64/stubs
 export TRITON_PYTHON_INCLUDE_DIR=/mnt/gpu-data/shared/ifimar-ai/pyheaders/usr/include/python3.12
+# 15/9: modelo 100% local, nunca necesita chequear huggingface.co. Sin esto,
+# HF/transformers puede intentar una llamada de red (version-check/etag) al
+# resolver la arquitectura -- candidato fuerte a una demora real que vimos
+# (11+ min en "Resolved architecture" vs los ~5s normales). No confirmado al
+# 100%, pero es preventivo seguro (no cambia nada del modelo/lógica, solo
+# evita la llamada online).
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 
 # ── Info ──────────────────────────────────────────────────────────────────────
 echo "=== vLLM service start $(date) ==="
@@ -64,19 +75,17 @@ IDLE_MINUTES=30
 ) &
 WATCHDOG_PID=$!
 
-# ── Launch vLLM ───────────────────────────────────────────────────────────────
+# ── Launch vLLM (MoE: --enable-expert-parallel obligatorio con TP>1) ──────────
 python3 -m vllm.entrypoints.openai.api_server \
     --model "${MODEL_DIR}" \
     --tensor-parallel-size 2 \
+    --enable-expert-parallel \
     --host "${HOST}" \
     --port "${PORT}" \
     --max-model-len 131072 \
-    --gpu-memory-utilization 0.95 \
-    --served-model-name qwen25-72b \
-    --quantization awq \
-    --enable-chunked-prefill \
-    --max-num-batched-tokens 16384 \
-    --enforce-eager \
+    --gpu-memory-utilization 0.90 \
+    --served-model-name glm45-air \
+    --reasoning-parser glm45 \
     --trust-remote-code
 
 echo "=== vLLM service stopped $(date) ==="

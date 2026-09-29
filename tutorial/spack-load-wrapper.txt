@@ -3,6 +3,13 @@ SPACK LOAD WRAPPER — resolución automática de hashes ambiguos
 Fecha: 2026-07-11
 Responsable: Gonzalo + softadm
 
+ACTUALIZACIÓN: el store de Spack se migró después a spack-2026b. La ruta de
+activación real hoy es /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh,
+no /usr/share/spack/setup-env.sh (ese archivo sigue existiendo en el sistema
+pero es de una instalación vieja, no la actual). El resto de este documento
+es el log real de cómo se resolvió el problema el 11/7 y sigue siendo válido
+como referencia del enfoque — solo la ruta de activación cambió.
+
 PROBLEMA
 --------
 `spack load PKG` falla cuando hay múltiples builds del mismo paquete instalados.
@@ -69,7 +76,7 @@ VERIFICACIÓN
 ------------
 Para confirmar que el wrapper funciona en una sesión nueva:
 
-  source /usr/share/spack/setup-env.sh
+  source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
   spack load --sh fftw 2>&1 | head -3
   # Debe mostrar líneas "export ..." sin error de ambigüedad
 

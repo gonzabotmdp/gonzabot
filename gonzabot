@@ -1384,10 +1384,10 @@ def _warmup():
     threading.Thread(target=_run, daemon=True).start()
 
 
-_LAMMPS_BIN = ("/usr/share/spack/root/opt/spack/linux-ubuntu24.04-zen4/"
-               "gcc-14.2.0/lammps-20250722-muoad26fk6b22t7bhb64o6zvxrxse7ed/bin/lmp")
-_OMPI_DIR   = ("/usr/share/spack/root/opt/spack/linux-ubuntu24.04-zen4/"
-               "gcc-13.3.0/openmpi-5.0.8-5qsncbuslquefbwiynsdwp5hlkpkvko2")
+_LAMMPS_BIN = ("/apps/local/spack/spack-2026b/spack/opt/spack/linux-zen4/"
+               "lammps-20250722.4-mgsqgyo42lix7gd3xn5ltak6efd6idgs/bin/lmp")
+_OMPI_DIR   = ("/apps/local/spack/spack-2026b/spack/opt/spack/linux-zen4/"
+               "openmpi-5.0.8-2cgnkugxdchje4kznxdftkaqwapdebri")
 
 def _dedent_code_block(text: str) -> str:
     """Saca la indentación común de un bloque de código extraído del reply.
@@ -1676,7 +1676,7 @@ def _fix_sbatch(text: str) -> str:
                           "SHELL", "LANG", "LC_ALL", "TERM", "LOGNAME",
                           "HOSTNAME", "DISPLAY", "WORKDIR"}
         used = set(_re.findall(r'\$\{?(\w+)\}?/(?:bin|include|lib64?)\b', block))
-        used |= set(_re.findall(r'\$\{?(\w+)\}?\s+(?:--no-locks\s+)?location\s+-i',
+        used |= set(_re.findall(r'\$\{?(\w+)\}?\s+(?:--disable-locks\s+)?location\s+-i',
                                 block))
         assigned = set(_re.findall(r'^\s*(\w+)\s*=', block, _re.M))
         used = {v for v in used
@@ -1687,7 +1687,7 @@ def _fix_sbatch(text: str) -> str:
                              "falta SPACK=/apps/local/spack/spack-2026b/spack/bin/spack")
             else:
                 warns.append(f"'{v}' se usa pero nunca se define en el script — "
-                             f"falta {v}=$($SPACK --no-locks location -i /hash)")
+                             f"falta {v}=$($SPACK --disable-locks location -i /hash)")
         # Compilador invocado desde el bin/ de un paquete que NO es un toolchain
         # (bug real 30/8: GSL_DIR/bin/gcc — GSL es librería, no trae compilador).
         _COMPILER_BINS = {"gcc", "g++", "gfortran", "clang", "clang++", "cc",
@@ -1864,7 +1864,7 @@ def _fix_sbatch(text: str) -> str:
             if mm:
                 extra = f" {mm.group(2)}" if mm.group(2) else ""
                 warns.append(f"'module {mm.group(1)}{extra}' no existe en este cluster "
-                             f"(sin Lmod) — usar spack: $SPACK --no-locks location -i /hash")
+                             f"(sin Lmod) — usar spack: $SPACK --disable-locks location -i /hash")
         # Computes definidos pero nunca referenciados (c_ID) → el dato no sale al log
         for cm in _re.finditer(r'^\s*compute\s+(\w+)\s+\w+\s+\w+', block, _re.M):
             cid = cm.group(1)
@@ -2001,18 +2001,18 @@ def _fix_sbatch(text: str) -> str:
                 continue
             if pkg == "root":
                 if not has_spack:
-                    out.append(f"{indent}SPACK=/usr/share/spack/root/bin/spack")
+                    out.append(f"{indent}SPACK=/apps/local/spack/spack-2026b/spack/bin/spack")
                     has_spack = True
-                out.append(f"{indent}ROOT_DIR=$($SPACK --no-locks location -i /{_MODULE_ROOT_HASH} 2>/dev/null)")
+                out.append(f"{indent}ROOT_DIR=$($SPACK --disable-locks location -i /{_MODULE_ROOT_HASH} 2>/dev/null)")
                 out.append(f"{indent}source ${{ROOT_DIR}}/bin/thisroot.sh")
                 continue
             alias = _MODULE_ALIASES.get(pkg)
             if alias:
                 hash_, var = alias
                 if not has_spack:
-                    out.append(f"{indent}SPACK=/usr/share/spack/root/bin/spack")
+                    out.append(f"{indent}SPACK=/apps/local/spack/spack-2026b/spack/bin/spack")
                     has_spack = True
-                out.append(f"{indent}{var}=$($SPACK --no-locks location -i /{hash_} 2>/dev/null)")
+                out.append(f"{indent}{var}=$($SPACK --disable-locks location -i /{hash_} 2>/dev/null)")
                 out.append(f"{indent}export PATH=${{{var}}}/bin:$PATH")
                 continue
             out.append(ln)  # sin alias conocido → lo atrapa el lint
@@ -2247,7 +2247,7 @@ def _selftest() -> int:
     _t("lint: com yes",
        "centro de masa" in _fix_sbatch(L.format("units lj\ncompute m all msd com yes\nthermo_style custom c_m[4]")))
     _t("lint: $( faltante",
-       "falta '$('" in _fix_sbatch(B.format("X --no-locks location -i /h 2>/dev/null)/bin/py s.py")))
+       "falta '$('" in _fix_sbatch(B.format("X --disable-locks location -i /h 2>/dev/null)/bin/py s.py")))
     _t("lint: compute sin referenciar",
        "nunca referenciado" in _fix_sbatch(L.format("units lj\ncompute msd all msd\nrun 100")))
     _t("lint: create_atoms random",
@@ -2285,9 +2285,9 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("module load lammps\nlmp -in in.lj"))
     _t("module load lammps (sin alias) → queda para el lint",
        "⚠" in r and "no existe en este cluster" in r)
-    r = _fix_sbatch(B.format("SPACK=/usr/share/spack/root/bin/spack\nmodule load octave\noctave s.m"))
+    r = _fix_sbatch(B.format("SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\nmodule load octave\noctave s.m"))
     _t("module load con SPACK ya definido → no lo duplica",
-       r.count("SPACK=/usr/share/spack/root/bin/spack") == 1)
+       r.count("SPACK=/apps/local/spack/spack-2026b/spack/bin/spack") == 1)
     r = _fix_sbatch(B.format("module avail\nmodule load julia"))
     _t("module avail siempre warnea aunque julia se auto-arregle",
        "module avail" in r and "no existe en este cluster" in r and "/xr2wc6tn" in r)
@@ -2303,35 +2303,35 @@ def _selftest() -> int:
        "'CASA_DIR' se usa pero nunca se define" in r)
     r = _fix_sbatch(B.format(
         "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
-        "CASA_DIR=$($SPACK --no-locks location -i /wmj34nf 2>/dev/null)\n"
+        "CASA_DIR=$($SPACK --disable-locks location -i /wmj34nf 2>/dev/null)\n"
         "${CASA_DIR}/bin/casa --nogui -c s.py"))
     _t("lint: _DIR definido y usado → sin warning", "⚠" not in r)
     r = _fix_sbatch(B.format(
         "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
-        "GSL_DIR=$($SPACK --no-locks location -i /mq2eqdc 2>/dev/null)\n"
+        "GSL_DIR=$($SPACK --disable-locks location -i /mq2eqdc 2>/dev/null)\n"
         "${GSL_DIR}/bin/gcc -O3 prog.c -lgsl -o prog"))
     _t("lint: compilador desde bin/ de paquete no-toolchain (bug real GSL_DIR/bin/gcc 30/8)",
        "GSL no es un paquete que provea compilador" in r)
     r = _fix_sbatch(B.format(
         "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
-        "CUDA_DIR=$($SPACK --no-locks location -i /okkjtu2 2>/dev/null)\n"
+        "CUDA_DIR=$($SPACK --disable-locks location -i /okkjtu2 2>/dev/null)\n"
         "${CUDA_DIR}/bin/nvcc -arch=sm_80 prog.cu -o prog"))
     _t("lint: CUDA_DIR/bin/nvcc → sin warning (patrón correcto)", "⚠" not in r)
     r = _fix_sbatch(B.format(
         "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
-        "AOCC_DIR=$($SPACK --no-locks location -i /vs4buop 2>/dev/null)\n"
+        "AOCC_DIR=$($SPACK --disable-locks location -i /vs4buop 2>/dev/null)\n"
         "${AOCC_DIR}/bin/clang -O3 prog.c -o prog"))
     _t("lint: AOCC_DIR/bin/clang → sin warning (AOCC sí provee compilador)", "⚠" not in r)
     r = _fix_sbatch(B.format(
-        "GSL=$($SPACK --no-locks location -i /mq2eqdc 2>/dev/null)\n"
+        "GSL=$($SPACK --disable-locks location -i /mq2eqdc 2>/dev/null)\n"
         "export PATH=${AOCC}/bin:$PATH\n"
         "clang -O3 -march=znver4 -I${GSL}/include prog.c -L${GSL}/lib -lgsl -o prog"))
     _t("lint: SPACK/AOCC bare (sin sufijo _DIR) usados sin definir (bug real 30/8)",
        "'SPACK' se usa pero nunca se define" in r and "'AOCC' se usa pero nunca se define" in r)
     r = _fix_sbatch(B.format(
         "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
-        "AOCC=$($SPACK --no-locks location -i /vs4buop 2>/dev/null)\n"
-        "GSL=$($SPACK --no-locks location -i /mq2eqdc 2>/dev/null)\n"
+        "AOCC=$($SPACK --disable-locks location -i /vs4buop 2>/dev/null)\n"
+        "GSL=$($SPACK --disable-locks location -i /mq2eqdc 2>/dev/null)\n"
         "export PATH=${AOCC}/bin:$PATH\n"
         "clang -O3 -march=znver4 -I${GSL}/include prog.c -L${GSL}/lib -lgsl -o prog"))
     _t("lint: SPACK/AOCC/GSL bare, todos definidos → sin warning", "⚠" not in r)
@@ -2459,7 +2459,7 @@ def _selftest() -> int:
     _t("lint: hash con '/' inicial (patrón correcto) → sin warning", "⚠" not in r)
     r = _fix_sbatch(B.format(
         "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
-        "ADIOS_DIR=$($SPACK --no-locks location -i adios2 2>/dev/null)"))
+        "ADIOS_DIR=$($SPACK --disable-locks location -i adios2 2>/dev/null)"))
     _t("lint: nombre de paquete real bare (adios2, no es hash) → sin falso positivo",
        "⚠" not in r)
     r = _fix_sbatch(B.format(

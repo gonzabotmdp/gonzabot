@@ -36,8 +36,10 @@ binary.
 
 `download-model.sh` — we download the model from HuggingFace with
 `huggingface_hub.snapshot_download` (Llama 3.3 70B as the example here;
-we ended up running Qwen2.5-72B-Instruct-AWQ in production, see
-`vllm-service.sbatch`).
+production ran Qwen2.5-72B-Instruct-AWQ at first, then migrated to
+**GLM-4.5-Air** on 2026-08-30 — see the root README's "Model comparison"
+section for why, and `vllm-service.sbatch` for what's actually running
+now).
 
 `vllm-service.sbatch` — the real Slurm job that starts the service. Two
 ideas from the script worth copying as-is:
