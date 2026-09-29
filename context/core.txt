@@ -62,7 +62,7 @@ COMANDOS DEL CLIENTE GONZABOT:
   /history [N|keywords]      Historial de sesiones o búsqueda en historial
   /clear                     Limpia mensajes de sesión (historial en DB queda)
   /model                     Muestra modelo LLM y endpoint
-  /run <comando>             Ejecuta un comando y pasa el output para análisis
+  /run [N]                   Somete el sbatch generado (último bloque, o #REF N si se da)
   /help                      Ayuda completa
   Comandos del sistema (squeue, sinfo, df, free, ps, etc.) se ejecutan automáticamente sin /run.
 

@@ -243,6 +243,92 @@ def _handle_runtime_error(e: Exception) -> None:
         print(_c(RED, f"\nError: {err_s}\n"))
 
 
+# Comandos de sistema/HPC que gonzabot ejecuta directo sin pasar por el LLM (ver el
+# dispatch de auto-run más abajo). A nivel módulo (no local al loop principal) para que
+# _raw_input pueda usarlo también para el autocompletado con Tab.
+_AUTO_RUN_CMDS = {
+    # Slurm
+    "squeue", "sinfo", "sacct", "sstat", "scontrol", "sprio", "sshare",
+    "sbatch", "scancel", "srun",
+    # GPU / CUDA
+    "nvidia-smi", "nvtop", "nvcc",
+    # Disco y filesystem
+    "df", "du", "ls", "stat", "file", "lsblk", "lsof",
+    # Procesos y sistema
+    "ps", "free", "uptime", "top", "vmstat", "iostat", "mpstat",
+    "date", "cal", "uname", "arch",
+    # Identidad y entorno
+    "whoami", "hostname", "id", "pwd", "env", "printenv", "which", "type",
+    # Texto y archivos (solo lectura)
+    "cat", "head", "tail", "grep", "find", "wc",
+    "sort", "uniq", "cut", "tr", "diff", "strings",
+    "awk", "sed", "echo", "printf",
+    # Archivos (escritura / mutación — piden confirmación si son destructivos)
+    "rm", "mkdir", "cp", "mv", "touch", "ln", "chmod", "chown", "rmdir",
+    # Red y conectividad
+    "ping", "traceroute", "tracepath", "mtr", "host", "curl", "wget",
+    "ip", "ss", "netstat", "nslookup", "dig", "nc",
+    # Hardware
+    "lscpu", "lsmem", "lspci", "lsusb", "numactl", "lstopo",
+    # Software y módulos
+    "module", "spack", "git",
+    # Archivos comprimidos
+    "tar", "zcat", "gzip", "gunzip", "unzip", "zip",
+    # Scripts / compilación
+    "python3", "python", "bash", "sh", "make", "cmake",
+    "mpirun", "mpiexec", "gcc", "gfortran", "g++",
+}
+# Comandos propios de gonzabot (ver dispatch de "/palabra" más abajo) -- se completan
+# igual que _AUTO_RUN_CMDS pero solo cuando el usuario ya empezó a tipear "/". Lista
+# verificada contra el dispatch real (grep "elif cmd ==") — "/run" agregado 29/9
+# (pedido real de Gonzalo: somete el sbatch generado, último o por #REF N).
+_SLASH_CMDS = {
+    "/load", "/save", "/saveall", "/copy", "/diff", "/edit", "/diagnose",
+    "/audit", "/queue", "/branch", "/history", "/clear", "/paste", "/model",
+    "/raw", "/compact", "/help", "/run",
+}
+
+
+def _submit_sbatch_text(sb_text: str) -> "tuple[bool, str]":
+    """Somete un script sbatch vía un archivo temporal. Devuelve (ok, mensaje de
+    sbatch o error). Compartido entre el quick-submit 's' (ver _raw_input) y /run."""
+    import tempfile as _tf
+    if not sb_text.startswith("#!"):
+        sb_text = "#!/bin/bash\n" + sb_text.lstrip("\n")
+    tmp = _tf.NamedTemporaryFile(suffix=".sh", delete=False, mode="w")
+    tmp.write(sb_text + "\n")
+    tmp.close()
+    try:
+        r = subprocess.run(["sbatch", tmp.name], capture_output=True, text=True)
+        out = r.stdout.strip() or r.stderr.strip()
+        return (r.returncode == 0, out)
+    except FileNotFoundError:
+        return (False, "sbatch no disponible en este nodo.")
+    finally:
+        try:
+            Path(tmp.name).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _tab_complete(line_so_far: str) -> "str | None":
+    """Lógica pura de autocompletado (separada del terminal para poder testearla).
+    Solo completa la PRIMERA palabra (sin espacio todavía). Un solo match -> completa
+    + espacio final. Varios matches -> completa hasta el prefijo común más largo, si
+    extiende lo ya tipeado. Devuelve None si no hay nada para completar."""
+    if not line_so_far or " " in line_so_far:
+        return None
+    cands = _SLASH_CMDS if line_so_far.startswith("/") else _AUTO_RUN_CMDS
+    matches = sorted(m for m in cands if m.startswith(line_so_far))
+    if len(matches) == 1:
+        return matches[0] + " "
+    if len(matches) > 1:
+        common = os.path.commonprefix(matches)
+        if len(common) > len(line_so_far):
+            return common
+    return None
+
+
 def _raw_input(prompt: str) -> str:
     """Line reader en raw mode con status bar fija y detección de bracketed paste."""
     if not sys.stdin.isatty():
@@ -335,27 +421,9 @@ def _raw_input(prompt: str) -> str:
         if _SB_ACTIVE:
             _sb_draw()
         if _is_sbatch and extra.lower() == "s":
-            import tempfile as _tf
-            sb_text = "\n".join(lines)
-            if not sb_text.startswith("#!"):
-                sb_text = "#!/bin/bash\n" + sb_text.lstrip("\n")
-            tmp = _tf.NamedTemporaryFile(suffix=".sh", delete=False, mode="w")
-            tmp.write(sb_text + "\n")
-            tmp.close()
-            try:
-                r = subprocess.run(["sbatch", tmp.name], capture_output=True, text=True)
-                out = r.stdout.strip() or r.stderr.strip()
-                color = GRN if r.returncode == 0 else RED
-                sys.stdout.write(f"\r\n  {_c(color, out)}\r\n")
-                sys.stdout.flush()
-            except FileNotFoundError:
-                sys.stdout.write(_c(RED, "\r\n  sbatch no disponible en este nodo.\r\n"))
-                sys.stdout.flush()
-            finally:
-                try:
-                    Path(tmp.name).unlink(missing_ok=True)
-                except Exception:
-                    pass
+            ok, out = _submit_sbatch_text("\n".join(lines))
+            sys.stdout.write(f"\r\n  {_c(GRN if ok else RED, out)}\r\n")
+            sys.stdout.flush()
             return ""
         if extra:
             return extra + "\n\n" + paste_text
@@ -572,6 +640,16 @@ def _raw_input(prompt: str) -> str:
                 elif c == "\x0b":              # Ctrl-K: borrar hasta fin
                     del buf[cur:]
                     _paint(buf, cur)
+                elif c == "\x09":              # Tab: autocompletar el primer comando
+                    # Solo mientras se tipea la primera palabra (sin espacio todavía) y
+                    # con el cursor al final -- mantiene el caso simple, sin autocompletar
+                    # argumentos ni editar en el medio de la línea.
+                    if cur == len(buf):
+                        _completed = _tab_complete("".join(buf))
+                        if _completed is not None:
+                            buf[:] = list(_completed)
+                            cur = len(buf)
+                            _paint(buf, cur)
                 elif ord(c) >= 32:
                     buf.insert(cur, c)
                     cur += 1
@@ -1330,7 +1408,7 @@ _KNOWN_HASH_PREFIXES_CACHE = None
 # "/diagnose", nombres de paquete dentro de listas tipo "lammps/gromacs", etc.)
 _KNOWN_SLASH_COMMANDS = {"diagnose", "branch", "load", "save", "saveall",
                          "edit", "diff", "help", "audit", "queue",
-                         "compact", "history", "new", "model"}
+                         "compact", "history", "new", "model", "run"}
 
 def _known_hash_prefixes() -> set:
     """Hashes de spack documentados en context/*.txt (siempre escritos como '/xxxxxxx',
@@ -2519,6 +2597,24 @@ def _selftest() -> int:
        "que ver)",
        bool(_RE_PYTHON.search("como uso numpy y pandas para procesar estos datos"))
        and not bool(_RE_SCITOOLS.search("como uso numpy y pandas para procesar estos datos")))
+    _t("_tab_complete: match único agrega espacio final (bug real 28/9, pedido de "
+       "Gonzalo -- Tab para comandos validados, más parecido a una consola real)",
+       _tab_complete("squ") == "squeue ")
+    _t("_tab_complete: prefijo ambiguo (python/python3) completa al prefijo común más "
+       "largo sin espacio -- 's' NO sirve de ejemplo acá, diverge en el 2do char "
+       "(squeue/sinfo/sacct/...) y correctamente da None, sin extensión posible",
+       _tab_complete("py") == "python")
+    _t("_tab_complete: '/lo' completa a '/load ' (slash commands, lista separada de "
+       "_AUTO_RUN_CMDS)",
+       _tab_complete("/lo") == "/load ")
+    _t("_tab_complete: '/ru' completa a '/run ' (agregado 29/9 -- ahora SÍ tiene "
+       "handler real, somete el sbatch generado, último o por #REF N)",
+       _tab_complete("/ru") == "/run ")
+    _t("_tab_complete: ya hay un espacio (completando argumento, no comando) → None, "
+       "no autocompleta args, solo el primer comando",
+       _tab_complete("squeue -u gonz") is None)
+    _t("_tab_complete: buffer vacío → None",
+       _tab_complete("") is None)
     _core_candidate = next((p for p in (CONTEXT_DIR / "core-dev.txt", CONTEXT_DIR / "core.txt") if p.exists()), None)
     _CTX_CORE_TEXT = _core_candidate.read_text(encoding="utf-8", errors="replace") if _core_candidate else ""
     _t("core.txt: la regla mpirun-vs-srun vive acá (siempre cargado, no depende "
@@ -3260,6 +3356,7 @@ Comandos:
   Ejemplo:  /save 2 job.sbatch   /diff job.sbatch   /edit 1 main.c
   <comando>                  Los comandos del sistema se ejecutan directo (squeue, ls, rm, python3, ...)
   [pegar sbatch]             Pegá el script → el bot detecta #SBATCH → s = someter al cluster
+  /run [N]                   Somete el sbatch generado (último bloque, o #REF N si se da)
   /audit                     Analiza todos los jobs en ejecución y sugiere mejoras
   /queue [usuario]           Muestra la cola del usuario y analiza con el bot
   /diagnose <job_id>         Carga los logs del job y pide al bot que diagnostique
@@ -3387,7 +3484,7 @@ def repl(new_session: bool = False):
         _KNOWN_CMDS = {
             "/exit", "/quit", "/q", "/help", "/queue", "/save", "/saveall", "/copy",
             "/edit", "/diff", "/audit", "/diagnose", "/history", "/compact",
-            "/clear", "/paste", "/load", "/branch", "/model", "/raw",
+            "/clear", "/paste", "/load", "/branch", "/model", "/raw", "/run",
         }
         _first_slash_word = user_input.split(None, 1)[0].lower() if user_input.startswith("/") else ""
         if _first_slash_word in _KNOWN_CMDS:
@@ -3561,6 +3658,33 @@ def repl(new_session: bool = False):
                         _sh_sa.copy2(_dest, str(_dest) + ".bak")
                     _dest.write_text(_LAST_CODE_BLOCKS[_i][1], encoding="utf-8")
                 print(_c(GRN, f"Guardados {len(_sa_names)} archivo(s) en {_sa_dir}/"))
+
+            elif cmd == "/run":
+                # Pedido real de Gonzalo (28/9): que /run someta el sbatch generado por
+                # el bot -- último bloque si no se da número, o por #REF si se da. Este
+                # comando estaba documentado en core.txt ("/run <comando> ejecuta un
+                # comando...") pero NUNCA tuvo handler real en el código -- no reemplaza
+                # nada existente, se define de cero.
+                if not _LAST_CODE_BLOCKS:
+                    print(_c(YEL, "No hay ningún sbatch generado todavía en esta sesión."))
+                    continue
+                _rn_ref = int(arg.strip()) if arg.strip().isdigit() else None
+                if _rn_ref is not None:
+                    if _rn_ref < 1 or _rn_ref > len(_LAST_CODE_BLOCKS):
+                        print(_c(YEL, f"#REF{_rn_ref} no existe — hay {len(_LAST_CODE_BLOCKS)} bloque(s)."))
+                        continue
+                    _rn_block = _LAST_CODE_BLOCKS[_rn_ref - 1]
+                else:
+                    _rn_block = _LAST_CODE_BLOCKS[-1]   # "el último" generado
+                _rn_lang, _rn_code, _rn_title = _rn_block
+                if "#SBATCH" not in _rn_code:
+                    print(_c(YEL, f"El bloque elegido ({_rn_title or _rn_lang}) no tiene "
+                                  f"directivas #SBATCH — /run solo somete sbatch, no "
+                                  f"corre código suelto."))
+                    continue
+                print(_c(DIM, f"Sometiendo {_rn_title or 'el sbatch'}..."))
+                _rn_ok, _rn_out = _submit_sbatch_text(_rn_code)
+                print(_c(GRN if _rn_ok else RED, _rn_out))
 
             elif cmd == "/copy":
                 if not last_reply and not _LAST_CODE_BLOCKS:
@@ -4742,38 +4866,8 @@ def repl(new_session: bool = False):
             continue
 
         # ── Auto-run: comandos HPC/sistema reconocidos se ejecutan directamente ──
-        _AUTO_RUN_CMDS = {
-            # Slurm
-            "squeue", "sinfo", "sacct", "sstat", "scontrol", "sprio", "sshare",
-            "sbatch", "scancel", "srun",
-            # GPU / CUDA
-            "nvidia-smi", "nvtop", "nvcc",
-            # Disco y filesystem
-            "df", "du", "ls", "stat", "file", "lsblk", "lsof",
-            # Procesos y sistema
-            "ps", "free", "uptime", "top", "vmstat", "iostat", "mpstat",
-            "date", "cal", "uname", "arch",
-            # Identidad y entorno
-            "whoami", "hostname", "id", "pwd", "env", "printenv", "which", "type",
-            # Texto y archivos (solo lectura)
-            "cat", "head", "tail", "grep", "find", "wc",
-            "sort", "uniq", "cut", "tr", "diff", "strings",
-            "awk", "sed", "echo", "printf",
-            # Archivos (escritura / mutación — piden confirmación si son destructivos)
-            "rm", "mkdir", "cp", "mv", "touch", "ln", "chmod", "chown", "rmdir",
-            # Red y conectividad
-            "ping", "traceroute", "tracepath", "mtr", "host", "curl", "wget",
-            "ip", "ss", "netstat", "nslookup", "dig", "nc",
-            # Hardware
-            "lscpu", "lsmem", "lspci", "lsusb", "numactl", "lstopo",
-            # Software y módulos
-            "module", "spack", "git",
-            # Archivos comprimidos
-            "tar", "zcat", "gzip", "gunzip", "unzip", "zip",
-            # Scripts / compilación
-            "python3", "python", "bash", "sh", "make", "cmake",
-            "mpirun", "mpiexec", "gcc", "gfortran", "g++",
-        }
+        # _AUTO_RUN_CMDS ahora vive a nivel módulo (ver arriba de _raw_input) — la usa
+        # también el autocompletado con Tab.
         _DANGEROUS_CMDS = {"rm", "rmdir", "chmod", "chown", "mkfs", "dd"}
         _DANGEROUS_PATTERNS = ["-rf", "-fr", "-r ", "> /", "/*"]
         # Protección de inyección: bloquear metacaracteres peligrosos

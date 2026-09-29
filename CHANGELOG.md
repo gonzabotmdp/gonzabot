@@ -4,6 +4,21 @@ All notable changes to gonzabot are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/). Dates are when the change went
 into production on the IFIMAR cluster.
 
+## [1.3.0] - 2026-09-29
+
+### Added
+- Tab-completion for recognized shell commands and `/`-commands in the interactive
+  prompt — single match completes with a trailing space, ambiguous prefixes extend
+  to the longest common prefix.
+- `/run [N]`: submits the sbatch gonzabot just generated, the last code block by
+  default or a specific `#REF N`. This was listed in the command reference for a
+  while but never had a real handler — defined for the first time here, reusing
+  the same submission path as the existing paste-and-type-"s" quick-submit.
+  Refuses to run a block with no `#SBATCH` directives.
+- `CHANGELOG.md` and tagged GitHub releases (this is the first entry using that
+  workflow) — before this, downstream installs had no way to learn about updates
+  short of a direct message.
+
 ## [1.2.0] - 2026-09-28
 
 ### Added
