@@ -4,6 +4,22 @@ All notable changes to gonzabot are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/). Dates are when the change went
 into production on the IFIMAR cluster.
 
+## [1.3.1] - 2026-09-29
+
+### Added
+- CI: `--selftest`'s 100+ deterministic checks now run automatically on every push
+  and PR via GitHub Actions, with a status badge on both READMEs. Three checks that
+  intentionally verify real paths on the IFIMAR cluster still exist are satisfied
+  with stub files in CI, documented inline so a future check doesn't silently break
+  the pipeline.
+- `CONTRIBUTING.md`, explicit about what's portable (the Python code) vs.
+  site-specific (`context/*.txt`, which encodes this cluster's real
+  hashes/paths).
+- `SECURITY.md` with a real scope (command injection surface, `/run`'s sbatch
+  submission, `/load` path handling) rather than boilerplate.
+- Issue templates (bug report, feature request), a PR template, `.gitignore`.
+- Release badge on both READMEs, linking to the tagged GitHub releases.
+
 ## [1.3.0] - 2026-09-29
 
 ### Added

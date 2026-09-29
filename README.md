@@ -2,7 +2,7 @@
 
 **English** | [Español](README.es.md)
 
-![license](https://img.shields.io/badge/license-MIT-blue) ![python](https://img.shields.io/badge/python-3%20stdlib%20only-green)
+[![selftest](https://github.com/gonzabotmdp/gonzabot/actions/workflows/selftest.yml/badge.svg)](https://github.com/gonzabotmdp/gonzabot/actions/workflows/selftest.yml) ![license](https://img.shields.io/badge/license-MIT-blue) ![python](https://img.shields.io/badge/python-3%20stdlib%20only-green) [![release](https://img.shields.io/github/v/release/gonzabotmdp/gonzabot)](https://github.com/gonzabotmdp/gonzabot/releases)
 
 AI assistant for users of an HPC cluster (Slurm + Spack), built to catch
 configuration mistakes, resource misuse, and oversized resource requests in

@@ -1,0 +1,37 @@
+name: selftest
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # gonzabot's --selftest is pure Python stdlib and needs no live Slurm/Spack --
+      # but 3 of its 100+ checks intentionally verify that specific real, documented
+      # paths on the IFIMAR cluster still exist (this is a feature, not a bug: it's
+      # how the test suite catches a doc going stale on the real machine). Those
+      # exact paths obviously don't exist on a GitHub runner, so we stub them here
+      # as empty files/executables. If you add a new selftest case that checks a
+      # real absolute path exists, add its stub here too, or that check will fail
+      # in CI even though it's correct on the cluster.
+      - name: Stub cluster-specific paths used by selftest
+        run: |
+          sudo mkdir -p /apps/local/spack/spack-2026b/spack/bin
+          sudo mkdir -p /mnt/cpu-data/shared/ifimar-ai/envs
+          sudo touch /apps/local/spack/spack-2026b/spack/bin/spack
+          sudo chmod +x /apps/local/spack/spack-2026b/spack/bin/spack
+          sudo touch /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env
+          sudo chmod -R a+rw /apps/local /mnt/cpu-data
+
+      - name: Run selftest
+        run: ./gonzabot --selftest
