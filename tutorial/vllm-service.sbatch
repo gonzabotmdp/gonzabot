@@ -47,8 +47,12 @@ echo "Model: ${MODEL_DIR}"
 echo "Port: ${PORT}"
 echo "Job: ${SLURM_JOB_ID}"
 
-# Write job ID so the stop script can cancel it
+# Write job ID so the stop script can cancel it. rm -f + chmod 666 self-heals if
+# this file ever ends up owned by another user/root (real bug: it did once, and
+# the job silently failed to write its own PID -- Permission denied in the log).
+rm -f /mnt/gpu-data/shared/ifimar-ai/vllm.jobid 2>/dev/null
 echo "${SLURM_JOB_ID}" > /mnt/gpu-data/shared/ifimar-ai/vllm.jobid
+chmod 666 /mnt/gpu-data/shared/ifimar-ai/vllm.jobid 2>/dev/null || true
 
 # ── Idle watchdog ─────────────────────────────────────────────────────────────
 HEARTBEAT=/mnt/gpu-data/shared/ifimar-ai/run/.gonzabot-heartbeat

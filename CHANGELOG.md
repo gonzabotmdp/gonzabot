@@ -6,6 +6,14 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+### Fixed
+- `tutorial/vllm-service.sbatch`: the `vllm.jobid` tracking file had no self-healing
+  against ending up owned by another user/root -- once that happened (real incident,
+  2026-09-30), the job silently failed to write its own PID (`Permission denied` in
+  the log, no visible error to the user). The heartbeat file already had this
+  protection (`chmod 666` after every write); `vllm.jobid` didn't. Added `rm -f` +
+  `chmod 666` around the write, matching the existing heartbeat pattern.
+
 ## [1.3.3] - 2026-09-30
 
 ### Added
