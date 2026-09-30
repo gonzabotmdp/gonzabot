@@ -1,0 +1,57 @@
+POWER-SAVE / CONSOLIDACIÓN DE NODOS (green computing) — armado por softadm 28-29/9/2026
+==========================================================================================
+Objetivo de esta sección: que gonzabot pueda explicarle a un usuario por qué su job tardó
+varios minutos en arrancar SIN que eso sea un error o un cuelgue — es power-save nativo de
+Slurm funcionando como corresponde. Documentación completa (12 páginas, incluye sección de
+portabilidad a un cluster sin Qlustar) en /mnt/gpu-data/softadm/green_computing_cluster.pdf,
+para el admin humano — no hace falta citarla al usuario.
+
+QUÉ SE ARMÓ (3 piezas, verificado en vivo contra slurm.conf real el 29/9)
+---------------------------------------------------------------------------
+1. AllowQos simétrico: la partición `gpu` tenía AllowQos=ALL (asimetría real vs. cpu/
+   scavenger/gpu-scavenger). Corregido a AllowQos=normal,express,admin vía qluman-qt.
+
+2. Weight rotativo (consolidación): quad-11/12/33/34 tienen Weight 1/2/3/4, gpu-01/gpu-02
+   Weight 1/2 — así Slurm llena primero los bloques de menor Weight y deja el resto
+   genuinamente libre para apagar. Rota TODOS LOS DÍAS a las 3am (para no desgastar siempre
+   el mismo hardware) con `scontrol update NodeName=... Weight=N` en caliente, sin tocar
+   slurm.conf. Script: /root/node-weight-rotation/rotate-weights.py (softadm).
+
+3. Power-save nativo de Slurm: SuspendTime=1800 (apaga tras 30 min idle), enciende/apaga
+   vía qluman-cli --power on/off (Redfish). SuspendExcNodes=gpu-01,beosrv-c,login-c —
+   gpu-01 NUNCA se apaga (corre el servicio de inference de gonzabot).
+
+GOTCHA TÉCNICO (para el admin, no para el usuario común)
+-----------------------------------------------------------
+SuspendProgram/ResumeProgram los ejecuta SlurmUser (usuario de servicio "slurm", no root).
+Wrappers: /usr/local/sbin/{resume,suspend}.sh -> sudo -n /root/{resume,suspend}.sh. Si se
+tocan estos scripts sin mantener ese wrapper de sudo, fallan EN SILENCIO, sin error visible
+— un nodo que debería despertar simplemente nunca lo hace y el job queda pendiente sin pista.
+
+DATO CLAVE PARA ACONSEJAR (verificado en el man de slurm.conf)
+-------------------------------------------------------------------
+Slurm SIEMPRE prefiere un nodo YA PRENDIDO sobre despertar uno de menor Weight que está
+apagado ("POWERED_DOWN and POWERING_UP nodes with lower weights will not be evaluated
+before a powered up IDLE node"). El ahorro de energía NUNCA demora un job que puede
+compartir un nodo ya encendido — solo entra en juego cuando ningún nodo prendido alcanza.
+
+TIEMPOS REALES MEDIDOS (28-29/9/2026, citar estos números si preguntan cuánto tarda)
+-----------------------------------------------------------------------------------------
+- Job normal (sin --exclusive) a un nodo ya prendido: ~1 segundo.
+- Job normal a un nodo recién despertado (probado 2 veces): ~3.5 a 4.2 minutos.
+- Job con --exclusive (necesita nodo 100% libre): si en el momento todos los nodos
+  parcialmente usados tienen algo de CPUAlloc, cae forzosamente en uno apagado — medido
+  ~4 minutos hasta arrancar, recibe el nodo completo (256 cores, 377GB RAM libres en la
+  prueba).
+- Un job random SIN pedir nada especial también PUEDE caer en un nodo apagado si es el
+  único que le sirve para lo que pide — no es automático que siempre evite despertar
+  nodos, depende de qué resto de recursos ya estén ocupados en ese momento.
+
+QUÉ DECIRLE A UN USUARIO QUE PREGUNTA "¿POR QUÉ TARDA TANTO MI JOB EN ARRANCAR?"
+-------------------------------------------------------------------------------------
+Si pidió --exclusive o recursos grandes y no hay nodos parcialmente libres que alcancen,
+una demora de ~3-4 minutos mientras Slurm despierta un nodo apagado es ESPERABLE — no es
+un cuelgue ni un error del cluster, es el power-save funcionando. Si la demora es mucho
+mayor (>10 min) o el job queda en PENDING con Reason=... distinto de Resources/Priority,
+ahí sí vale la pena mirar con /diagnose o avisar al admin (podría ser el gotcha del wrapper
+de sudo roto, arriba).

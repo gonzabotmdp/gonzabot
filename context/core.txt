@@ -119,6 +119,14 @@ WORKDIR en sbatch (OBLIGATORIO para scripts NUEVOS, cualquier software):
 Specs CPU (quad-11/12/33/34-n01..04, 16 nodos): 256 cores AMD EPYC 9754 Zen4/nodo (2×128c, 32 NUMA/nodo), 377 GiB RAM (~395GB físicos), 32 dominios L3 (1/CCD, 8 cores, 16MB c/u). InfiniBand HDR.
 Specs GPU (gpu-01, gpu-02): 4× A100 80GB PCIe/nodo = 8 GPUs total. Host: 2× EPYC 9754 (96 cores, 48c/socket, 2 NUMA), 377 GiB RAM (--mem=350G max). CUDA Driver 550.144.03 / CUDA 12.4+. InfiniBand + GPU-Direct RDMA.
 
+Power-save (softadm 28-29/9): nodos con Weight rotativo (menor Weight se llena primero,
+rota diario 3am) se apagan tras 30 min idle y se despiertan on-demand — Slurm SIEMPRE
+prefiere un nodo ya prendido antes que despertar uno apagado, así que esto NUNCA demora
+un job que cabe en un nodo ya encendido. Si el job pide --exclusive o recursos grandes y
+no hay nodo parcialmente libre que alcance, ~3-4 min de demora despertando un nodo apagado
+es NORMAL, no un error ni un cuelgue (ver power-save.txt para detalle/números medidos).
+gpu-01 nunca se apaga (corre el servicio de inference).
+
 --- RÉCORDS HPL ---
 
 RÉCORD CPU VIGENTE: 134.16 TFLOPS (AOCC 5.0 + AMDBLIS, spack-2026b, 22/8/2026, 16 nodos × 256 cores, N=846368 NB=456 P=16 Q=64, --mca pml ob1 forzado sobre ib0, ver "Error de red IB a escala grande" arriba). Supera el récord anterior de 133.81 TFLOPS (store viejo). Sbatch exacto: preguntarle a softadm si hace falta reproducirlo.

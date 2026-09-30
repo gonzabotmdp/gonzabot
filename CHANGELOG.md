@@ -4,6 +4,20 @@ All notable changes to gonzabot are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/). Dates are when the change went
 into production on the IFIMAR cluster.
 
+## [Unreleased]
+
+## [1.3.3] - 2026-09-30
+
+### Added
+- New `power-save` context segment, from softadm's cluster-wide green computing work
+  (28-29/9): symmetric `AllowQos` across GPU partitions, daily-rotating node `Weight`
+  for consolidation, and native Slurm power-save (`SuspendTime=1800`, nodes woken
+  on-demand). gonzabot can now explain a real, measured startup delay (~3.5-4.2 min
+  waking a powered-down node vs. ~1s on an already-on one) instead of a user assuming
+  their job hung. A short pointer also went into `core.txt` (always loaded) since "why
+  is my job slow" is common enough phrasing that the segment's own trigger keywords
+  might not always catch it.
+
 ## [1.3.2] - 2026-09-29
 
 ### Fixed

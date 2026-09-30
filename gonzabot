@@ -1168,6 +1168,14 @@ _RE_SCITOOLS = re.compile(
     r'\blatex|pdflatex|texlive|\.tex\b',
     re.IGNORECASE
 )
+# power-save.txt: consolidación de nodos + power-save nativo de Slurm (armado por
+# softadm 28-29/9) -- explica demoras reales de arranque de job que no son un bug.
+_RE_POWERSAVE = re.compile(
+    r'power[- ]?sav|suspendtime|suspendprogram|resumeprogram|green\s*computing|'
+    r'consolidaci[oó]n\s+de\s+nodos?|weight\s+rotativ|nodo[s]?\s+(?:est[aá]\s+)?apagad|'
+    r"despert(?:ar|[oó])\s+(?:un|el)\s+nodo|powered_down|por\s+qu[eé]\s+(?:tarda|demora)",
+    re.IGNORECASE
+)
 # spack.txt: mecánica de activación/desambiguación de spack, relevante para
 # cualquier pedido de software compilado (no-Python) — unión de los triggers
 # de arriba más extras sin sección propia (cp2k/openfoam/vasp/namd/plumed/
@@ -1198,6 +1206,7 @@ _SEGMENTS: list[tuple[str, "re.Pattern[str] | None"]] = [
     ("bioacustica", _RE_BIOACUSTICA),
     ("python", _RE_PYTHON),
     ("sci-tools", _RE_SCITOOLS),
+    ("power-save", _RE_POWERSAVE),
 ]
 
 
