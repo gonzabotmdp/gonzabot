@@ -52,3 +52,15 @@ can paste in.
   discuss).
 - New runtime dependencies. gonzabot is stdlib-only Python on purpose (nothing to
   install on a cluster login node you don't control).
+
+## Adapted it to your own cluster? Share it.
+
+If you got gonzabot running somewhere else — different scheduler config, different
+Spack layout, a non-NVIDIA GPU stack (Intel oneAPI/SYCL, AMD ROCm, whatever), a
+different inference backend — a PR adding your own example under
+`tutorial/adaptations/<your-site-name>/` is welcome. This is kept separate from
+`tutorial/*.sbatch` on purpose: those are IFIMAR's real, currently-running scripts
+and stay authentic to what's actually deployed here. Your adaptation is a second,
+independent data point for whoever reads the tutorial next — the strongest argument
+that this is portable isn't the README saying so, it's this directory having more
+than one site in it.
