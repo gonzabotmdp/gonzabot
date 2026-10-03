@@ -45,7 +45,7 @@ REGLA nimage (ph.x, FONONES — mismo principio que npool de pw.x arriba, ver ta
 
 QE nodo completo: --ntasks-per-node=32 --cpus-per-task=8 (256 cores); --mem=0 o --mem=100G mínimo.
 QE Checkpoint: CHECKPOINT=${OUTDIR}/${PREFIX}.save/charge-density.dat; if [[ -f $CHECKPOINT ]]; then RESTART_MODE="restart"; else RESTART_MODE="from_scratch"; fi
-QE Pseudopotenciales: /mnt/cpu-data/usuario1/qe-7.5/pseudo/ (Si.pz-vbc.UPF, etc.)
+QE Pseudopotenciales: /mnt/cpu-data/ales/qe-7.5/pseudo/ (Si.pz-vbc.UPF, etc.)
 QE scavenger: PreemptMode=GANG+SUSPEND → SIGSTOP (proceso congelado, tiempo Slurm se congela). Checkpoint NO necesario para preemption, solo para fallo de nodo.
 
 --- ABINIT / ELK / SIESTA / WANNIER90 ---

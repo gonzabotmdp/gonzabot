@@ -1,0 +1,55 @@
+# MANTENIMIENTO: herramientas de bioinformática de genética de poblaciones/
+# filogenética/paisaje (distinto del pipeline de ENSAMBLADO de genomica.txt:
+# trimmomatic/spades/quast/busco/masurca). Instaladas por softadm 1/10,
+# verificadas de punta a punta (no solo "spack find") contra spack-2026b
+# real por CLAUDE-GONZALO el mismo día. Reglas transversales en core.txt.
+# Editar SIEMPRE bioinformatica-dev.txt → testear → \cp a shared/.../bioinformatica.txt
+
+--- BIOINFORMÁTICA (genética de poblaciones/filogenética/paisaje, instalado 1/10) ---
+
+Todas via `spack load <paquete>` (spack-2026b).
+
+bwa@0.7.19: spack load --sh bwa (bare, resuelve solo). Alineador de reads cortos:
+  bwa index ref.fa && bwa mem ref.fa reads.fq > out.sam
+samtools@1.23.1: spack load --sh samtools (bare, resuelve solo). Manejo de SAM/BAM/CRAM:
+  samtools sort/index/view/flagstat ...
+vcftools@0.1.17: spack load --sh vcftools (bare, resuelve solo). Análisis de VCF:
+  vcftools --vcf in.vcf --out stats [--freq|--het|--relatedness2|...]
+stacks@2.53: spack load --sh stacks (bare, resuelve solo). Pipeline RAD-seq completo
+  (demultiplexado, genotipado poblacional): process_radtags, ustacks, sstacks, cstacks,
+  populations -- en ese orden típico.
+iq-tree@2.4.0: spack load --sh iq-tree (bare, resuelve solo). Inferencia filogenética.
+  OJO: el ejecutable real es "iqtree2" -- NI "iqtree" NI "iq-tree" existen como comando,
+  verificado 1/10 (which iqtree2 resuelve, los otros dos no). Uso:
+  iqtree2 -s alineamiento.fa -m MFP -bb 1000
+admixture@1.4.0: spack load --sh admixture (bare, resuelve solo, sin compiladores --
+  es un binario oficial, no compila desde fuente). Estimación de ancestría:
+  admixture archivo.bed K   (K = número de poblaciones asumidas)
+plink@1.9.0-20260927: spack load --sh plink (bare, resuelve solo, sin compiladores --
+  binario estático oficial, NO el builtin de Spack: ese tiene un bug real, le falta
+  depends_on cblas). PLINK 1.9 clásico:
+  plink --bfile datos --assoc
+plink-ng@2.0.0b1-20261001: spack load --sh plink-ng (bare, resuelve solo, sin
+  compiladores -- binario estático oficial, build AMD AVX2 a propósito, coincide con
+  los EPYC Zen4 del cluster; NO el builtin de Spack: esa receta descarga de una URL que
+  ya da 404). PLINK 2.0, ejecutable "plink2" (NO "plink-ng"):
+  plink2 --bfile datos --pca
+r-resistancega2: spack load --sh r-resistancega2 (bare, resuelve solo, sin
+  compiladores). Paquete de R (de GitHub wpeterman/ResistanceGA2, sin releases,
+  pineado a un commit). OJO: el nombre a cargar en R es "ResistanceGA2" (con el 2),
+  NO "ResistanceGA" -- verificado 1/10, library(ResistanceGA2) carga bien (depende de
+  terra, que se activa solo). Optimiza superficies de resistencia con algoritmos
+  genéticos para genética de paisaje. Funciones clave: GA.prep(), gdist.prep(),
+  Combine_Surfaces().
+
+Notas técnicas (por qué plink/plink-ng/r-resistancega2 NO son el builtin de Spack):
+  plink/plink-ng: bugs reales del recipe builtin (dependencia cblas faltante / URL de
+  origen rota) -- se optó por binario estático oficial en vez de parchear el build
+  desde fuente, mismo patrón ya usado antes para casos así.
+  r-ga (dependencia de resistancega2): bug real de Spack con paquetes R que compilan
+  C++ vía Rcpp (el wrapper de compilador de Spack pierde una variable de entorno en el
+  sub-make interno de R, reproducible siempre, no es race condition). Fix: receta local
+  fuerza el compilador real (gcc14) vía R_MAKEVARS_USER, sin salir de Spack.
+  r-spdep (otra dependencia): el builtin tiene una versión vieja (0.6-13) con un bug de
+  compilación real; se pineó a una versión moderna (1.3-5) en la receta de
+  resistancega2.

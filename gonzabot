@@ -63,6 +63,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
+from urllib.parse import urlparse
 from http.client import HTTPResponse
 
 # ── Rich TUI (opcional — fallback si no está instalado) ───────────────────────
@@ -82,16 +83,33 @@ except ImportError:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 VLLM_BASE    = os.environ.get("GONZABOT_URL",     "http://gpu-01:8000/v1")
+# Bug real (1/10, reportado por Gonzalo: "si pones la s es imposible que vaya
+# por 8001, algo no va"): antes esto comparaba el string COMPLETO contra
+# "http://gpu-01:8000/v1" -- pero el fix de hoy (inference en cualquier
+# chasis, gpu-01 O gpu-02) significa que el servicio real de PROD puede
+# levantar perfectamente en gpu-02:8000, y ahí la comparación por string
+# clasificaba mal esa sesión como "dev" solo porque el HOST no coincidía,
+# aunque el PUERTO (lo que realmente distingue prod de dev) era el mismo.
+# El mensaje de recuperación entonces sugería el sbatch de 8001, que no
+# tiene nada que ver con el puerto 8000 que la sesión tenía configurado.
+# Fix: comparar por PUERTO (8000=prod, cualquier otro=dev), no por host.
+_DEV_MODE    = urlparse(VLLM_BASE).port != 8000
 MODEL        = os.environ.get("GONZABOT_MODEL",   "glm45-air")
 _SCRIPT_DIR  = Path(__file__).resolve().parent
 CONTEXT_FILE = os.environ.get("GONZABOT_CONTEXT", str(_SCRIPT_DIR / "context" / "core.txt"))
 CONTEXT_DIR  = Path(os.environ.get("GONZABOT_CONTEXT_DIR", str(_SCRIPT_DIR / "context")))
 SERVICE_SBATCH  = Path("/mnt/gpu-data/shared/ifimar-ai/vllm-service.sbatch")
 START_REQUEST   = Path("/mnt/gpu-data/shared/ifimar-ai/run/.gonzabot-start-request")
-HEARTBEAT       = Path("/mnt/gpu-data/shared/ifimar-ai/run/.gonzabot-heartbeat")
+HEARTBEAT       = (Path("/mnt/gpu-data/gonzalo/ifimar-ai/run/.vllm-dev-heartbeat")
+                   if _DEV_MODE
+                   else Path("/mnt/gpu-data/shared/ifimar-ai/run/.gonzabot-heartbeat"))
 STATS_LOG       = Path("/mnt/gpu-data/shared/ifimar-ai/stats/usage.log")
 DB_DIR       = Path.home() / ".gonzabot"
 DB_PATH      = DB_DIR / "history.db"
+WORKFLOW_DB_PATH = DB_DIR / "workflows.db"  # mismo patron/NFS que history.db,
+# probado en vivo 1/10 (30/30 escrituras OK en este mismo mount) -- sin la
+# complejidad de disco local+bundle que usa el prototipo aislado, porque acá
+# SQLite (modo rollback-journal, no WAL) sí tolera NFS, a diferencia de git.
 _USERNAME    = os.environ.get("USER", "unknown")
 MAX_CTX_MSGS = 30    # messages kept in active context window (~15 turns)
 STREAM_CHUNK  = 512  # bytes per read from SSE stream
@@ -285,8 +303,38 @@ _AUTO_RUN_CMDS = {
 _SLASH_CMDS = {
     "/load", "/save", "/saveall", "/copy", "/diff", "/edit", "/diagnose",
     "/audit", "/queue", "/branch", "/history", "/clear", "/paste", "/model",
-    "/raw", "/compact", "/help", "/run",
+    "/raw", "/compact", "/help", "/run", "/workflow", "/segments",
 }
+
+
+# Bug real encontrado en vivo (1/10, prueba end-to-end pedida por Gonzalo:
+# "corré una multiplicación de matrices... y cuando termine armame un latex"):
+# el modelo generó DOS bloques -- el sbatch real (#SBATCH --partition=cpu
+# incluido) y un segundo bloque "echo '...todo el script otra vez...'"
+# (una demostración trunca de "cómo lo voy a enviar", no un script en sí).
+# El trigger de /workflow buscaba hacia atrás el primer bloque que
+# CONTUVIERA la substring "#SBATCH" -- el bloque "echo" también la contiene
+# (adentro del string citado), así que se eligió ESE en vez del real, y
+# sbatch falló con "No partition specified" porque la primera línea real
+# del archivo era "echo '#!/bin/bash" (no un shebang real), así que Slurm
+# dejó de buscar directivas #SBATCH ahí mismo.
+def _is_shell_block(lang: str) -> bool:
+    """Bug real #6 (1/10): el auto-exec de bloques de solo lectura corría
+    bloques de CUALQUIER lenguaje (python, tex, etc.) como si fueran shell,
+    porque nunca chequeaba el lenguaje declarado del bloque ```. "" cuenta
+    como shell porque es el fallback cuando no hay lenguaje declarado (ver
+    el parser de bloques, más abajo, que usa "" en ese caso)."""
+    return lang.lower() in ("bash", "sh", "shell", "")
+
+
+def _looks_like_real_sbatch(code: str) -> bool:
+    """Un script sbatch real empieza con un shebang (#!/...) como su propia
+    línea, no con "echo" ni cualquier otra cosa que solo MENCIONE #SBATCH."""
+    lines = [ln for ln in code.strip().splitlines() if ln.strip()]
+    if not lines:
+        return False
+    return lines[0].strip().startswith("#!") and any(
+        ln.strip().startswith("#SBATCH") for ln in lines)
 
 
 def _submit_sbatch_text(sb_text: str) -> "tuple[bool, str]":
@@ -309,6 +357,293 @@ def _submit_sbatch_text(sb_text: str) -> "tuple[bool, str]":
             Path(tmp.name).unlink(missing_ok=True)
         except Exception:
             pass
+
+
+# ── Workflows persistentes ("gonzabot v2", 1/10) ──────────────────────────────
+# Pedido explícito de Gonzalo: que gonzabot reconozca en lenguaje natural
+# (sin comando especial) cuando un pedido implica varios pasos dependientes
+# de un resultado futuro, y lo pueda tratar como un workflow que sobrevive a
+# cerrar la sesión -- ver PDF de propuesta de agente autónomo + las mejoras
+# de seguridad charladas en vivo (tope de reintentos en código, gate de
+# opciones nombradas ante ambigüedad, nunca confiar en un registro viejo sin
+# reconciliar contra el estado real de Slurm).
+
+_RE_WORKFLOW_INTENT = re.compile(
+    r'cuando\s+termin[ae]|despu[eé]s\s+que\s+termine|repet[ií]\s+(?:hasta|las\s+que)|'
+    r'reintent[aá]\s+si\s+falla|workflow\s+persistente|flujo\s+de\s+trabajo|'
+    r'que\s+sobreviva\s+si\s+cierro|encaden[aá]',
+    re.IGNORECASE)
+
+
+def _wf_db_connect() -> sqlite3.Connection:
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(WORKFLOW_DB_PATH, timeout=10)
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS workflow (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            goal TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS workflow_steps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            slurm_job_id TEXT,
+            result TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS workflow_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workflow_id INTEGER NOT NULL,
+            event TEXT NOT NULL,
+            payload TEXT,
+            ts TEXT NOT NULL
+        );
+    """)
+    return con
+
+
+def _wf_create(goal: str) -> int:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    con = _wf_db_connect()
+    cur = con.execute(
+        "INSERT INTO workflow (goal, status, created_at, updated_at) "
+        "VALUES (?, 'RUNNING', ?, ?)", (goal, now, now))
+    wf_id = cur.lastrowid
+    con.commit()
+    con.close()
+    return wf_id
+
+
+def _wf_add_step(workflow_id: int, name: str, slurm_job_id: str) -> int:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    con = _wf_db_connect()
+    cur = con.execute(
+        "INSERT INTO workflow_steps (workflow_id, name, status, slurm_job_id, "
+        "updated_at) VALUES (?, ?, 'RUNNING', ?, ?)",
+        (workflow_id, name, slurm_job_id, now))
+    con.execute(
+        "INSERT INTO workflow_events (workflow_id, event, payload, ts) "
+        "VALUES (?, 'step_submitted', ?, ?)",
+        (workflow_id, json.dumps({"step": name, "job_id": slurm_job_id}), now))
+    con.commit()
+    con.close()
+    return cur.lastrowid
+
+
+def _wf_list() -> list:
+    con = _wf_db_connect()
+    rows = con.execute(
+        "SELECT id, goal, status, created_at FROM workflow ORDER BY id").fetchall()
+    con.close()
+    return rows
+
+
+def _wf_step_status(workflow_id: int) -> list:
+    con = _wf_db_connect()
+    rows = con.execute(
+        "SELECT id, name, status, slurm_job_id, result FROM workflow_steps "
+        "WHERE workflow_id=? ORDER BY id", (workflow_id,)).fetchall()
+    con.close()
+    return rows
+
+
+def _wf_reconcile(workflow_id: int) -> list:
+    """Regla explícita (y probada en vivo con un reinicio real de proceso en
+    el prototipo aislado): nunca asumir que un job sigue vivo solo porque la
+    base de datos dice RUNNING -- siempre chequear squeue real primero. Si
+    ya no está en cola, el éxito/fallo se infiere leyendo el output real
+    (sacct no es confiable desde ql-front, ya documentado en otras partes
+    de este archivo). Devuelve la lista de steps que cambiaron de estado."""
+    con = _wf_db_connect()
+    running = con.execute(
+        "SELECT id, name, slurm_job_id FROM workflow_steps "
+        "WHERE workflow_id=? AND status='RUNNING'", (workflow_id,)).fetchall()
+    cambios = []
+    for step_id, name, job_id in running:
+        if not job_id:
+            continue
+        r = subprocess.run(["squeue", "-j", job_id, "-h", "-o", "%T"],
+                            capture_output=True, text=True)
+        if r.stdout.strip():
+            continue  # sigue realmente en cola, no tocar
+        out_files = list(Path("/data/home", _USERNAME).glob(f"*{job_id}.out"))
+        if not out_files:
+            out_files = list(Path.cwd().glob(f"*{job_id}.out"))
+        out_text = out_files[0].read_text() if out_files else ""
+        err_files = list(Path("/data/home", _USERNAME).glob(f"*{job_id}.err"))
+        err_text = err_files[0].read_text() if err_files else ""
+        # bug real encontrado en vivo (1/10): Slurm mismo escribe
+        # "error: couldn't chdir to '...': No such file or directory: going
+        # to /tmp instead" cuando el WorkDir inicial no es visible desde la
+        # partición (mounts cpu/gpu separados, ya documentado en otras
+        # partes de este archivo) -- es un mensaje BENIGNO de Slurm, no una
+        # falla real, pero contiene la palabra "error" y un job exitoso
+        # (output real "Hola Mundo") se marcaba FAILED por un falso
+        # positivo de substring. Se descarta esa línea específica antes de
+        # aplicar el heurístico.
+        _err_sin_chdir_benigno = re.sub(
+            r"^.*error: couldn't chdir to .*going to /tmp instead\s*$", "",
+            err_text, flags=re.M)
+        inferred = "FAILED" if ("Traceback" in _err_sin_chdir_benigno
+                                 or "error" in _err_sin_chdir_benigno.lower()
+                                 or not out_text.strip()) else "COMPLETED"
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        con.execute(
+            "UPDATE workflow_steps SET status=?, result=?, updated_at=? WHERE id=?",
+            (inferred, out_text.strip()[:300], now, step_id))
+        con.execute(
+            "INSERT INTO workflow_events (workflow_id, event, payload, ts) "
+            "VALUES (?, 'reconciled', ?, ?)",
+            (workflow_id, json.dumps({"step": name, "job_id": job_id,
+                                       "was": "RUNNING", "now": inferred}), now))
+        cambios.append((name, job_id, inferred))
+    con.commit()
+    con.close()
+    return cambios
+
+
+# Bug real encontrado en vivo (1/10, reportado por Gonzalo: "me decis que lo
+# haces pero no lo haces"): ante una consulta normal, gonzabot solo SUGIERE
+# comandos como texto -- nunca los corre. Un usuario insistio y el modelo
+# respondio "tiene razon, los voy a ejecutar ahora" pero genero MAS texto sin
+# ejecutar nada, porque no habia ningun mecanismo real atras de esa frase.
+#
+# Primer intento (mismo dia): resolver esto con una ALLOWLIST -- una lista
+# fija de comandos de lectura permitidos (squeue/sinfo/scontrol show/sacct).
+# Segundo bug real, encontrado por Gonzalo mismo probandolo ("que hora es"):
+# la lista solo pensaba en Slurm, "date" quedaba afuera. Agregarlo a mano
+# "arreglo" ese caso puntual pero deja ver el problema de fondo: una
+# allowlist a mano siempre va a ir un paso atras de lo que un usuario
+# prueba. Gonzalo lo dijo explicito: "tiene que ser como vos (Claude Code),
+# usa tus buenas practicas" -- confirmado 1/10 tras mostrarle el cambio.
+# Yo no funciono con una lista de comandos permitidos -- corro casi
+# cualquier cosa de inspeccion/lectura libremente, y lo que hace que pause
+# a confirmar es especificamente que el comando CAMBIE estado (algo
+# destructivo, dificil de revertir, o que afecta algo compartido). Ver la
+# seccion "Executing actions with care" de mis propias instrucciones --
+# ese es el criterio que hay que copiar aca.
+#
+# Por eso esto pasa a ser una DENYLIST en vez de una allowlist: corre TODO
+# comando salvo que (a) tenga algun metacaracter de shell que permita
+# encadenar, redirigir o sustituir (; && || | > >> backticks $(...)) -- ahi
+# no hay forma simple de analizar que hace realmente, asi que no se arriesga
+# -- o (b) el primer comando de la linea sea uno reconocido como mutacion de
+# estado: Slurm (scancel/sbatch/srun/salloc/scontrol algo que no sea "show"/
+# sacctmgr), filesystem (rm/mv/cp/dd/chmod/chown/mkdir/touch/tee/...),
+# procesos (kill/pkill/systemctl/...), paquetes (pip/conda/spack install o
+# load/apt/...), red (curl/wget/ssh/scp/rsync/...), git con subcomando que
+# mute (todo salvo status/log/diff/show), o un interprete que podria hacer
+# cualquier cosa (python/bash/sh/eval/exec/source). Todo lo demas (ls, cat,
+# grep, find, head, tail, df, du, ps, nvidia-smi, which, stat, env, squeue,
+# sinfo, sacct, scontrol show, date, whoami, hostname, pwd, uptime, free,
+# etc. -- SIN necesidad de nombrarlos uno por uno) corre solo.
+# Bug real #3 encontrado en vivo en esta misma prueba (1/10): "cuantos
+# procesos mios hay corriendo" sugirio "ps -u gonzalo | wc -l" -- bloquear
+# TODO pipe de entrada (como hacia la primera version de esta denylist) es
+# demasiado agresivo, "algo | algo" es un patron de lectura legitimo y muy
+# comun (squeue | grep, ps | wc -l, cat log | tail). El resultado real: no
+# se auto-ejecuto nada y el modelo alucino "15 procesos" sin correr nada.
+# Fix: el pipe "|" ya NO cuenta como metacaracter prohibido -- en cambio,
+# la linea se separa por "|" y CADA segmento se valida por separado contra
+# la lista de comandos peligrosos (asi "squeue | grep gonzalo" corre pero
+# "squeue | xargs scancel" no, porque "xargs" matchea como peligroso).
+_RE_SHELL_CHAIN_OR_REDIRECT = re.compile(r'[;&><`]|\$\(')
+
+_RE_DANGEROUS_CMD = re.compile(
+    r'^\s*('
+    r'rm|mv|cp|dd|mkfs\S*|shred|truncate|chmod|chown|chgrp|ln|mkdir|rmdir|'
+    r'touch|tee|split|xargs|sed\s+-i|'
+    r'kill|pkill|killall|reboot|shutdown|halt|systemctl|service|'
+    r'scancel|sbatch|srun|salloc|sacctmgr|strigger|'
+    r'scontrol\s+(?!show\b)|'
+    r'pip\S*|conda|spack\s+(install|uninstall|load|env)|apt\S*|dpkg|yum|snap|'
+    r'git\s+(?!status\b|log\b|diff\b|show\b)|'
+    r'curl|wget|nc|ncat|ssh|scp|rsync|ftp|'
+    r'python\S*|perl|ruby|bash|sh|eval|exec|source'
+    r')\b', re.IGNORECASE)
+
+
+def _is_readonly_query(code: str) -> bool:
+    """Nombre historico (ver comentario arriba) -- hoy es en realidad
+    'es seguro auto-ejecutar sin pedir confirmacion', decidido por
+    denylist, no por una lista de comandos permitidos."""
+    lines = [ln.strip() for ln in code.strip().splitlines() if ln.strip()]
+    if not lines:
+        return False
+    for ln in lines:
+        if ln.startswith("#"):
+            continue
+        if _RE_SHELL_CHAIN_OR_REDIRECT.search(ln):
+            return False
+        for segment in ln.split("|"):
+            if _RE_DANGEROUS_CMD.match(segment.strip()):
+                return False
+    return True
+
+
+def _run_readonly_query(code: str) -> str:
+    """Corre una consulta YA confirmada de solo lectura, línea por línea, y
+    devuelve el output real combinado. Nunca se usa con nada que no haya
+    pasado _is_readonly_query primero."""
+    out_parts = []
+    for ln in code.strip().splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        r = subprocess.run(ln, shell=True, capture_output=True, text=True,
+                            timeout=15)
+        out_parts.append((r.stdout + r.stderr).strip())
+    return "\n".join(p for p in out_parts if p) or "(sin output)"
+
+
+# Bug real #4 encontrado en vivo (1/10, misma prueba que el #3 de pipes):
+# "cuántos procesos míos hay corriendo" dio dos veces seguidas una respuesta
+# donde el modelo escribe el comando como TEXTO SUELTO ("ps aux | grep
+# gonzalo | wc -l"), sin envolverlo en un bloque ```bash -- _LAST_CODE_BLOCKS
+# nunca lo captura porque ese parser solo mira bloques con fence, así que el
+# hook de auto-ejecución de abajo nunca lo ve, y el comando queda ahí
+# impreso sin correr. No depende de qué tan "seguro" sea el comando -- es
+# un problema de DETECCIÓN, separado del de la denylist.
+#
+# Fix: además de mirar _LAST_CODE_BLOCKS, se escanea el texto crudo de la
+# respuesta línea por línea (saltando lo que ya esté dentro de un fence
+# ```, para no procesar dos veces lo mismo). Una línea cuenta como "comando
+# suelto" solo si (a) empieza con el nombre de un binario real conocido de
+# este sistema (lista explícita y chica -- evita falsos positivos con
+# prosa en español, que prácticamente nunca empieza una oración con "ps"
+# o "squeue" en minúscula como primera palabra) Y (b) pasa igual
+# _is_readonly_query. Las dos condiciones juntas, no alcanza con una sola.
+_KNOWN_SAFE_BINARIES = (
+    "squeue", "sinfo", "sacct", "scontrol", "date", "whoami", "hostname",
+    "pwd", "uptime", "free", "ls", "cat", "grep", "find", "head", "tail",
+    "df", "du", "ps", "pgrep", "nvidia-smi", "which", "stat", "env", "git",
+    "wc", "awk", "sed", "cut", "sort", "uniq", "nproc", "lscpu", "lsblk",
+    "id", "groups", "module", "spack", "echo", "printf", "top", "w",
+)
+_RE_BARE_COMMAND_LINE = re.compile(
+    r'^(' + '|'.join(re.escape(b) for b in _KNOWN_SAFE_BINARIES) + r')\b')
+
+
+def _extract_bare_commands(reply_text: str) -> list:
+    """Busca, en el texto crudo de la respuesta, líneas de comando que el
+    modelo escribió SUELTAS (fuera de cualquier bloque ```), y que además
+    son de solo lectura. Ver comentario arriba -- bug real #4."""
+    out = []
+    in_fence = False
+    for raw_line in reply_text.splitlines():
+        ln = raw_line.strip()
+        if ln.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or not ln:
+            continue
+        if _RE_BARE_COMMAND_LINE.match(ln) and _is_readonly_query(ln):
+            out.append(ln)
+    return out
 
 
 def _tab_complete(line_so_far: str) -> "str | None":
@@ -1017,6 +1352,20 @@ def _run_dynamic_context() -> str:
     # Cluster node status (compact)
     _run(["sinfo", "-o", "%P %a %D %t", "--noheader"], label="sinfo (particion/nodos/estado)", maxchars=400)
 
+    # REVERTIDO el mismo día (1/10): se probó sacar este snapshot a pedido de
+    # Gonzalo ("prefiero que muestre todo en tiempo real"), confiando en que
+    # las consultas de solo lectura ahora se ejecutan de verdad
+    # (_is_readonly_query/_run_readonly_query). Resultado real, encontrado
+    # en vivo: sin el snapshot, ante "¿tengo jobs corriendo?" el modelo NO
+    # ejecutó nada -- inventó 3 jobs falsos (IDs, nombres y tiempos de la
+    # nada) envueltos en un `<tool_call>` de texto plano que PARECE una
+    # ejecución real pero no lo es (no es un bloque ```bash real, mi
+    # detector de solo-lectura no lo agarra). El snapshot al arrancar sigue
+    # siendo necesario como ancla de hechos reales -- la ejecución en vivo
+    # (abajo) complementa para detalle que el snapshot no tiene, no lo
+    # reemplaza. Pendiente real: detectar y bloquear el patrón
+    # `<tool_call>...` como ejecución falsificada, no resuelto todavía.
+
     # Spack: paquetes instalados explícitamente con versión y hash corto
     # -x = solo explícitos (no deps automáticas), ~90 paquetes vs 1400 del árbol completo
     _run(["spack", "find", "-x", "--format", "{name}@{version}/{hash:8}"], timeout=12,
@@ -1143,6 +1492,10 @@ _RE_PARTICLE = re.compile(r'geant4?|cern|potfit', re.IGNORECASE)
 _RE_GPUCUSTOM = re.compile(r'cuda|julia|nvhpc|nccl|nvcc', re.IGNORECASE)
 _RE_GENOMICA = re.compile(
     r'trimmomatic|spades|quast|busco|gen[oó]mic|ensambl.*genoma', re.IGNORECASE)
+_RE_BIOINFORMATICA = re.compile(
+    r'\bbwa\b|samtools|vcftools|\bstacks\b|iq-?tree|iqtree2?|admixture|'
+    r'\bplink2?\b|plink-ng|resistancega2?|rad-?seq|poblacional|filogen[eé]tic|'
+    r'genetica.*paisaje|landscape.*genetic', re.IGNORECASE)
 _RE_CASA = re.compile(
     r'\bcasa\b|casaviewer|casalith|mpicasa|\btclean\b|\bflagdata\b', re.IGNORECASE)
 _RE_OTROSLANG = re.compile(r'fortran|\boctave\b', re.IGNORECASE)
@@ -1152,7 +1505,21 @@ _RE_BIOACUSTICA = re.compile(
 _RE_PYTHON = re.compile(
     r'python|numpy|scipy|matplotlib|pandas|sklearn|torch|jax\b|cupy|numba|mpi4py|'
     r'jupyter|geopandas|spglib|statsmodels|dask|xarray|pymatgen|phonopy|'
-    r'py-|\.py\b|tensorflow|deepmd',
+    r'py-|\.py\b|tensorflow|deepmd|'
+    # bug real 3/10: "calculá la integral... numericamente" no decía "python" en
+    # ningún lado -- el segmento no cargaba, el modelo alucinó un env file propio
+    # (python_base.env) en vez de usar numpy.env, documentado acá mismo. Señales de
+    # que el script va a necesitar numpy/scipy aunque no se nombre el lenguaje.
+    r'num[eé]ricamente|integral\s+num[eé]ric|m[eé]todo\s+de\s+(?:trapec|simpson|'
+    r'runge[- ]?kutta|montecarlo|monte\s+carlo)|ecuaci[oó]n\s+diferencial|'
+    # bug real 3/10 (2do caso): "2 matrices aleatorias de 10x10" tampoco
+    # nombraba python/numpy -- mismo patron que la integral, se agregan
+    # senales de algebra lineal que tambien implican numpy. NO se agrega
+    # "array" suelto: colisiona con job arrays de Slurm (#SBATCH --array,
+    # documentado en core.txt) y cargaria python.txt de mas en pedidos sin
+    # nada que ver -- mismo riesgo de dilucion de contexto que causo el
+    # reasoning leak que forzo separar python.txt/sci-tools.txt (28/9).
+    r'matri[cz]|\bmatrix\b|\bvector(?:es)?\b|algebra\s+lineal',
     re.IGNORECASE
 )
 # sci-tools.txt: herramientas científicas NO-Python (separado de python.txt 28/9 -- cargar
@@ -1176,6 +1543,11 @@ _RE_POWERSAVE = re.compile(
     r"despert(?:ar|[oó])\s+(?:un|el)\s+nodo|powered_down|por\s+qu[eé]\s+(?:tarda|demora)",
     re.IGNORECASE
 )
+# benchmarks.txt: récords de HPL (CPU/GPU) -- extraído de core.txt (1/10,
+# pedido real de Gonzalo: "podemos mejorar el árbol..."), antes se mandaba
+# SIEMPRE aunque solo importa cuando preguntan puntualmente por récords/TFLOPS.
+_RE_BENCHMARKS = re.compile(
+    r'r[eé]cord|benchmark|\bhpl\b|tflops?|gflops?|flops\b', re.IGNORECASE)
 # spack.txt: mecánica de activación/desambiguación de spack, relevante para
 # cualquier pedido de software compilado (no-Python) — unión de los triggers
 # de arriba más extras sin sección propia (cp2k/openfoam/vasp/namd/plumed/
@@ -1186,7 +1558,9 @@ _RE_SPACK = re.compile(
     r'\bmpi\b|mpirun|mpiexec|mpicc|cp2k|openfoam|vasp|namd|plumed|valgrind|'
     r'\bcasa\b|casaviewer|casalith|mpicasa|\btclean\b|\bflagdata\b|'
     r'trimmomatic|spades|quast|busco|gen[oó]mic|spack|'
-    r'pamguard|bioac[uú]stic|\bballena|\bdelf[ií]n|whale|dolphin',
+    r'pamguard|bioac[uú]stic|\bballena|\bdelf[ií]n|whale|dolphin|'
+    r'\bbwa\b|samtools|vcftools|\bstacks\b|iq-?tree|iqtree2?|admixture|'
+    r'\bplink2?\b|plink-ng|resistancega2?',
     re.IGNORECASE
 )
 
@@ -1201,12 +1575,14 @@ _SEGMENTS: list[tuple[str, "re.Pattern[str] | None"]] = [
     ("particle-physics", _RE_PARTICLE),
     ("gpu-custom", _RE_GPUCUSTOM),
     ("genomica", _RE_GENOMICA),
+    ("bioinformatica", _RE_BIOINFORMATICA),
     ("casa", _RE_CASA),
     ("otros-lang", _RE_OTROSLANG),
     ("bioacustica", _RE_BIOACUSTICA),
     ("python", _RE_PYTHON),
     ("sci-tools", _RE_SCITOOLS),
     ("power-save", _RE_POWERSAVE),
+    ("benchmarks", _RE_BENCHMARKS),
 ]
 
 
@@ -1259,6 +1635,19 @@ def _ctx_for_probe(probe: str, include_python: bool = True) -> str:
         if rx and rx.search(probe) and _CTX.get(name):
             ctx += "\n\n" + _CTX[name]
     return ctx
+
+
+def _segments_match_report(probe: str) -> "list[tuple[str, bool, int]]":
+    """Pedido real de Gonzalo (1/10, "podemos mejorar el árbol o es
+    complicado para que vea cuál cargar"): devuelve, para cada segmento
+    (core incluido), si matchea contra el texto dado y su tamaño en chars.
+    Usado por /segments -- pura introspección de lectura, no cambia nada."""
+    out = []
+    for name, rx in _SEGMENTS:
+        matched = (rx is None) or bool(rx.search(probe))
+        size = len(_CTX.get(name, ""))
+        out.append((name, matched, size))
+    return out
 
 
 def _system_prompt_for(user_message: str = "", history: str = "") -> str:
@@ -1410,6 +1799,24 @@ def _dedent_code_block(text: str) -> str:
     todos los recursos pedidos sin avisar: nodelist, mem, time, etc.)."""
     return textwrap.dedent(text)
 
+
+def _extract_code_blocks_from_text(text: str) -> list[tuple[str, list[str], str]]:
+    """Extrae bloques ```lang\\ncuerpo``` de texto plano via regex, como
+    (lang, lineas, titulo="") -- mismo shape que _rich_blocks.
+
+    Bug real 2/10: motor nuevo de vLLM (glm47) puede no cerrar <think> y
+    parar solo, dejando "content" vacío -- el texto real (script completo
+    incluido) cae en el campo nuevo "reasoning" (el viejo "reasoning_content"
+    quedó deprecado). Rescatarlo como si fuera content requiere repoblar
+    _rich_blocks "a mano" porque la detección en vivo por línea (la que lo
+    hace normalmente) corre sobre "content" -- vacío en este caso, nunca
+    se dispara."""
+    import re as _re_ecb
+    blocks: list[tuple[str, list[str], str]] = []
+    for m in _re_ecb.finditer(r"```(\w*)\n(.*?)```", text, _re_ecb.DOTALL):
+        blocks.append((m.group(1), m.group(2).split("\n"), ""))
+    return blocks
+
 _KNOWN_HASH_PREFIXES_CACHE = None
 # Comandos propios de gonzabot que también aparecen como "/palabra" en core.txt —
 # excluirlos explícitamente evita falsos positivos (bug real 30/8: la primera versión
@@ -1417,7 +1824,8 @@ _KNOWN_HASH_PREFIXES_CACHE = None
 # "/diagnose", nombres de paquete dentro de listas tipo "lammps/gromacs", etc.)
 _KNOWN_SLASH_COMMANDS = {"diagnose", "branch", "load", "save", "saveall",
                          "edit", "diff", "help", "audit", "queue",
-                         "compact", "history", "new", "model", "run"}
+                         "compact", "history", "new", "model", "run",
+                         "workflow", "segments"}
 
 def _known_hash_prefixes() -> set:
     """Hashes de spack documentados en context/*.txt (siempre escritos como '/xxxxxxx',
@@ -1508,7 +1916,7 @@ def _fix_sbatch(text: str) -> str:
         # archivo.lmp" con el archivo real que el usuario cargó con /load — mismo patrón,
         # comando distinto. No tocar el directorio en ninguno de los dos casos.
         # El nombre puede tener una variable a mitad (ej. "-in script_k${k}.lmp", caso real
-        # usuario4 29/8: un loop genera N archivos .lmp con el valor de un parámetro en el
+        # gchoque 29/8: un loop genera N archivos .lmp con el valor de un parámetro en el
         # nombre) — [\w${}.-]+ cubre eso además del nombre literal simple.
         if _re.search(r'^\s*(?:source|\.)\s+(?!["\']?[/$])\S', block, _re.M):
             return block
@@ -1552,7 +1960,7 @@ def _fix_sbatch(text: str) -> str:
         Solo para extensiones de código; .sh/.conf/etc. pueden querer expansión
         intencional ($SLURM_JOB_ID en un script generado).
 
-        EXCEPCIÓN (bug real 28/8, caso usuario4): si el CUERPO del heredoc referencia
+        EXCEPCIÓN (bug real 28/8, caso gchoque): si el CUERPO del heredoc referencia
         mayormente variables bash asignadas antes en el mismo bloque (ej. un loop
         que genera N archivos .lmp, uno por valor de parámetro), es un TEMPLATE
         real que necesita expansión — quotearlo deja literales "${N}" sin resolver
@@ -2204,7 +2612,7 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format(
         'N=108000\nk=$(echo "-100.0 + ($i - 1) * 2.0" | bc)\n'
         'cat << EOF > script_k${k}.lmp\nvariable N equal ${N}\nvariable k equal ${k}\nEOF'))
-    _t("heredoc: NO quotea si el cuerpo referencia vars bash asignadas antes (bug real 28/8, usuario4)",
+    _t("heredoc: NO quotea si el cuerpo referencia vars bash asignadas antes (bug real 28/8, gchoque)",
        "<< EOF" in r and "<<'EOF'" not in r)
     r = _fix_sbatch(B.format("cat << MSG\nhola\nMSG"))
     _t("heredoc a stdout intacto", "<< MSG" in r)
@@ -2223,15 +2631,15 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("source $SPACK_ROOT/setup-env.sh\necho hola"))
     _t("workdir: SÍ se inyecta si el source usa variable ($VAR, no ruta relativa)",
        "WORKDIR=" in r)
-    r = _fix_sbatch(B.format("lmp -in usuario4_paper.lmp -var k -50.0"))
-    _t("workdir: NO se inyecta si hay 'lmp -in archivo.lmp' relativo (bug real 28/8, usuario4)",
+    r = _fix_sbatch(B.format("lmp -in gchoque_paper.lmp -var k -50.0"))
+    _t("workdir: NO se inyecta si hay 'lmp -in archivo.lmp' relativo (bug real 28/8, gchoque)",
        "WORKDIR=" not in r)
     r = _fix_sbatch(B.format("lmp -in /mnt/cpu-data/gonzalo/archivo.lmp"))
     _t("workdir: SÍ se inyecta si el -in es ruta ABSOLUTA",
        "WORKDIR=" in r)
     r = _fix_sbatch(B.format("lmp -in script_k${k}.lmp -var k -50.0"))
     _t("workdir: NO se inyecta si el nombre del -in tiene una variable a mitad "
-       "(bug real 29/8, usuario4: script_k${k}.lmp generado por un loop)",
+       "(bug real 29/8, gchoque: script_k${k}.lmp generado por un loop)",
        "WORKDIR=" not in r)
 
     r = _fix_sbatch(B.format(
@@ -2239,7 +2647,7 @@ def _selftest() -> int:
         'if (( \\$SLURM_ARRAY_TASK_ID > 36 )); then\n'
         '  k=\\$(printf "%.2f" \\$(echo "-29.8 + (\\$SLURM_ARRAY_TASK_ID - 37) * 0.2" | bc -l))\n'
         'fi'))
-    _t("dollar-escape: saca \\$ espurio fuera de heredoc (bug real 28/8, usuario4)",
+    _t("dollar-escape: saca \\$ espurio fuera de heredoc (bug real 28/8, gchoque)",
        "\\$" not in r and "$SLURM_ARRAY_TASK_ID" in r)
     r = _fix_sbatch(B.format(
         "cat <<EOF > out.lmp\nvariable a equal (4.0/\\${rho})^(1.0/3.0)\nEOF"))
@@ -2280,7 +2688,7 @@ def _selftest() -> int:
            "thermo_style custom step temp pe c_m[4]\nrun 1000")))
 
     r = _fix_sbatch(B.format("module load octave\noctave --no-gui script.m"))
-    _t("module load octave → auto-fix con hash spack (bug real usuario3 13 jul 2026)",
+    _t("module load octave → auto-fix con hash spack (bug real iperez 13 jul 2026)",
        "module load" not in r and "/okdqlkti" in r and "export PATH=${OCTAVE_DIR}/bin:$PATH" in r
        and "octave --no-gui script.m" in r)
     r = _fix_sbatch(B.format("module load r\nRscript a.R"))
@@ -2606,6 +3014,21 @@ def _selftest() -> int:
        "que ver)",
        bool(_RE_PYTHON.search("como uso numpy y pandas para procesar estos datos"))
        and not bool(_RE_SCITOOLS.search("como uso numpy y pandas para procesar estos datos")))
+    _t("_RE_PYTHON: 'calcular la integral numericamente' dispara el segmento aunque "
+       "nunca diga 'python' -- bug real 3/10, el modelo alucinó python_base.env en vez "
+       "de numpy.env porque el segmento con la ruta correcta no cargaba",
+       bool(_RE_PYTHON.search(
+           "necesito calcular la integral de x al cuadrado entre 0 y 10 numericamente")))
+    _t("_RE_PYTHON: '2 matrices aleatorias de 10x10' dispara el segmento (bug real "
+       "3/10, 2do caso -- mismo patrón que la integral, sin decir python/numpy)",
+       bool(_RE_PYTHON.search(
+           "necesito un pdf con 2 matrices aleatorias de 10x10 y los resultados de "
+           "algunas operaciones entre ellas")))
+    _t("_RE_PYTHON: un job array de Slurm NO dispara el segmento (regresión real "
+       "evitada 3/10 -- 'array' solo colisiona con '#SBATCH --array' de core.txt y "
+       "cargaría python.txt de más para un pedido que no tiene nada que ver)",
+       not bool(_RE_PYTHON.search(
+           "necesito correr un array de 50 jobs de LAMMPS con --array=1-50")))
     _t("_tab_complete: match único agrega espacio final (bug real 28/9, pedido de "
        "Gonzalo -- Tab para comandos validados, más parecido a una consola real)",
        _tab_complete("squ") == "squeue ")
@@ -2636,6 +3059,253 @@ def _selftest() -> int:
            f"({_seg}-dev.txt o {_seg}.txt)",
            (CONTEXT_DIR / f"{_seg}-dev.txt").exists() or (CONTEXT_DIR / f"{_seg}.txt").exists())
 
+    # Workflows persistentes (1/10) -- usar un archivo de DB temporal, nunca
+    # el real de ~/.gonzabot/, para no ensuciar workflows.db del usuario con
+    # datos de prueba.
+    global WORKFLOW_DB_PATH
+    _wf_real_db = WORKFLOW_DB_PATH
+    import tempfile as _wf_tf
+    _wf_tmp = Path(_wf_tf.mkstemp(suffix=".db")[1])
+    WORKFLOW_DB_PATH = _wf_tmp
+    try:
+        _t("_RE_WORKFLOW_INTENT: detecta 'cuando termine X, hacé Y'",
+           bool(_RE_WORKFLOW_INTENT.search("cuando termine el job A, hacé B")))
+        _t("_RE_WORKFLOW_INTENT: detecta 'reintentá si falla'",
+           bool(_RE_WORKFLOW_INTENT.search("reintentá si falla con otro valor")))
+        _t("_RE_WORKFLOW_INTENT: NO detecta un pedido normal de un solo paso",
+           not _RE_WORKFLOW_INTENT.search("corré un LAMMPS con 1000 átomos"))
+        _wf_id = _wf_create("workflow de prueba")
+        _t("_wf_create: devuelve un id entero", isinstance(_wf_id, int) and _wf_id > 0)
+        _step_id = _wf_add_step(_wf_id, "paso-test", "999999")
+        _t("_wf_add_step: devuelve un id entero", isinstance(_step_id, int) and _step_id > 0)
+        _steps = _wf_step_status(_wf_id)
+        _t("_wf_step_status: el step creado aparece con status RUNNING",
+           len(_steps) == 1 and _steps[0][2] == "RUNNING")
+        _wfs = _wf_list()
+        _t("_wf_list: el workflow creado aparece listado",
+           any(w[0] == _wf_id for w in _wfs))
+        # job_id 999999 no existe en squeue -> reconcile debe inferir FAILED/COMPLETED
+        # leyendo el output real (acá no hay archivo .out real, así que FAILED por
+        # "no output" es el comportamiento correcto, no un bug).
+        _cambios = _wf_reconcile(_wf_id)
+        _t("_wf_reconcile: un job que ya no está en cola se reconcilia (no sigue "
+           "RUNNING para siempre por default)",
+           len(_cambios) == 1 and _cambios[0][2] in ("FAILED", "COMPLETED"))
+        _steps_after = _wf_step_status(_wf_id)
+        _t("_wf_reconcile: el cambio se persiste de verdad en la base",
+           _steps_after[0][2] != "RUNNING")
+        # bug real 1/10: "error: couldn't chdir ... going to /tmp instead" es
+        # un mensaje BENIGNO de Slurm (mounts cpu/gpu separados), no debe
+        # marcar FAILED a un job que en realidad completó bien.
+        _chdir_msg = ("[2026-10-01T12:14:49] error: couldn't chdir to "
+                      "'/mnt/gpu-data/gonzalo/ifimar-ai': No such file or "
+                      "directory: going to /tmp instead\n")
+        _err_filtrado = re.sub(
+            r"^.*error: couldn't chdir to .*going to /tmp instead\s*$", "",
+            _chdir_msg, flags=re.M)
+        _t("reconcile: el mensaje benigno de chdir de Slurm NO contiene "
+           "'error' después de filtrarlo (bug real: un job exitoso con "
+           "output 'Hola Mundo' se marcaba FAILED por esto)",
+           "error" not in _err_filtrado.lower())
+    finally:
+        WORKFLOW_DB_PATH = _wf_real_db
+        _wf_tmp.unlink(missing_ok=True)
+
+    # Consultas de solo lectura auto-ejecutadas (1/10, bug real: "me decís
+    # que lo hacés pero no lo hacés" -- gonzabot solo sugería, nunca corría).
+    _t("_is_readonly_query: squeue solo es de lectura",
+       _is_readonly_query("squeue -u gonzalo"))
+    _t("_is_readonly_query: scontrol show job es de lectura",
+       _is_readonly_query("scontrol show job 16911"))
+    _t("_is_readonly_query: varias líneas de show/squeue/sinfo juntas, OK",
+       _is_readonly_query("squeue -u gonzalo\nscontrol show job 123\nsinfo"))
+    _t("_is_readonly_query: scontrol UPDATE no es de lectura (NUNCA auto-ejecutar)",
+       not _is_readonly_query("scontrol update jobid=123 TimeLimit=1:00:00"))
+    _t("_is_readonly_query: scancel no es de lectura",
+       not _is_readonly_query("scancel 123"))
+    _t("_is_readonly_query: una redirección a archivo rompe la whitelist "
+       "(aunque el comando base sea squeue)",
+       not _is_readonly_query("squeue -u gonzalo > /tmp/x.txt"))
+    _t("_is_readonly_query: bloque vacío no es válido",
+       not _is_readonly_query("\n\n"))
+    _t("_is_readonly_query: mezclar un comando no permitido con uno sí "
+       "permitido rechaza el bloque ENTERO",
+       not _is_readonly_query("squeue -u gonzalo\nrm -rf /tmp/x"))
+    # bug real encontrado por Gonzalo probándolo ("que hora es" -> date
+    # sugerido, nunca ejecutado -- faltaba en la whitelist).
+    _t("_is_readonly_query: date es de lectura (bug real: 'que hora es' "
+       "sugería date sin ejecutarlo)", _is_readonly_query("date"))
+    _t("_is_readonly_query: whoami/hostname/pwd/uptime/free son de lectura",
+       all(_is_readonly_query(c) for c in
+           ("whoami", "hostname", "pwd", "uptime", "free -h")))
+    _t("_is_readonly_query: 'date; rm -rf /' NO es de lectura (el ; rompe "
+       "la whitelist, no alcanza con que empiece con un comando permitido)",
+       not _is_readonly_query("date; rm -rf /"))
+
+    # Rediseño denylist (1/10, pedido de Gonzalo: "tiene que ser como vos,
+    # usa tus buenas prácticas"): estos casos no estaban en la allowlist
+    # vieja y antes NUNCA se auto-ejecutaban -- ahora sí, sin tener que
+    # nombrarlos uno por uno, porque no matchean ningún patrón peligroso.
+    _t("_is_readonly_query (denylist): cat/ls/grep/find/df/du/ps/nvidia-smi "
+       "ahora corren solos, sin haber sido nombrados nunca en una allowlist",
+       all(_is_readonly_query(c) for c in
+           ("cat /etc/hostname", "ls -la /data/home", "grep -r foo .",
+            "find . -name '*.sh'", "df -h", "du -sh .", "ps aux",
+            "nvidia-smi", "which python3", "git status", "git log",
+            "git diff")))
+    _t("_is_readonly_query (denylist): git push/commit SÍ mutan, se rechazan",
+       not _is_readonly_query("git push") and not _is_readonly_query("git commit -m x"))
+    _t("_is_readonly_query (denylist): spack install/load y pip SÍ mutan, se rechazan",
+       not _is_readonly_query("spack install gcc") and
+       not _is_readonly_query("spack load gcc") and
+       not _is_readonly_query("pip install numpy"))
+    _t("_is_readonly_query (denylist): mkdir/touch/chmod/curl/ssh SÍ mutan o salen a la red",
+       not any(_is_readonly_query(c) for c in
+               ("mkdir /tmp/x", "touch /tmp/x", "chmod 777 /tmp/x",
+                "curl http://x", "ssh nodo1")))
+    _t("_is_readonly_query (denylist): un intérprete (python/bash/eval) se rechaza "
+       "siempre, podría hacer cualquier cosa",
+       not any(_is_readonly_query(c) for c in
+               ("python3 -c 'print(1)'", "bash script.sh", "eval 'rm -rf /'")))
+
+    # Bug real #3 (1/10): bloquear TODO pipe era demasiado agresivo --
+    # "ps -u gonzalo | wc -l" (sugerido de verdad por el modelo) no corría
+    # y el modelo alucinaba el resultado en vez de ejecutarlo.
+    _t("_is_readonly_query (pipes): 'ps -u gonzalo | wc -l' SÍ corre -- "
+       "bug real encontrado probando 'cuántos procesos míos hay corriendo'",
+       _is_readonly_query("ps -u gonzalo | wc -l"))
+    _t("_is_readonly_query (pipes): squeue/cat/sinfo con grep/wc/head/tail SÍ corren",
+       all(_is_readonly_query(c) for c in
+           ("squeue -u gonzalo | grep RUNNING", "cat archivo.log | tail -20",
+            "sinfo | head -5")))
+    _t("_is_readonly_query (pipes): 'squeue | xargs scancel' NO corre -- "
+       "el segundo segmento del pipe muta, no alcanza con que el primero sea de lectura",
+       not _is_readonly_query("squeue -u gonzalo | xargs scancel"))
+    _t("_is_readonly_query (pipes): 'sed -i' (edición en el lugar) NO corre "
+       "aunque 'sed' solo (sin -i, de lectura) sí",
+       not _is_readonly_query("sed -i 's/a/b/' archivo.txt") and
+       _is_readonly_query("cat archivo.txt | sed 's/a/b/'"))
+
+    # Bug real #4 (1/10): el modelo respondió el comando sugerido como texto
+    # SUELTO (sin ```bash), dos veces seguidas, para "cuántos procesos míos
+    # hay corriendo" -- _LAST_CODE_BLOCKS nunca lo capturó.
+    _t("_extract_bare_commands: línea suelta con un binario real conocido "
+       "se detecta (bug real: 'ps aux | grep gonzalo | wc -l' sin fence)",
+       _extract_bare_commands("Para saber eso:\n\nps aux | grep gonzalo | wc -l\n")
+       == ["ps aux | grep gonzalo | wc -l"])
+    _t("_extract_bare_commands: una oración en español no se confunde con "
+       "un comando (no empieza con un binario real conocido)",
+       _extract_bare_commands("Para responder esto voy a revisar squeue.\n") == [])
+    _t("_extract_bare_commands: línea suelta pero PELIGROSA no se auto-ejecuta "
+       "(sigue pasando por _is_readonly_query)",
+       _extract_bare_commands("Listo, lo borro:\n\nrm -rf /tmp/x\n") == [])
+    _t("_extract_bare_commands: lo que ya está DENTRO de un bloque ``` se "
+       "ignora acá (ya lo cubre _LAST_CODE_BLOCKS, no hay que duplicarlo)",
+       _extract_bare_commands("```bash\nsqueue -u gonzalo\n```\n") == [])
+
+    # Bug real #5 (1/10, encontrado en vivo preguntando "cuánta memoria libre
+    # hay"): una fuga de razonamiento trajo una tabla de "free -h" FALSA
+    # pegada en una sola línea sin saltos reales -- esa línea empieza con un
+    # binario conocido y sin metacaracteres peligrosos, pasaba igual por
+    # _is_readonly_query y se auto-ejecutaba como comando literal (con
+    # basura de argumentos). _looks_like_reasoning_leak es el gate que evita
+    # auto-ejecutar nada de una respuesta así.
+    _t("_looks_like_reasoning_leak: detecta el patrón real ('el usuario... "
+       "debo ejecutar...')",
+       _looks_like_reasoning_leak(
+           "El usuario pregunta sobre la memoria libre. Debo ejecutar "
+           "comandos para obtener esa información."))
+    _t("_looks_like_reasoning_leak: una respuesta normal dirigida al usuario "
+       "NO se confunde con fuga",
+       not _looks_like_reasoning_leak(
+           "Para ver la memoria libre, corré free -h en el nodo."))
+    _t("_looks_like_reasoning_leak: string vacío no es fuga",
+       not _looks_like_reasoning_leak(""))
+    _t("_looks_like_reasoning_leak: 'debería' (bug real: 'qué versión de CUDA "
+       "hay' filtró con 'Debería informar al usuario' y no 'debo', no se "
+       "detectaba antes)",
+       _looks_like_reasoning_leak(
+           "El usuario pregunta qué versión de CUDA hay. Debería informar "
+           "al usuario sobre ambas versiones disponibles."))
+
+    _t("/workflow registrado en _SLASH_CMDS (tab-completion)",
+       "/workflow" in _SLASH_CMDS)
+    _t("/workflow registrado en _KNOWN_SLASH_COMMANDS (exclusión de lint de hash)",
+       "workflow" in _KNOWN_SLASH_COMMANDS)
+
+    # /segments (1/10, pedido real: "podemos mejorar el árbol o es complicado
+    # para que vea cuál cargar") -- introspección de lectura pura.
+    _t("/segments registrado en _SLASH_CMDS y _KNOWN_SLASH_COMMANDS",
+       "/segments" in _SLASH_CMDS and "segments" in _KNOWN_SLASH_COMMANDS)
+    _rep = _segments_match_report("corré un lammps en gpu con cuda")
+    _t("_segments_match_report: 'core' siempre matchea (trigger=None)",
+       next(m for n, m, s in _rep if n == "core"))
+    _t("_segments_match_report: un texto de LAMMPS/CUDA matchea 'md-sim' y/o "
+       "'gpu-custom', no matchea 'bioacustica'",
+       any(m for n, m, s in _rep if n in ("md-sim", "gpu-custom")) and
+       not any(m for n, m, s in _rep if n == "bioacustica"))
+    _t("_segments_match_report: devuelve una entrada por cada nombre en _SEGMENTS",
+       len(_rep) == len(_SEGMENTS))
+
+    # benchmarks (1/10): extraído de core.txt -- antes se mandaba SIEMPRE,
+    # ahora solo si preguntan por récords/TFLOPS puntualmente.
+    _t("_RE_BENCHMARKS: 'cuál es el récord de HPL' matchea, una pregunta "
+       "normal de sbatch no",
+       bool(_RE_BENCHMARKS.search("cuál es el récord de HPL en GPU")) and
+       not _RE_BENCHMARKS.search("cómo corro lammps en gpu"))
+
+    # Bug real (1/10, reportado por Gonzalo: "si pones la s es imposible que
+    # vaya por 8001, algo no va"): _DEV_MODE comparaba el string completo
+    # contra "http://gpu-01:8000/v1" -- con inference ahora en cualquiera de
+    # los dos nodos (fix de hoy mismo), el servicio real de PROD puede estar
+    # en gpu-02:8000 y se clasificaba mal como "dev" solo por el host.
+    _t("_DEV_MODE (por puerto, no por host): gpu-02:8000 es PROD igual que "
+       "gpu-01:8000 -- antes del fix, el host distinto lo marcaba como dev",
+       urlparse("http://gpu-02:8000/v1").port == 8000)
+    _t("_DEV_MODE (por puerto): 8001 sigue siendo dev sin importar el nodo",
+       urlparse("http://gpu-01:8001/v1").port != 8000)
+
+    # Bug real (1/10, prueba end-to-end "multiplicación de matrices... cuando
+    # termine armame un latex"): el trigger de /workflow eligió un bloque
+    # "echo '...#SBATCH...'" (una demo trunca, no un script real) en vez del
+    # sbatch real, porque ambos CONTENÍAN la substring "#SBATCH". sbatch
+    # falló con "No partition specified" -- la primera línea real era
+    # "echo '#!/bin/bash", no un shebang, así que Slurm nunca vio las
+    # directivas reales más abajo.
+    _t("_looks_like_real_sbatch: un sbatch real (shebang + directivas en "
+       "líneas propias) sí matchea",
+       _looks_like_real_sbatch("#!/bin/bash\n#SBATCH --partition=cpu\necho hola"))
+    _t("_looks_like_real_sbatch: un 'echo' que solo MENCIONA #SBATCH adentro "
+       "de un string NO matchea (bug real: se eligió este en vez del real)",
+       not _looks_like_real_sbatch(
+           "echo '#!/bin/bash\n#SBATCH --partition=cpu'\necho fin"))
+    _t("_looks_like_real_sbatch: sin shebang como primera línea, no matchea "
+       "aunque tenga #SBATCH más abajo",
+       not _looks_like_real_sbatch("# comentario\n#SBATCH --partition=cpu"))
+
+    # Bug real #6 (1/10, misma prueba end-to-end): un bloque ```python real
+    # (import numpy...) se auto-ejecutó como shell porque el loop de
+    # auto-exec nunca chequeaba el lenguaje declarado del bloque.
+    _t("_is_shell_block: bash/sh/shell (y sin lenguaje, el fallback) sí son shell",
+       all(_is_shell_block(l) for l in ("bash", "sh", "shell", "", "BASH")))
+    _t("_is_shell_block: python/tex/c NO son shell -- bug real: un bloque "
+       "```python se corrió como comando y tiró pura basura",
+       not any(_is_shell_block(l) for l in ("python", "py", "tex", "latex", "c")))
+
+    # Bug real 2/10: motor nuevo de vLLM (glm47) puede no cerrar <think> y
+    # parar solo -- "content" queda vacío y el texto real (script incluido)
+    # cae en el campo nuevo "reasoning" (gate de rescate en stream_response).
+    _blocks = _extract_code_blocks_from_text(
+        "texto antes\n```bash\n#!/bin/bash\necho hola\n```\ntexto después")
+    _t("_extract_code_blocks_from_text: un bloque real se extrae con su lenguaje",
+       len(_blocks) == 1 and _blocks[0][0] == "bash" and "echo hola" in _blocks[0][1])
+    _t("_extract_code_blocks_from_text: sin fences, lista vacía (no inventa bloques)",
+       _extract_code_blocks_from_text("solo prosa, nada de código") == [])
+    _blocks2 = _extract_code_blocks_from_text(
+        "```python\nimport sys\n```\nmedio\n```bash\nls\n```")
+    _t("_extract_code_blocks_from_text: dos bloques distintos, en orden y con su lenguaje",
+       len(_blocks2) == 2 and _blocks2[0][0] == "python" and _blocks2[1][0] == "bash")
+
     n_fail = sum(1 for _, ok in results if not ok)
     for name, ok in results:
         print(("PASS  " if ok else "FAIL  ") + name)
@@ -2657,6 +3327,26 @@ def _selftest() -> int:
 # ambigua de "abro razonamiento o no" -- una vez que ya está "adentro" de
 # <think>, el parser lo detecta bien y el resto funciona normal.
 _REASONING_MODELS = {"glm45-air"}
+
+
+def _looks_like_reasoning_leak(text: str) -> bool:
+    """Heurística de fuga de razonamiento interno (ver comentario completo donde
+    se usa para el aviso visible, más abajo) -- el texto arranca hablando de
+    "el usuario" en tercera persona combinado con un verbo de planificación en
+    primera persona ("debo"/"necesito"/"voy a"/"tengo que"), patrón que gonzabot
+    nunca genera en una respuesta final real. Extraída a función propia (1/10)
+    para poder reusarla también como gate del auto-exec de comandos (ver el
+    loop principal) -- no tiene sentido ejecutar "de verdad" un comando que
+    viene de una respuesta que probablemente es puro razonamiento interno
+    filtrado, no texto real dirigido al usuario."""
+    if not text:
+        return False
+    head = text[:500].lower()  # 500, no 200 -- probado contra fugas reales de esta
+                                # sesión: "debo responder..." suele venir después del
+                                # primer párrafo narrando qué pidió "el usuario", 200
+                                # no le daba tiempo a aparecer, 500 sí (validado offline)
+    return bool(re.search(r'\bel usuario\b', head) and
+                re.search(r'\b(debo|deber[ií]a|necesito|voy a|tengo que)\b', head))
 
 
 def _build_request(messages: list[dict], max_tokens: int = 8000) -> Request:
@@ -2702,6 +3392,10 @@ def _touch_heartbeat():
 def _auto_start_service() -> bool:
     """Drop a start-request flag and wait for the cron to bring the service up."""
     import itertools, time
+    if _DEV_MODE:
+        print(_c(YEL, f"\n▶ Servicio dev offline. Lanzar a mano:"))
+        print(_c(DIM,  f"  sbatch /mnt/gpu-data/gonzalo/ifimar-ai/vllm-service-dev-8001.sbatch"))
+        return False
     fuera = _fuera_de_horario()
     if fuera:
         print(_c(YEL, f"\n▶ {fuera}"))
@@ -2871,6 +3565,12 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
 
     full_text = []
     _raw_buf: list[str] = []   # tokens crudos del LLM → para markdown re-render
+    # Motor nuevo de vLLM (0.21+/glm47): el modelo puede no cerrar <think> y parar
+    # solo, dejando "content" vacío -- todo el texto real cae en el campo nuevo
+    # "reasoning" (el viejo "reasoning_content" quedó deprecado). Bufferear aparte,
+    # en silencio, para poder rescatarlo si "content" termina totalmente vacío --
+    # nunca se muestra en vivo, así no reintroduce la fuga que esto reemplaza.
+    _reasoning_fallback_buf: list[str] = []
     _lv: list = [None, None]   # [live_instance, current_RichText]
     if _console is not None and not silent:
         _lv[1] = _RichText()
@@ -3031,6 +3731,10 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                         obj = json.loads(line[6:])
                         delta = obj["choices"][0]["delta"]
                         token = delta.get("content", "").replace("\x00", "")
+                        _r_token = (delta.get("reasoning")
+                                    or delta.get("reasoning_content") or "")
+                        if _r_token:
+                            _reasoning_fallback_buf.append(_r_token.replace("\x00", ""))
                         if token:
                             _raw_buf.append(token)
                             if not got_first:
@@ -3136,6 +3840,18 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
             _lv[0].stop()
             _lv[0] = None
 
+    # Rescate: "content" quedó totalmente vacío (nunca llegó un token real) pero
+    # sí se acumuló texto en el campo nuevo "reasoning" -- el modelo puso la
+    # respuesta real ahí sin cerrar el bloque de razonamiento. Usarlo como si
+    # hubiera llegado por content, recién ahora (nunca se mostró en vivo).
+    if not user_aborted.is_set() and not "".join(_raw_buf).strip() and _reasoning_fallback_buf:
+        _raw_buf = _reasoning_fallback_buf
+        _rescued_text = "".join(_reasoning_fallback_buf)
+        full_text = [_rescued_text]  # alimenta "text" más abajo (_LAST_CODE_BLOCKS, _fix_sbatch)
+        # Re-popular _rich_blocks desde el texto rescatado (nunca corrió la detección
+        # en vivo por línea, porque esa corre sobre "content" -- vacío en este caso)
+        # para que el bloque de código se vea bien formateado, no solo como prosa.
+        _rich_blocks.extend(_extract_code_blocks_from_text(_rescued_text))
     if not silent:
         if user_aborted.is_set():
             # Bug real 5/9 (usuarios reportan "aprieto Ctrl-C y no sé si funcionó o
@@ -3311,14 +4027,12 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
     # el texto arranca hablando de "el usuario" en tercera persona en vez de dirigirse al
     # usuario directo, combinado con un verbo de planificación en primera persona ("debo",
     # "necesito", "voy a") -- patrón que gonzabot nunca genera en una respuesta final real
-    # (REGLA ABSOLUTA de estilo: nunca intro, nunca meta-comentario).
-    if MODEL in _REASONING_MODELS and not silent and text:
-        _head = text[:500].lower()  # 500, no 200 -- probado contra fugas reales de esta
-                                    # sesión: "debo responder..." suele venir después del
-                                    # primer párrafo narrando qué pidió "el usuario", 200
-                                    # no le daba tiempo a aparecer, 500 sí (validado offline)
-        if re.search(r'\bel usuario\b', _head) and re.search(
-                r'\b(debo|necesito|voy a|tengo que)\b', _head):
+    # (REGLA ABSOLUTA de estilo: nunca intro, nunca meta-comentario). Extraída a función
+    # (1/10) porque además de avisar, ahora también se usa para BLOQUEAR el auto-exec de
+    # comandos (ver _looks_like_reasoning_leak más abajo y su uso en el loop principal --
+    # bug real encontrado en vivo: un "free -h" alucinado con tabla de resultado falsa
+    # pegada en una sola línea se auto-ejecutó como si fuera un comando real).
+    if MODEL in _REASONING_MODELS and not silent and text and _looks_like_reasoning_leak(text):
             # Bug real 28/9 (usuario real cl-externos, reportado por Gonzalo): en
             # sesión nueva con 1 sola pregunta, "/compact" responde "Poco historial para
             # compactar" y no hace nada -- el aviso de acá le sugería un remedio que en
@@ -3366,6 +4080,9 @@ Comandos:
   <comando>                  Los comandos del sistema se ejecutan directo (squeue, ls, rm, python3, ...)
   [pegar sbatch]             Pegá el script → el bot detecta #SBATCH → s = someter al cluster
   /run [N]                   Somete el sbatch generado (último bloque, o #REF N si se da)
+  /workflow list             Lista los workflows persistentes guardados
+  /workflow status <id>      Estado real de un workflow (reconciliado contra Slurm, no el registro viejo)
+                             (se crean solos: pedís algo con varios pasos, ej. "cuando termine X, hacé Y")
   /audit                     Analiza todos los jobs en ejecución y sugiere mejoras
   /queue [usuario]           Muestra la cola del usuario y analiza con el bot
   /diagnose <job_id>         Carga los logs del job y pide al bot que diagnostique
@@ -3377,6 +4094,8 @@ Comandos:
   /history <keyword ...>     Busca en el historial e inyecta resultados como contexto
   /history <session_id>      Carga una sesión completa como contexto (formato: YYYYMMDD-HHMMSS)
   /model                     Muestra el modelo y endpoint actual
+  /segments [texto]          Qué segmentos de contexto cargarían para ese texto (o tu
+                             último mensaje si no pasás nada) y cuánto pesa cada uno
   /raw                       Activa/desactiva bloques de código sin recuadro (más
                              fácil de copiar en terminales básicas como la de Windows)
   /help                      Muestra esta ayuda
@@ -3494,6 +4213,7 @@ def repl(new_session: bool = False):
             "/exit", "/quit", "/q", "/help", "/queue", "/save", "/saveall", "/copy",
             "/edit", "/diff", "/audit", "/diagnose", "/history", "/compact",
             "/clear", "/paste", "/load", "/branch", "/model", "/raw", "/run",
+            "/workflow", "/segments",
         }
         _first_slash_word = user_input.split(None, 1)[0].lower() if user_input.startswith("/") else ""
         if _first_slash_word in _KNOWN_CMDS:
@@ -3526,6 +4246,7 @@ def repl(new_session: bool = False):
 
             elif cmd == "/model":
                 print(f"  Endpoint: {VLLM_BASE}")
+                print(f"  Modo:     {'dev' if _DEV_MODE else 'prod'}")
                 print(f"  Modelo:   {MODEL}")
                 print(f"  Ctx dir:  {CONTEXT_DIR}")
                 for _seg, _ in _SEGMENTS:
@@ -3537,6 +4258,33 @@ def repl(new_session: bool = False):
                         print(f"  {_seg:18s}  {_pro.name}  ({len(_pro.read_text(encoding='utf-8', errors='replace')):,} chars)")
                     else:
                         print(f"  {_seg:18s}  (no encontrado)")
+
+            elif cmd == "/segments":
+                # Pedido real de Gonzalo (1/10): ver cuáles segmentos de contexto
+                # cargarían para un mensaje, sin tener que adivinar. Sin argumento,
+                # usa el último mensaje de usuario real de ESTA sesión (no el texto
+                # "/segments" en sí, que no sirve de probe).
+                _probe_arg = arg.strip()
+                if _probe_arg:
+                    _probe_src = _probe_arg
+                else:
+                    _probe_src = next((m.get("content", "") for m in reversed(context_msgs)
+                                        if m.get("role") == "user"), "")
+                if not _probe_src:
+                    print(_c(YEL, "No hay ningún mensaje tuyo todavía en esta sesión -- "
+                                  "pasá un texto: /segments cómo instalo lammps"))
+                else:
+                    print(_c(DIM, f'  Probando contra: "{_probe_src[:80]}'
+                                  f'{"..." if len(_probe_src) > 80 else ""}"'))
+                    _total = 0
+                    for _name, _matched, _size in _segments_match_report(_probe_src):
+                        _mark = _c(GRN, "✓") if _matched else _c(DIM, "·")
+                        if _matched:
+                            _total += _size
+                        print(f"  {_mark} {_name:18s} {_size:>6,} chars"
+                              f"{'  (siempre)' if _name == 'core' else ''}")
+                    print(_c(DIM, f"  Total que se mandaría: ~{_total:,} chars "
+                                  f"(~{_total // 4:,} tokens aprox.)"))
 
             elif cmd == "/compact":
                 if len(context_msgs) < 4:
@@ -3924,6 +4672,45 @@ def repl(new_session: bool = False):
                         context_msgs = context_msgs[-MAX_CTX_MSGS:]
                 except RuntimeError as e:
                     _handle_runtime_error(e)
+                print()
+                continue
+
+            elif cmd == "/workflow":
+                # Solo la parte de CONSULTA es comando explícito (list/status) --
+                # es lectura pura, tiene sentido que sea directo como /queue.
+                # CREAR un workflow nuevo NO pasa por acá: se dispara solo, en
+                # lenguaje natural, cuando el pedido del usuario suena a varios
+                # pasos encadenados (ver _RE_WORKFLOW_INTENT más abajo en el loop).
+                _wf_arg = arg.strip()
+                if _wf_arg in ("", "list"):
+                    rows = _wf_list()
+                    if not rows:
+                        print(_c(DIM, "No hay workflows todavía. Se crean solos "
+                                      "cuando un pedido suena a varios pasos "
+                                      "encadenados (ej. \"cuando termine X, hacé Y\")."))
+                    else:
+                        for wf_id, goal, status, created in rows:
+                            print(f"  #{wf_id}  [{status}]  {goal}  ({created})")
+                elif _wf_arg.split()[0] == "status" and len(_wf_arg.split()) > 1:
+                    _wf_id_arg = _wf_arg.split()[1]
+                    if not _wf_id_arg.isdigit():
+                        print(_c(YEL, "Uso: /workflow status <id>"))
+                        continue
+                    _wf_id = int(_wf_id_arg)
+                    print(_c(DIM, "Reconciliando contra el estado real de Slurm..."))
+                    cambios = _wf_reconcile(_wf_id)
+                    for name, job_id, nuevo in cambios:
+                        print(_c(YEL, f"  (job {job_id} de '{name}' ya no estaba "
+                                      f"en cola -- actualizado a {nuevo})"))
+                    steps = _wf_step_status(_wf_id)
+                    if not steps:
+                        print(_c(YEL, f"Workflow #{_wf_id} no existe o no tiene steps."))
+                    else:
+                        for step_id, name, status, job_id, result in steps:
+                            print(f"  [{status}] {name} (job {job_id}) — "
+                                  f"{(result or '')[:100]}")
+                else:
+                    print(_c(YEL, "Uso: /workflow list  |  /workflow status <id>"))
                 print()
                 continue
 
@@ -5197,6 +5984,91 @@ def repl(new_session: bool = False):
         else:
             save_message(con, session_id, "assistant", reply)
         last_reply = reply
+
+        # Bug real #5 (1/10, encontrado en vivo): una respuesta con fuga de
+        # razonamiento puede incluir una tabla de resultado FALSA pegada en una
+        # sola línea (ej. "free -h total ... Mem: 377Gi ..." todo junto, sin
+        # saltos de línea reales) -- esa línea arranca con un binario conocido
+        # (free) y no tiene metacaracteres peligrosos, así que _is_readonly_query
+        # la deja pasar igual, y termina corriendo como comando literal con
+        # basura de argumentos (el "free" real devuelve su texto de uso/ayuda,
+        # que se puede confundir con output real). No tiene sentido auto-ejecutar
+        # nada de una respuesta que ya se sospecha que es puro razonamiento
+        # filtrado, no texto real -- se salta todo el auto-exec en ese caso.
+        if MODEL in _REASONING_MODELS and _looks_like_reasoning_leak(reply):
+            print(_c(DIM, "\n  (auto-ejecución de comandos salteada: esta respuesta "
+                          "tiene pinta de fuga de razonamiento, no de texto real)"))
+        else:
+            # Consultas de solo lectura: correrlas de verdad, no solo sugerirlas
+            # (ver _is_readonly_query/_run_readonly_query más arriba -- bug real
+            # 1/10). Chequea CADA bloque nuevo de esta respuesta puntual.
+            #
+            # Bug real #6 (1/10, misma prueba end-to-end de matrices+LaTeX):
+            # este loop nunca chequeaba el LENGUAJE del bloque -- un bloque
+            # ```python real (import numpy, etc.) pasaba igual por
+            # _is_readonly_query (ninguna línea matchea la denylist de shell)
+            # y se corrió tal cual vía subprocess con shell=True, resultando
+            # en pura basura ("import: not found", errores de sintaxis). Fix:
+            # solo auto-ejecutar bloques de shell (bash/sh/shell, o sin
+            # lenguaje declarado -- el fallback regex de más arriba también
+            # usa "" cuando no hay rich_blocks); cualquier otro lenguaje
+            # (python, tex, c, etc.) NUNCA se auto-ejecuta como comando.
+            for _ro_lang, _ro_code, _ro_title in _LAST_CODE_BLOCKS:
+                if not _is_shell_block(_ro_lang):
+                    continue
+                if _is_readonly_query(_ro_code):
+                    print(_c(DIM, f"\n  ▶ Ejecutando de verdad ({_ro_title or 'consulta'}, "
+                                  f"solo lectura, sin pedir confirmación)..."))
+                    _ro_out = _run_readonly_query(_ro_code)
+                    print(_c(DIM, "  " + "\n  ".join(_ro_out.splitlines()[:40])))
+
+            # Bug real #4 (1/10): a veces el modelo escribe el comando como
+            # texto suelto, sin bloque ```bash -- esto cubre ese caso además
+            # del de arriba (ver _extract_bare_commands).
+            for _bare_cmd in _extract_bare_commands(reply):
+                print(_c(DIM, f"\n  ▶ Ejecutando de verdad ({_bare_cmd}, "
+                              f"solo lectura, sin pedir confirmación)..."))
+                _bare_out = _run_readonly_query(_bare_cmd)
+                print(_c(DIM, "  " + "\n  ".join(_bare_out.splitlines()[:40])))
+
+        # Workflow persistente, 1/10: el pedido del usuario (no la respuesta del
+        # modelo) es lo que se chequea -- si suena a varios pasos encadenados
+        # ("cuando termine X, hacé Y"), SIEMPRE se confirma antes de crear nada,
+        # nunca automático. Reusa el último bloque #SBATCH generado en ESTA
+        # respuesta (mismo patrón que /run) como paso 1.
+        if _RE_WORKFLOW_INTENT.search(user_input) and _LAST_CODE_BLOCKS:
+            if _yn_raw(_c(BOLD, "\n  Esto suena a un workflow de varios pasos que "
+                                "puede sobrevivir si cerrás la sesión. "
+                                "¿Lo guardo como workflow persistente? [s/N]: ")):
+                # bug real encontrado en vivo (1/10): tomar literal el ÚLTIMO
+                # bloque de la respuesta (como hace /run por default) falla acá
+                # porque gonzabot suele generar un segundo bloque CHICO después
+                # del sbatch real, con el comando "sbatch archivo.sh" para
+                # enviarlo -- ese bloque no tiene #SBATCH. Buscar hacia atrás el
+                # último bloque que SÍ tenga #SBATCH, no asumir que es el final.
+                _wf_code = _wf_title = _wf_lang = None
+                for _wf_lang, _wf_code, _wf_title in reversed(_LAST_CODE_BLOCKS):
+                    if _looks_like_real_sbatch(_wf_code):
+                        break
+                else:
+                    _wf_code = None
+                if _wf_code and _looks_like_real_sbatch(_wf_code):
+                    _wf_ok, _wf_out = _submit_sbatch_text(_wf_code)
+                    if _wf_ok:
+                        _wf_jobid_m = re.search(r"Submitted batch job (\d+)", _wf_out)
+                        _wf_jobid = _wf_jobid_m.group(1) if _wf_jobid_m else ""
+                        _wf_id = _wf_create(user_input[:200])
+                        _wf_add_step(_wf_id, _wf_title or "paso 1", _wf_jobid)
+                        print(_c(GRN, f"  Workflow #{_wf_id} creado, job "
+                                      f"{_wf_jobid} sometido. Usá "
+                                      f"'/workflow status {_wf_id}' para seguirlo, "
+                                      f"incluso en otra sesión."))
+                    else:
+                        print(_c(RED, f"  No se pudo someter el paso 1: {_wf_out}"))
+                else:
+                    print(_c(YEL, "  Ningún bloque de esta respuesta tiene "
+                                  "#SBATCH, no hay nada para someter como "
+                                  "paso 1 todavía."))
 
         # Add to context window
         context_msgs.append({"role": "user",      "content": user_input})

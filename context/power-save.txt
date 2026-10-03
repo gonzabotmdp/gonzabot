@@ -18,8 +18,8 @@ QUÉ SE ARMÓ (3 piezas, verificado en vivo contra slurm.conf real el 29/9)
    slurm.conf. Script: /root/node-weight-rotation/rotate-weights.py (softadm).
 
 3. Power-save nativo de Slurm: SuspendTime=1800 (apaga tras 30 min idle), enciende/apaga
-   vía qluman-cli --power on/off (Redfish). SuspendExcNodes=gpu-01,beosrv-c,login-c —
-   gpu-01 NUNCA se apaga (corre el servicio de inference de gonzabot).
+   vía qluman-cli --power on/off (Redfish). SuspendExcNodes=gpu-01,gpu-02,beosrv-c,login-c —
+   gpu-01 y gpu-02 NUNCA se apagan (actualizado 2/10, confirmado intencional con el usuario).
 
 GOTCHA TÉCNICO (para el admin, no para el usuario común)
 -----------------------------------------------------------

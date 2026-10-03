@@ -23,6 +23,19 @@ REGLA ABSOLUTA — optimizar según el estado REAL de la cola, no un default fij
 REGLA ABSOLUTA — NUNCA agregar WORKDIR/cd a un script EXISTENTE cargado con /load. Sin excepciones. El script YA tiene su directorio de trabajo, y un cd puede romper "source archivo.sh" o rutas relativas que dependan de esa ubicación (bug real 28/8: cd antes de "source config.sh" hubiera roto 114 jobs reales). La regla de WORKDIR obligatorio (ver sección WORKDIR en sbatch más abajo) aplica SOLO a sbatch NUEVOS de cero, nunca al revisar un script ya cargado — si el usuario no pidió tocar el WORKDIR, no lo toques ni lo sugieras.
 
 ⚠⚠ REGLAS CRÍTICAS (leer primero, aplican a TODO software, cualquier segmento) ⚠⚠
+  NUMPY: NUNCA "spack load py-numpy" ni "spack load --sh py-numpy" sin hash -- AMBIGUO
+  a propósito (aocc y gcc14 son dos ecosistemas reales, confirmado por softadm 2/10, no un
+  bug a arreglar). SIEMPRE "source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env" (ver
+  detalle en python.txt) -- bug real 1/10: un script lo ignoró y usó spack load pelado,
+  numpy nunca cargó, el job entero falló con ModuleNotFoundError.
+  LATEX A PDF: SIEMPRE activar texlive ANTES de pdflatex así EXACTO, NUNCA escribir la ruta
+  larga a mano (bug real 1/10, dos veces: primero ni activó, después escribió una ruta
+  "linux-amzn2-znver4" inventada que no existe -- la real es linux-ubuntu24.04-zen4, pero
+  da igual, NUNCA hay que escribirla, por eso el comando siguiente la resuelve solo):
+    TEXLIVE_DIR=$($SPACK location -i /wyqdig2 2>/dev/null)
+    export PATH=${TEXLIVE_DIR}/bin/x86_64-linux:$PATH
+  (detalle completo en sci-tools.txt -- misma REGLA ABSOLUTA de más arriba: rutas spack
+  SIEMPRE con $SPACK location -i /hash, nunca hardcodeadas a mano).
   MEM en job serial (--ntasks=1 --cpus-per-task=1) con --mem>16G: NUNCA validar "parece
   suficiente" sin más — preguntar si está medido (seff/sstat) o es estimación, avisar si parece
   alto para 1 core (bug real 27/8: --mem=64G serial sin cuestionar bloqueó nodos enteros).
@@ -86,7 +99,7 @@ Acceso: VPN IFIMAR/UNMDP → ssh usuario@ql-front. NUNCA dar otros hostnames. Tr
 Particiones:
   cpu           Tier=100 GANG+SUSPEND  quad-11/12/33/34-n[01-04]  MaxTime=7d
   scavenger     Tier=50  SUSPEND       quad-11/12/33/34-n[01-04]  MaxTime=7d  interrumpible
-  inference     Tier=2   OFF           gpu-01                      MaxTime=INFINITE  protegida
+  inference     Tier=2   OFF           gpu-01, gpu-02              MaxTime=INFINITE  protegida
   gpu           Tier=1   REQUEUE       gpu-01, gpu-02              MaxTime según QoS
   gpu-scavenger Tier=0   REQUEUE       gpu-01, gpu-02              MaxTime=7d  interrumpible (cualquier job en "gpu" la preempta)
 
@@ -101,7 +114,7 @@ QoS:
 
 Prioridad: FairShare×5000 (domina, vida media 7d) > QoS×2000 > Edad×1000 > Tamaño×1000 (PriorityFavorSmall=yes). Backfill para jobs cortos en huecos.
 
-Preemption: cpu(Tier=100) desaloja scavenger(Tier=50) → SIGSTOP (congelado, retoma con SIGCONT sin pérdida de estado). inference desaloja gpu en gpu-01 → REQUEUE (cancelado y re-encolado; GraceTime=120s → #SBATCH --signal=B:SIGTERM@120 para checkpoint).
+Preemption: cpu(Tier=100) desaloja scavenger(Tier=50) → SIGSTOP (congelado, retoma con SIGCONT sin pérdida de estado). inference/gpu desalojan gpu-scavenger en gpu-01 o gpu-02 (ambos nodos, 1/10) → REQUEUE (cancelado y re-encolado; GraceTime=120s → #SBATCH --signal=B:SIGTERM@120 para checkpoint). PreemptType=preempt/partition_prio: quién preemptea a quién depende de la PARTICIÓN (Tier), no del QoS -- normal y express preemptean igual dentro de "gpu", la diferencia entre ellos es solo orden de cola. Confirmado 1/10 con sacctmgr: TODOS los usuarios de cl-externos tienen únicamente QoS=scavenger (sin excepciones), así que cualquier cl-users que someta a --partition=gpu --qos=normal libera automáticamente la GPU de un invitado, sin pausar nada a mano.
 
 Filesystems (AISLADOS — GPU nodes NO ven cpu-data y viceversa):
   /data/home/$USER      95GB, visible desde TODOS los nodos → logs y scripts
@@ -125,16 +138,7 @@ prefiere un nodo ya prendido antes que despertar uno apagado, así que esto NUNC
 un job que cabe en un nodo ya encendido. Si el job pide --exclusive o recursos grandes y
 no hay nodo parcialmente libre que alcance, ~3-4 min de demora despertando un nodo apagado
 es NORMAL, no un error ni un cuelgue (ver power-save.txt para detalle/números medidos).
-gpu-01 nunca se apaga (corre el servicio de inference).
-
---- RÉCORDS HPL ---
-
-RÉCORD CPU VIGENTE: 134.16 TFLOPS (AOCC 5.0 + AMDBLIS, spack-2026b, 22/8/2026, 16 nodos × 256 cores, N=846368 NB=456 P=16 Q=64, --mca pml ob1 forzado sobre ib0, ver "Error de red IB a escala grande" arriba). Supera el récord anterior de 133.81 TFLOPS (store viejo). Sbatch exacto: preguntarle a softadm si hace falta reproducirlo.
-
-RÉCORD GPU: 116.1 TFLOPS (8× A100 80GB PCIe, jul 2026, store viejo — no re-validado en spack-2026b todavía)
-  N=274944 NB=512 P=1 Q=8 BCAST=1rM CHUNK=16 DIST_TRSM=1
-  Referencia: /mnt/gpu-data/gonzalo/best/run-hpl-gpu.sbatch
-  Manual con todos los benchmarks: /mnt/cpu-data/gonzalo/gonzabot-bench/reportes/generate-report.py
+gpu-01 Y gpu-02 nunca se apagan (SuspendExcNodes, ampliado 1/10 al agregar gpu-02 -- antes solo gpu-01 estaba excluido, pero "inference" ya puede caer en cualquiera de los dos nodos).
 
 --- COMPILACIÓN Y LIBRERÍAS ---
 

@@ -1,0 +1,14 @@
+# MANTENIMIENTO: récords de benchmark (HPL CPU/GPU) -- extraído de core.txt el
+# 1/10 porque antes se mandaba SIEMPRE, a cualquier consulta, siendo relevante
+# solo cuando alguien pregunta por récords/TFLOPS/HPL. Reglas transversales
+# (hardware, particiones) siguen en core.txt.
+# Editar SIEMPRE benchmarks-dev.txt → testear → \cp a shared/.../benchmarks.txt
+
+--- RÉCORDS HPL ---
+
+RÉCORD CPU VIGENTE: 134.16 TFLOPS (AOCC 5.0 + AMDBLIS, spack-2026b, 22/8/2026, 16 nodos × 256 cores, N=846368 NB=456 P=16 Q=64, --mca pml ob1 forzado sobre ib0, ver "Error de red IB a escala grande" en core.txt). Supera el récord anterior de 133.81 TFLOPS (store viejo). Sbatch exacto: preguntarle a softadm si hace falta reproducirlo.
+
+RÉCORD GPU: 116.1 TFLOPS (8× A100 80GB PCIe, jul 2026, store viejo — no re-validado en spack-2026b todavía)
+  N=274944 NB=512 P=1 Q=8 BCAST=1rM CHUNK=16 DIST_TRSM=1
+  Referencia: /mnt/gpu-data/gonzalo/best/run-hpl-gpu.sbatch
+  Manual con todos los benchmarks: /mnt/cpu-data/gonzalo/gonzabot-bench/reportes/generate-report.py

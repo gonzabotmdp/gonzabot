@@ -6,6 +6,21 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-03
+
+### Added
+- New `/workflow` command: persists multi-step task state across turns via a new
+  `WORKFLOW_DB_PATH` SQLite file on the same NFS mount already proven safe for
+  `history.db` (rollback-journal mode tolerates NFS; WAL does not).
+- New `/segments` command: read-only introspection showing exactly which context
+  segments would load for a given piece of text, and the resulting char/token
+  estimate. Came out of a real question from Gonzalo ("podemos mejorar el árbol
+  o es complicado para que vea cuál cargar") and has since been the main tool
+  for diagnosing every trigger-regex gap below.
+- `benchmarks` context segment split out of `core.txt` (which used to always load):
+  now only loads when someone actually asks about records/TFLOPS, instead of
+  being sent on every single request.
+
 ### Fixed
 - `tutorial/vllm-service.sbatch`: the `vllm.jobid` tracking file had no self-healing
   against ending up owned by another user/root -- once that happened (real incident,
@@ -13,6 +28,59 @@ into production on the IFIMAR cluster.
   the log, no visible error to the user). The heartbeat file already had this
   protection (`chmod 666` after every write); `vllm.jobid` didn't. Added `rm -f` +
   `chmod 666` around the write, matching the existing heartbeat pattern.
+- `_DEV_MODE` compared the full host string against `http://gpu-01:8000/v1` instead
+  of just the port. Once inference could run on either GPU chassis, a real prod
+  session on `gpu-02:8000` got misclassified as dev purely because the host
+  differed, and pointed the user at the wrong (dev/8001) recovery instructions.
+  Reported live by Gonzalo: "si pones la s es imposible que vaya por 8001, algo
+  no va." Now compares by port only (8000 = prod, anything else = dev).
+- Auto-exec safety gating, found during a real end-to-end test ("multiplicación
+  de matrices... cuando termine armame un latex"):
+  - `_is_readonly_query` blocked every pipe unconditionally, so a model-suggested
+    `ps -u gonzalo | wc -l` never ran and got hallucinated instead of executed.
+    Now allows a pipe when every stage is read-only (`squeue`/`cat`/`sinfo` into
+    `grep`/`wc`/`head`/`tail`), still blocks when any stage mutates
+    (`| xargs scancel`) or edits in place (`sed -i`).
+  - The model sometimes suggests a command as a bare line with no ` ``` ` fence;
+    these were never picked up for the "run it?" prompt. Added detection for a
+    bare line starting with a known real binary, still gated through the same
+    `_is_readonly_query` check so a dangerous bare command isn't auto-offered.
+  - A reasoning leak produced a fake single-line `free -h` table that happened to
+    start with a known binary and no dangerous metacharacters, so it passed the
+    readonly gate and nearly auto-executed as a literal (garbage) command. Added
+    `_looks_like_reasoning_leak`, which recognizes internal-monologue phrasing
+    ("el usuario... debo/debería ejecutar...") and blocks auto-exec from a
+    response shaped like that. Initially only caught "debo"; a separate leak on
+    a CUDA-version question used "debería" and slipped through, so both are
+    now covered.
+  - `/workflow`'s trigger picked an `echo '...#SBATCH...'` demonstration block
+    instead of the real sbatch block, because both blocks merely *contained* the
+    substring `#SBATCH`. Submission failed with "No partition specified" since
+    the echo's literal first line wasn't an actual shebang. `_looks_like_real_sbatch`
+    now requires a real shebang as line 1 and directives on their own lines, not
+    just a substring match anywhere in the block.
+  - A real ` ```python ` block (with working numpy code) was auto-executed as a
+    shell command, because the auto-exec loop never checked a block's declared
+    language before running it. `_is_shell_block` now only treats
+    bash/sh/shell/no-language as shell; python/tex/c/etc. are excluded.
+- GLM-4.5-Air reasoning leak on the newer vLLM engine (0.30.x): its parser can
+  fail to close `<think>` and stop generating early, leaving the OpenAI-style
+  `content` field empty while the real text -- including any generated script --
+  lands in the renamed `reasoning` field (`reasoning_content` in older vLLM).
+  `stream_response()` now has a rescue path: when `content` comes back empty but
+  `reasoning` has real text, it recovers the text and re-extracts code blocks
+  from it instead of silently returning nothing.
+- `_RE_PYTHON` (the trigger deciding whether `python.txt`, with the correct
+  `numpy.env` path, gets loaded) missed two real phrasings that never say
+  "python"/"numpy" but clearly need it: "calculá la integral ... numéricamente"
+  and "2 matrices aleatorias de 10x10". Both times the segment didn't load, the
+  model hallucinated its own env file path instead of the documented one. Added
+  numeric-method and linear-algebra trigger words. Deliberately did NOT add a
+  bare "array" trigger: that collides with Slurm job arrays
+  (`#SBATCH --array=1-N`, documented in `core.txt`) and would load `python.txt`
+  for job-array questions that have nothing to do with numpy -- the same context
+  dilution that originally forced `python.txt`/`sci-tools.txt` apart. Verified
+  live with `/segments` both ways before and after.
 
 ## [1.3.3] - 2026-09-30
 

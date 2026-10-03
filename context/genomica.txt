@@ -23,3 +23,12 @@ busco@6.1.0: spack load --sh busco (bare, resuelve solo). Completitud del ensamb
   opciones) — confirmado que la partición cpu SÍ tiene salida a internet, funciona sin
   problema. "0% complete" con un ensamblado de prueba muy chico (ej. el test_dataset de spades)
   es esperado, no es un bug — el genoma de test no tiene genes completos suficientes.
+masurca@4.1.4: spack load --sh masurca (bare, resuelve solo). Ensamblado alternativo a spades
+  (útil para datos híbridos/long-read). Instalado por softadm 1/10. Bug real de MaSuRCA
+  upstream, YA ARREGLADO vía override local de spack: el código vendorizado (MUMmer/
+  PacBio/SuperReads/CA8) no compila con NINGÚN compilador moderno (AOCC, gcc14, y la
+  comunidad reporta lo mismo con gcc13) — le faltan #include <cstdint> y <algorithm> en
+  varios archivos, GCC viejo lo toleraba vía otros headers. Fix aplicado (forzar esos
+  headers vía -include en CXXFLAGS/CFLAGS + renombrar una variable global que chocaba con
+  std::prev) ya está en el package.py local, documentado con el historial completo — NO
+  hace falta reinstalar ni reinvestigar si alguien más lo pide, ya anda.
