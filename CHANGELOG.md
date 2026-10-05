@@ -6,6 +6,22 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-04
+
+### Fixed
+- `_wf_reconcile()` called `subprocess.run(["squeue", ...])` with no handling
+  for the binary not existing -- true on the cluster, but not on a GitHub
+  Actions runner, which has no Slurm installed. The 1.4.0 release broke CI for
+  exactly this reason: `--selftest` crashed with an uncaught `FileNotFoundError`
+  (`FileNotFoundError: [Errno 2] No such file or directory: 'squeue'`,
+  `gonzabot` line 469) instead of running its ~180 checks. Now catches
+  `FileNotFoundError` and treats "can't even ask squeue" the same as "job's
+  not in the queue anymore," falling through to the existing output-file-based
+  completed/failed inference -- no behavior change on the real cluster, where
+  `squeue` always exists. Added a regression test that monkeypatches
+  `subprocess.run` to raise exactly this error and confirms `_wf_reconcile`
+  recovers instead of propagating it.
+
 ## [1.4.0] - 2026-10-03
 
 ### Added

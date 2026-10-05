@@ -466,9 +466,20 @@ def _wf_reconcile(workflow_id: int) -> list:
     for step_id, name, job_id in running:
         if not job_id:
             continue
-        r = subprocess.run(["squeue", "-j", job_id, "-h", "-o", "%T"],
-                            capture_output=True, text=True)
-        if r.stdout.strip():
+        # Bug real encontrado en CI (3/10): acá se asumía que el binario
+        # "squeue" siempre existe (cierto en el cluster real, falso en un
+        # runner de GitHub Actions sin Slurm instalado) -- un FileNotFoundError
+        # sin capturar tiraba abajo TODO --selftest con exit 1 en segundos.
+        # Si no se puede ni preguntar, no se puede confirmar que sigue en
+        # cola -- se trata igual que "ya no está" y se sigue al heurístico de
+        # archivos de salida, que es lo que ya hacía este mismo código.
+        try:
+            r = subprocess.run(["squeue", "-j", job_id, "-h", "-o", "%T"],
+                                capture_output=True, text=True)
+            still_queued = bool(r.stdout.strip())
+        except FileNotFoundError:
+            still_queued = False
+        if still_queued:
             continue  # sigue realmente en cola, no tocar
         out_files = list(Path("/data/home", _USERNAME).glob(f"*{job_id}.out"))
         if not out_files:
@@ -3094,6 +3105,24 @@ def _selftest() -> int:
         _steps_after = _wf_step_status(_wf_id)
         _t("_wf_reconcile: el cambio se persiste de verdad en la base",
            _steps_after[0][2] != "RUNNING")
+        # Bug real en CI (3/10): "squeue" no existe en un runner de GitHub
+        # Actions (sin Slurm instalado) -- subprocess.run tiraba
+        # FileNotFoundError sin capturar y crasheaba TODO --selftest con
+        # exit 1 en segundos. Simula exactamente esa ausencia de binario.
+        _wf_id2 = _wf_create("workflow sin squeue instalado (test CI)")
+        _wf_add_step(_wf_id2, "paso-sin-squeue", "888888")
+        _orig_run = subprocess.run
+        def _raise_nobin(*_a, **_k):
+            raise FileNotFoundError(2, "No such file or directory", "squeue")
+        subprocess.run = _raise_nobin
+        try:
+            _cambios2 = _wf_reconcile(_wf_id2)
+        finally:
+            subprocess.run = _orig_run
+        _t("_wf_reconcile: si 'squeue' no existe (bug real en CI, runner sin "
+           "Slurm) NO crashea -- trata como 'no está en cola' y sigue al "
+           "heurístico de archivos en vez de explotar con FileNotFoundError",
+           len(_cambios2) == 1 and _cambios2[0][2] in ("FAILED", "COMPLETED"))
         # bug real 1/10: "error: couldn't chdir ... going to /tmp instead" es
         # un mensaje BENIGNO de Slurm (mounts cpu/gpu separados), no debe
         # marcar FAILED a un job que en realidad completó bien.
