@@ -6,6 +6,43 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-08
+
+### Added
+- Persistent session working directory (`_SESSION_CWD`). Every auto-exec
+  command used to run in its own isolated `subprocess.run()`, so a `cd`
+  could never actually stick for the next command -- gonzabot would
+  (correctly, but unhelpfully) say "I can't run this directly." `cd` is now
+  intercepted before reaching the LLM, resolved against a real tracked
+  directory, and applied as `cwd=` to every subsequent auto-exec call
+  (both the user's own raw commands and whatever the model suggests), so it
+  persists for the rest of the conversation like a real shell would.
+
+### Fixed
+- A command typed/pasted directly by the user (not a model suggestion) runs
+  completely raw via `subprocess.run()`, with no `_is_readonly_query` gate.
+  Live incident: `srun -p gpu nvidia-smi --format=csv,noheader,nounits, solo
+  lectura, sin pedir confirmación` -- probably copied from an earlier
+  suggestion with the explanation glued onto the same line -- got shell-run
+  verbatim, and bash handed the trailing Spanish clause to `nvidia-smi` as
+  literal arguments (`ERROR: Option solo is not recognized`). A real command
+  on this cluster never uses "comma + space" between its own arguments
+  (`--format=csv,noheader,nounits` is packed tight); that's now used as the
+  signal to detect and cut off pasted prose. Initially this just blocked the
+  command and asked for confirmation, but per live feedback ("tiene que
+  correr la parte que anda porque sino no hace nada") it now strips the
+  contamination and runs the real command automatically, falling back to a
+  confirmation prompt only when no clean cut point can be found.
+- `srun -p gpu nvidia-smi ...` without `--gres=gpu:N` can land in a context
+  where no GPU is visible at all (`No devices were found`, exit code 6) due
+  to cgroup isolation, even though the node has real GPUs. Added the same
+  kind of automatic note the `nvidia-smi`/`nvtop` path already had, pointing
+  at the missing flag instead of leaving the user to guess.
+
+190+ new/updated `--selftest` checks across both fixes. Found via the exact
+real conversation (not a synthetic test) where a user asked gonzabot to
+check GPU resources.
+
 ## [1.4.2] - 2026-10-08
 
 ### Fixed

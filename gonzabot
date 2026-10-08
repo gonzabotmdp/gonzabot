@@ -112,6 +112,14 @@ WORKFLOW_DB_PATH = DB_DIR / "workflows.db"  # mismo patron/NFS que history.db,
 # SQLite (modo rollback-journal, no WAL) sí tolera NFS, a diferencia de git.
 _USERNAME    = os.environ.get("USER", "unknown")
 MAX_CTX_MSGS = 30    # messages kept in active context window (~15 turns)
+# Feature real 8/10 (pedido de Gonzalo: "el cd no me deja"): cada comando de
+# auto-exec corre en su propio subprocess.run() aislado -- un "cd" ahí nunca
+# persiste para el siguiente comando, así que gonzabot antes lo rechazaba
+# ("no puedo ejecutar esto directamente"). Esto trackea un directorio de
+# sesión real, aplicado como cwd= a TODOS los subprocess.run de auto-exec
+# (tanto el crudo tipeado por el usuario como lo que sugiere el modelo), así
+# "cd" persiste de verdad mientras dure la conversación.
+_SESSION_CWD = os.getcwd()
 STREAM_CHUNK  = 512  # bytes per read from SSE stream
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
@@ -596,6 +604,24 @@ def _is_readonly_query(code: str) -> bool:
     return True
 
 
+_RE_CD_LINE = re.compile(r'^cd(?:\s+(\S+))?$')
+
+
+def _try_cd(target: "str | None") -> str:
+    """Resuelve y aplica un 'cd' real contra _SESSION_CWD -- ver nota en la
+    definición de _SESSION_CWD. Devuelve el mensaje a mostrar."""
+    global _SESSION_CWD
+    raw = target or "~"
+    path = os.path.expanduser(raw)
+    if not os.path.isabs(path):
+        path = os.path.join(_SESSION_CWD, path)
+    path = os.path.normpath(path)
+    if not os.path.isdir(path):
+        return f"cd: no existe el directorio '{raw}'"
+    _SESSION_CWD = path
+    return f"(directorio actual: {_SESSION_CWD})"
+
+
 def _run_readonly_query(code: str) -> str:
     """Corre una consulta YA confirmada de solo lectura, línea por línea, y
     devuelve el output real combinado. Nunca se usa con nada que no haya
@@ -605,8 +631,12 @@ def _run_readonly_query(code: str) -> str:
         ln = ln.strip()
         if not ln or ln.startswith("#"):
             continue
+        _cd_m = _RE_CD_LINE.match(ln)
+        if _cd_m:
+            out_parts.append(_try_cd(_cd_m.group(1)))
+            continue
         r = subprocess.run(ln, shell=True, capture_output=True, text=True,
-                            timeout=15)
+                            timeout=15, cwd=_SESSION_CWD)
         out_parts.append((r.stdout + r.stderr).strip())
     return "\n".join(p for p in out_parts if p) or "(sin output)"
 
@@ -637,6 +667,51 @@ _KNOWN_SAFE_BINARIES = (
 )
 _RE_BARE_COMMAND_LINE = re.compile(
     r'^(' + '|'.join(re.escape(b) for b in _KNOWN_SAFE_BINARIES) + r')\b')
+# Bug real 8/10 (reportado por Gonzalo en vivo, confirmado en el scroll crudo
+# de la shell -- no en el chat): el modelo a veces escribe el comando y su
+# propia explicación en la MISMA línea, sin fence
+# ("srun -p gpu nvidia-smi --query-gpu=...,nounits, solo lectura, sin pedir
+# confirmación"), probablemente imitando el estilo de los avisos de
+# auto-ejecución que el propio gonzabot ya le mostró antes en la conversación.
+# _extract_bare_commands tomaba la línea ENTERA (sin cortar donde termina el
+# comando real) y la mandaba tal cual a subprocess.run(shell=True) -- bash
+# le pasó ", solo lectura, sin pedir confirmación" a nvidia-smi como
+# argumentos literales ("ERROR: Option solo is not recognized", exit code 2).
+# Fix: un comando real en este cluster nunca tiene letras con tilde/ñ en sus
+# argumentos -- es una señal fuerte y genérica de que es prosa en español
+# pegada a la línea, no algo propio de UN comando puntual a parchear.
+_RE_SPANISH_PROSE = re.compile(r'[áéíóúñÁÉÍÓÚÑ]')
+
+
+def _looks_like_pasted_prose(cmd: str) -> bool:
+    """Mismo chequeo que _RE_SPANISH_PROSE pero para el OTRO camino de
+    ejecución: un comando que el USUARIO tipeó/pegó directo (ver dispatch
+    de _AUTO_RUN_CMDS más abajo), que corre tal cual sin pasar por
+    _is_readonly_query. Ignora texto DENTRO de comillas, para no tirar
+    falso positivo con un argumento real como grep "año"."""
+    sin_comillas = re.sub(r'"[^"]*"|\'[^\']*\'', '', cmd)
+    return bool(_RE_SPANISH_PROSE.search(sin_comillas))
+
+
+def _strip_pasted_prose(cmd: str) -> str:
+    """Corta donde empieza la prosa pegada en vez de cancelar todo el
+    comando (pedido de Gonzalo: "tiene que correr la parte que anda").
+    Señal: un comando real en este cluster nunca usa 'coma + espacio'
+    entre sus propios argumentos (ej. --format=csv,noheader,nounits va
+    pegado, sin espacio) -- la prosa en español casi siempre arranca justo
+    después de una coma CON espacio ("nounits, solo lectura, ..."). No
+    corta dentro de comillas, mismo criterio que _looks_like_pasted_prose."""
+    in_q = None
+    for i in range(len(cmd) - 1):
+        c = cmd[i]
+        if in_q:
+            if c == in_q:
+                in_q = None
+        elif c in "\"'":
+            in_q = c
+        elif c == "," and cmd[i + 1] == " ":
+            return cmd[:i].rstrip()
+    return cmd
 
 
 def _extract_bare_commands(reply_text: str) -> list:
@@ -651,6 +726,8 @@ def _extract_bare_commands(reply_text: str) -> list:
             in_fence = not in_fence
             continue
         if in_fence or not ln:
+            continue
+        if _RE_SPANISH_PROSE.search(ln):
             continue
         if _RE_BARE_COMMAND_LINE.match(ln) and _is_readonly_query(ln):
             out.append(ln)
@@ -3343,6 +3420,47 @@ def _selftest() -> int:
     _t("_extract_bare_commands: lo que ya está DENTRO de un bloque ``` se "
        "ignora acá (ya lo cubre _LAST_CODE_BLOCKS, no hay que duplicarlo)",
        _extract_bare_commands("```bash\nsqueue -u gonzalo\n```\n") == [])
+    _t("_extract_bare_commands: comando + explicación en español pegada en "
+       "la MISMA línea se descarta entera -- bug real 8/10, el modelo escribió "
+       "'srun -p gpu nvidia-smi ...,nounits, solo lectura, sin pedir "
+       "confirmación' sin fence y bash le pasó esa frase a nvidia-smi como "
+       "argumentos literales (confirmado en el scroll crudo de la shell: "
+       "'ERROR: Option solo is not recognized')",
+       _extract_bare_commands(
+           "srun -p gpu nvidia-smi --query-gpu=index,name,memory.used,"
+           "memory.total,utilization.gpu,temperature.gpu --format=csv,"
+           "noheader,nounits, solo lectura, sin pedir confirmación\n") == [])
+    _t("_extract_bare_commands: un comando real SIN prosa en español "
+       "pegada sigue detectándose normal (no rompimos el caso bueno; "
+       "'srun' no es un binario de la lista de líneas sueltas -- el caso "
+       "real ocurrió por el OTRO camino, ver dispatch de _AUTO_RUN_CMDS)",
+       _extract_bare_commands("ps aux | grep gonzalo\n") == ["ps aux | grep gonzalo"])
+    _t("_looks_like_pasted_prose: detecta el caso real de srun+nvidia-smi "
+       "con la frase en español pegada fuera de comillas",
+       _looks_like_pasted_prose(
+           "srun -p gpu nvidia-smi --format=csv,noheader,nounits, solo "
+           "lectura, sin pedir confirmación"))
+    _t("_looks_like_pasted_prose: NO se confunde con texto en español "
+       "DENTRO de comillas (ej. grep \"año\" real)",
+       not _looks_like_pasted_prose('grep "año" archivo.txt'))
+    _t("_strip_pasted_prose: recorta en la primera 'coma + espacio' fuera "
+       "de comillas -- un comando real en este cluster nunca la usa entre "
+       "sus propios argumentos (bug real 8/10, pedido de Gonzalo: 'tiene "
+       "que correr la parte que anda porque sino no hace nada')",
+       _strip_pasted_prose(
+           "srun -p gpu nvidia-smi --query-gpu=index,name,memory.used,"
+           "memory.total,utilization.gpu,temperature.gpu --format=csv,"
+           "noheader,nounits, solo lectura, sin pedir confirmación")
+       == "srun -p gpu nvidia-smi --query-gpu=index,name,memory.used,"
+          "memory.total,utilization.gpu,temperature.gpu --format=csv,"
+          "noheader,nounits")
+    _t("_strip_pasted_prose: no corta dentro de comillas (grep \"año\" real "
+       "queda intacto salvo lo que venga después de la coma+espacio real)",
+       _strip_pasted_prose('grep "año" archivo.txt, esto no debería pasar')
+       == 'grep "año" archivo.txt')
+    _t("_strip_pasted_prose: sin coma+espacio en todo el comando, lo deja "
+       "intacto (no hay nada seguro para recortar)",
+       _strip_pasted_prose("df -h") == "df -h")
 
     # Bug real #5 (1/10, encontrado en vivo preguntando "cuánta memoria libre
     # hay"): una fuga de razonamiento trajo una tabla de "free -h" FALSA
@@ -5897,19 +6015,40 @@ def repl(new_session: bool = False):
         _INJECT_PIPE = _re_inj.compile(r'(?<!\|)\|(?!\|)')   # pipe simple (soft: pasa al LLM)
         _first_word = _INJECT.sub("", user_input.split()[0]).lstrip("$").lower() if user_input.split() else ""
 
+        # Feature real 8/10 (pedido de Gonzalo: "el cd no me deja") -- "cd"
+        # no es un subprocess como los demás (no tiene sentido correrlo con
+        # subprocess.run, el cambio de directorio moriría con ese proceso),
+        # así que se intercepta ACÁ, directo, sin pasar por el LLM ni por
+        # _AUTO_RUN_CMDS. Actualiza _SESSION_CWD, que sí se aplica a todos
+        # los demás comandos de auto-exec de ahora en más (ver su cwd=).
+        if "\n" not in user_input and _RE_CD_LINE.match(user_input.strip()):
+            _cd_msg = _try_cd(_RE_CD_LINE.match(user_input.strip()).group(1))
+            print(_c(DIM + CYAN, f"  $ {user_input}"))
+            print(_cd_msg)
+            print()
+            continue
+
         # Bloque multilinea donde TODAS las líneas son comandos ejecutables →
         # correr secuencialmente (máx 6) en lugar de mandar al LLM como texto.
         if "\n" in user_input and not _INJECT.search(user_input):
             _ml_lines = [l.strip() for l in user_input.splitlines() if l.strip()]
             _ml_cmds  = [l for l in _ml_lines if
-                         l.split()[0].lstrip("$").lower() in _AUTO_RUN_CMDS] if _ml_lines else []
+                         l.split()[0].lstrip("$").lower() in _AUTO_RUN_CMDS
+                         or _RE_CD_LINE.match(l)] if _ml_lines else []
             if _ml_lines and len(_ml_cmds) == len(_ml_lines) and len(_ml_lines) <= 6:
                 _combined_out = []
                 for _cmd in _ml_lines:
                     print(_c(DIM, f"  $ {_cmd}"))
+                    _cd_m2 = _RE_CD_LINE.match(_cmd)
+                    if _cd_m2:
+                        _out = _try_cd(_cd_m2.group(1))
+                        print(_c(DIM, _out))
+                        print()
+                        _combined_out.append(f"$ {_cmd}\n{_out}")
+                        continue
                     try:
                         _r = subprocess.run(_cmd, shell=True, capture_output=True,
-                                            text=True, timeout=30)
+                                            text=True, timeout=30, cwd=_SESSION_CWD)
                         _out = (_r.stdout + _r.stderr).strip() or "(sin output)"
                     except subprocess.TimeoutExpired:
                         _out = "(timeout 30s)"
@@ -5946,10 +6085,38 @@ def repl(new_session: bool = False):
                 if not _yn_raw(_c(YEL, f"  ⚠ Operación destructiva: `{user_input[:60]}` — ¿continuar? [s/N] ")):
                     print(_c(DIM, "Cancelado."))
                     continue
+            # Bug real 8/10 (confirmado en vivo, scroll crudo de la shell): un
+            # comando tipeado/pegado tal cual corre SIN pasar por
+            # _is_readonly_query (esto es input directo del usuario, no una
+            # sugerencia del modelo) -- "srun -p gpu nvidia-smi
+            # ...,nounits, solo lectura, sin pedir confirmación" se mandó
+            # literal a subprocess.run, y bash le pasó la frase en español
+            # pegada al final como argumentos reales a nvidia-smi ("ERROR:
+            # Option solo is not recognized"). Probablemente una
+            # explicación copiada junto con el comando desde una sugerencia
+            # anterior. Gonzalo, en vivo: "tiene que correr la parte que
+            # anda porque sino no hace nada" -- en vez de cancelar todo,
+            # recortar donde empieza la prosa (_strip_pasted_prose) y correr
+            # la parte real. Si no se puede determinar un corte limpio, cae
+            # al y/n como red de seguridad (podría ser un grep legítimo con
+            # texto en español entre comillas).
+            elif _looks_like_pasted_prose(user_input):
+                _cleaned_cmd = _strip_pasted_prose(user_input)
+                if _cleaned_cmd and _cleaned_cmd != user_input.strip():
+                    print(_c(YEL, "  ⚠ Se coló texto en español después de este comando -- "
+                                  "corriendo solo la parte real:"))
+                    print(_c(DIM, f"    {_cleaned_cmd}"))
+                    user_input = _cleaned_cmd
+                elif not _yn_raw(_c(YEL, "  ⚠ Este comando tiene texto en español pegado fuera de "
+                                       "comillas (¿se coló una explicación junto con el comando?) "
+                                       "— ¿correrlo tal cual? [s/N] ")):
+                    print(_c(DIM, "Cancelado."))
+                    continue
             print(_c(DIM + CYAN, f"  $ {user_input}"))
             try:
                 _ar = subprocess.run(
-                    user_input, shell=True, capture_output=True, text=True, timeout=30
+                    user_input, shell=True, capture_output=True, text=True, timeout=30,
+                    cwd=_SESSION_CWD
                 )
                 _ar_out = (_ar.stdout + _ar.stderr).strip() or "(sin output)"
             except subprocess.TimeoutExpired:
@@ -5982,6 +6149,15 @@ def repl(new_session: bool = False):
                 _ar_notes.append("NOTA: sacct/sstat requieren acceso a slurmdbd. En ql-front puede fallar; intentá desde ql-head.")
             elif _first_word in ("nvidia-smi", "nvtop") and ("not found" in _ar_out or "No such" in _ar_out or _ar_out == "(sin output)"):
                 _ar_notes.append("NOTA: nvidia-smi/nvtop no está disponible en ql-front (nodo de login, sin GPU). Para ver GPUs: ssh gpu-01 nvidia-smi  o  srun -p gpu --gres=gpu:1 nvidia-smi")
+            # Bug real 8/10 (visto en vivo, mismo caso que arriba pero al
+            # revés): "srun -p gpu nvidia-smi ..." SIN --gres=gpu:N puede
+            # caer en un contexto sin GPUs visibles por aislamiento de
+            # cgroups ("No devices were found", exit code 6) aunque el nodo
+            # sí tenga GPUs reales -- falta pedirlas explícitamente.
+            elif _first_word == "srun" and "nvidia-smi" in user_input and "--gres" not in user_input and "No devices were found" in _ar_out:
+                _ar_notes.append("NOTA: 'srun -p gpu nvidia-smi' sin --gres=gpu:N puede no ver "
+                                 "ninguna GPU por aislamiento de cgroups, aunque el nodo sí "
+                                 "tenga. Agregá --gres=gpu:1 (o la cantidad que corresponda).")
             elif _first_word == "ping":
                 if "unknown host" in _ar_out or "Name or service not known" in _ar_out or "cannot resolve" in _ar_out.lower():
                     _ar_notes.append("NOTA: host no encontrado — verificá el nombre o la conectividad DNS.")
