@@ -32,3 +32,12 @@ masurca@4.1.4: spack load --sh masurca (bare, resuelve solo). Ensamblado alterna
   headers vía -include en CXXFLAGS/CFLAGS + renombrar una variable global que chocaba con
   std::prev) ya está en el package.py local, documentado con el historial completo — NO
   hace falta reinstalar ni reinvestigar si alguien más lo pide, ya anda.
+  Segundo bug real DISTINTO, encontrado por Alejandro Ales corriendo de verdad (3 jobs
+  completos + reruns, siempre fallaba en la misma etapa de unitigging): segfault en
+  OverlapCache::computeErateMaps() — para el primer índice (i=0), log(0) da -infinity, y
+  castear eso a entero sin signo es comportamiento indefinido que produce un índice basura
+  usado para indexar un array, heap overflow. Reproducido IDÉNTICO con AOCC y gcc14 (no es
+  cosa del compilador). YA ARREGLADO vía patch() en el package.py local (caso especial para
+  i=0) — hash real reconstruido: masurca@4.1.4/2je3oxw2 (AOCC). Reportado upstream:
+  github.com/alekseyzimin/masurca/issues/371. Si un assemblado con MaSuRCA sigue fallando en
+  unitigging con un hash DISTINTO a este, puede ser el mismo bug en un build viejo sin el fix.

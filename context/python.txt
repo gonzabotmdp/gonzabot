@@ -180,6 +180,13 @@ py-mpi4py 4.1.1 (hash /6ugxl7y — usa MPICH, NO OpenMPI):
 
 NOTA Python: pandas/scipy/numpy/matplotlib accesibles via eval $(spack load --sh py-dask) o py-ase etc. python 3.12 YA NO EXISTE.
 
+py-netcdf4 1.7.2: SIEMPRE ~mpi (sin MPI) — es un require: duro en packages.yaml, no una
+  preferencia, +mpi NI SIQUIERA CONCRETIZA. Bug real encontrado por softadm: con +mpi (el
+  default del paquete), solo hacer "import netCDF4" dispara MPI_Init internamente y CUELGA
+  INDEFINIDO sin un launcher MPI real (mismo patrón de fondo que UCX+verbs, ya documentado en
+  otra parte). Si alguien pide netCDF4 con soporte MPI real, avisar que no está disponible por
+  este bug, no sugerir forzar +mpi.
+
 JAX: NO INSTALADO. Avisar al usuario que no está disponible, no inventar el comando.
 
 JupyterLab: NO INSTALADO (ausente del store). Avisar al usuario que no está disponible antes

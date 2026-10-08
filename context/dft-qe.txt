@@ -65,3 +65,11 @@ Wannier90 3.1.0: ⚠ %gcc@14.2.0, sin AOCC — REGRESIÓN REAL CONFIRMADA (softa
   que Elk: había migrado a AOCC en julio, se revirtió después, causa desconocida, sin rebuild en
   curso. "spack load wannier90" bare YA RESUELVE SOLO ahora (único hash /lxfna7w) — mismo aviso
   que elk si vuelve a dar ambigüedad. wannier90.x seedname (serial). Post-proceso QE/Abinit.
+
+TB2J 0.9.22 (pedido real de Alejandro Ales, instalado por softadm): calcula parámetros de
+  intercambio magnético (Heisenberg J) a partir de un cálculo DFT ya corrido (QE/VASP/Siesta).
+  "spack load py-tb2j" bare resuelve solo (todos sus hashes son únicos hoy, sin ambigüedad):
+  py-tb2j /phybizj, py-hamiltonio /ftxvxz2, py-sympair /hc64j7h, py-supercellmap /jdohrch,
+  py-sisl /6yvteso. Uso típico: TB2J.py --posfile POSCAR --prefix siesta (o --qe para QE) y
+  después run_Jx.py para extraer los J. No confundir con TB2J tight-binding genérico — este
+  paquete puntual es para post-proceso de intercambio magnético, no para un cálculo DFT en sí.
