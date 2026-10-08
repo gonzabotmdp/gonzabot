@@ -6,6 +6,45 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-10-08
+
+### Fixed
+- `VLLM_BASE` was hardcoded to `gpu-01` for both the health check and the real
+  chat-completion requests. Since inference can run on either GPU chassis
+  (gpu-01 or gpu-02, depending on scheduling), a prod session would sometimes
+  wait the full 5-minute startup timeout and report "Timeout esperando el
+  servicio" even though the real service had come up healthy in under a
+  minute -- just on the other node. Reported live ("ayer no cargaba"),
+  confirmed from the actual job logs: the two sessions that failed landed on
+  gpu-02, the two that worked landed on gpu-01. New `_resolve_vllm_host()`
+  asks `squeue` (the controller, not slurmdbd) for the real running node
+  before every health check, and updates `VLLM_BASE` in place once it
+  confirms the service is healthy there -- so chat requests after that also
+  go to the right place, not just the health check. No behavior change in
+  dev mode.
+- `/run` (no explicit `#REF` number) always took the literal last code block
+  in a response, even when that block was just "how you'd run this"
+  (`chmod +x script.sh && sbatch script.sh`) rather than the sbatch itself,
+  which could sit one block earlier in the same response. Now searches
+  backward for the last block that actually looks like a real sbatch
+  (reusing `_looks_like_real_sbatch` from the 1/10 fix) before giving up.
+- A generated script using `python3 << EOF` with `import numpy` (or
+  pandas/scipy/matplotlib) sometimes skipped activating any environment at
+  all -- `python.txt` documents the right `numpy.env` path, but the model
+  doesn't always follow it (confirmed with two runs of the identical
+  request: one included it, one didn't). The job would then fail with
+  `ModuleNotFoundError`, confirmed to not be a gonzabot transmission bug by
+  reproducing the exact same script by hand. New `_fix_missing_python_env()`
+  in the `_fix_sbatch` postprocessor detects this pattern (no existing
+  `source .../envs/*.env`, `spack load`, or venv/conda activation) and
+  injects the right `source` line before the `python3`/`python` invocation.
+
+All three found and fixed using a live test case ("multiply two random 10x10
+matrices on a node, save all three in a PDF") run end-to-end 3 times in a
+row until it produced a real, independently verified PDF (`np.allclose`
+against the actual `.npy` arrays saved by the job, not just "the job exited
+0"). 190/190 `--selftest`.
+
 ## [1.4.1] - 2026-10-04
 
 ### Fixed

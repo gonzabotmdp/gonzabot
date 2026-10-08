@@ -1096,10 +1096,38 @@ def _yn_line(prompt_text: str) -> bool:
     return line in ("s", "y", "si", "sí", "yes")
 
 
+def _resolve_vllm_host() -> str:
+    """Bug real 8/10 (Gonzalo: "ayer no cargaba"): desde que inference corre
+    en cualquiera de los dos chasis (gpu-01 O gpu-02, fix 1/10), VLLM_BASE
+    seguia hardcodeado a gpu-01 en el health check Y en las requests reales
+    de chat. Cuando Slurm agendaba el job real en gpu-02 (le paso a los
+    jobs 17546/17549 el 6/10, confirmado en sus .err: "JOB ... ON gpu-02"),
+    el cliente esperaba salud en el nodo EQUIVOCADO los 5 minutos completos
+    y tiraba timeout -- aunque el servicio real arrancaba bien y rapido
+    (<1 min) en el otro nodo. sacct estaba caido ese dia (bug ya conocido,
+    ver otra nota en este archivo), el unico rastro quedo en el .err del
+    job mismo. Por eso se usa squeue (al controlador, no a slurmdbd) para
+    encontrar el nodo real antes de cada chequeo de salud."""
+    if _DEV_MODE:
+        return urlparse(VLLM_BASE).netloc
+    try:
+        out = subprocess.run(
+            ["squeue", "-h", "-n", "vllm-service", "-t", "RUNNING", "-o", "%N"],
+            capture_output=True, text=True, timeout=3).stdout.strip()
+        node = out.splitlines()[0].strip() if out else ""
+        if node:
+            return f"{node}:8000"
+    except Exception:
+        pass
+    return urlparse(VLLM_BASE).netloc
+
+
 def _check_online() -> bool:
-    base = VLLM_BASE.rsplit('/v1', 1)[0]
+    global VLLM_BASE
+    base = f"http://{_resolve_vllm_host()}"
     try:
         with urlopen(Request(f"{base}/health", method="GET"), timeout=2):
+            VLLM_BASE = f"{base}/v1"
             return True
     except Exception:
         return False
@@ -2446,6 +2474,42 @@ def _fix_sbatch(text: str) -> str:
             out.append(ln)  # sin alias conocido → lo atrapa el lint
         return '\n'.join(out)
 
+    _RE_NEEDS_NUMPY_ENV = _re.compile(
+        r'^\s*(?:import|from)\s+(?:numpy|pandas|scipy|matplotlib)\b', _re.M)
+    # [ \t]* y no \s*: \s incluye \n, así que con re.M matcheaba desde el
+    # renglón VACÍO anterior (bug encontrado en el propio selftest 8/10) y
+    # la línea insertada terminaba después del salto en blanco, no antes
+    # de "python3" como se buscaba.
+    _RE_PYTHON_INVOKE = _re.compile(r'^([ \t]*)python3?\b', _re.M)
+    _RE_HAS_PY_ENV_SETUP = _re.compile(
+        r'^\s*source\s+\S*/envs/\S+\.env\b|'
+        r'^\s*spack\s+load\b.*(?:python|numpy|scipy|matplotlib|pandas)|'
+        r'^\s*\$SPACK\b|^\s*SPACK=|'
+        r'conda\s+activate|source\s+\S*/bin/activate', _re.M | _re.I)
+
+    def _fix_missing_python_env(block: str) -> str:
+        """Bug real 8/10 (caso real: multiplicacion_matrices.sbatch, job 17750):
+        el modelo genera "python3 << EOF\\nimport numpy as np..." sin activar
+        NINGÚN entorno antes -- el python3 del PATH base no tiene numpy, el
+        job falla con ModuleNotFoundError lejos de donde se podría arreglar.
+        python.txt YA documenta la ruta correcta (numpy.env) pero el modelo
+        no la sigue siempre (variabilidad real, confirmada con 2 corridas
+        del mismo pedido: una la incluyó, la otra no) -- atraparlo
+        determinísticamente en vez de confiar en que el prompt alcance
+        siempre, mismo criterio que el resto de este postprocesador."""
+        if not _RE_NEEDS_NUMPY_ENV.search(block):
+            return block
+        if _RE_HAS_PY_ENV_SETUP.search(block):
+            return block
+        m = _RE_PYTHON_INVOKE.search(block)
+        if not m:
+            return block
+        indent = m.group(1)
+        insert_at = m.start()
+        return (block[:insert_at]
+                + f"{indent}source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\n"
+                + block[insert_at:])
+
     def _fix_latex_heredoc(block: str) -> str:
         """Fix \\\\cmd → \\cmd in LaTeX heredoc sections targeting .tex files."""
         lines = block.split('\n')
@@ -2481,6 +2545,7 @@ def _fix_sbatch(text: str) -> str:
             body = _fix_heredoc_quotes(body)
             body = _fix_dollar_escapes(body)
             body = _fix_module_load(body)
+            body = _fix_missing_python_env(body)
             body = _fix_latex_heredoc(body)
         if is_bash or is_lmp:
             warns = _lint_lammps(body)
@@ -2578,8 +2643,22 @@ def _detect_filename(lang: str, body: str, title: str) -> "str | None":
     return None
 
 
+# Bug real 3/10 (caso real: matrices_aleatorias.sbatch hacía
+# "cp .../generate_matrices.py ." pero /saveall guardaba el script
+# compañero como "ref1.py" genérico -- el job fallaba en el primer "cp" de
+# verdad, antes de llegar al cálculo). Busca el nombre que un bloque
+# hermano (típicamente el sbatch) ya referencia explícitamente via "cp",
+# para usarlo en vez de inventar uno genérico.
+_RE_CP_SRC_FILE = re.compile(r'(?m)^\s*cp\s+\S*?([\w.\-]+\.\w+)\s+\S+\s*$')
+
+
 def _saveall_names(blocks: "list[tuple[str, str, str]]") -> "list[str]":
-    """Nombre final por bloque: detectado, o refN.ext por lenguaje; sin duplicados."""
+    """Nombre final por bloque: detectado, referenciado por un bloque hermano
+    (vía "cp"), o refN.ext por lenguaje; sin duplicados."""
+    _referenced_by_ext: dict[str, str] = {}
+    for _, _body, _ in blocks:
+        for _fname in _RE_CP_SRC_FILE.findall(_body):
+            _referenced_by_ext.setdefault(_fname.rpartition(".")[2], _fname)
     names: list[str] = []
     for i, (lang, body, title) in enumerate(blocks):
         name = _detect_filename(lang, body, title)
@@ -2589,7 +2668,7 @@ def _saveall_names(blocks: "list[tuple[str, str, str]]") -> "list[str]":
                 ext = "sbatch"
             if "__global__" in body[:3000]:
                 ext = "cu"
-            name = f"ref{i+1}.{ext}"
+            name = _referenced_by_ext.get(ext) or f"ref{i+1}.{ext}"
         base = name
         n = 2
         while name in names:
@@ -2713,6 +2792,23 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("module load lammps\nlmp -in in.lj"))
     _t("module load lammps (sin alias) → queda para el lint",
        "⚠" in r and "no existe en este cluster" in r)
+
+    # Bug real 8/10 (caso real: multiplicacion_matrices.sbatch, job 17750):
+    # "python3 << EOF" con "import numpy" pero SIN ningún source/spack load
+    # antes -- ModuleNotFoundError en el job, lejos de la causa real.
+    r = _fix_sbatch(B.format(
+        "python3 << EOF\nimport numpy as np\nprint(np.zeros(3))\nEOF"))
+    _t("python3 heredoc con 'import numpy' sin entorno activado → se "
+       "inyecta 'source .../numpy.env' antes del python3 (bug real 8/10)",
+       "source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\npython3 << EOF" in r)
+    r = _fix_sbatch(B.format(
+        "source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\n"
+        "python3 << EOF\nimport numpy as np\nEOF"))
+    _t("si YA está sourceado numpy.env, no se duplica la línea",
+       r.count("numpy.env") == 1)
+    r = _fix_sbatch(B.format("python3 script_sin_numpy.py"))
+    _t("sin ningún import numpy/pandas/scipy/matplotlib, no se toca nada",
+       "numpy.env" not in r)
     r = _fix_sbatch(B.format("SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\nmodule load octave\noctave s.m"))
     _t("module load con SPACK ya definido → no lo duplica",
        r.count("SPACK=/apps/local/spack/spack-2026b/spack/bin/spack") == 1)
@@ -2961,6 +3057,22 @@ def _selftest() -> int:
     ])
     _t("saveall_names: detectados + fallback + sin duplicados",
        _names == ["wave.cu", "compile.sbatch", "ref3.py", "ref4.py"])
+
+    # Bug real 3/10 (caso real matrices_aleatorias.sbatch): el bloque
+    # sbatch hace "cp .../generate_matrices.py ." pero el script compañero
+    # no tiene nombre propio detectable por título -- debe usar el nombre
+    # referenciado por el "cp", no "ref1.py" genérico.
+    _names2 = _saveall_names([
+        ("python", "import numpy as np\nprint(1)", ""),
+        ("bash", "#!/bin/bash\n#SBATCH --job-name=matrices\n"
+                 "cp /data/home/$USER/generate_matrices.py .\n", ""),
+    ])
+    _t("saveall_names: usa el nombre referenciado por 'cp' en un bloque "
+       "hermano en vez de refN.ext genérico (bug real 3/10)",
+       _names2 == ["generate_matrices.py", "matrices.sbatch"])
+    _t("saveall_names: sin ningún 'cp' que referencie nada, sigue usando "
+       "refN.ext como antes (no rompe el caso sin cross-reference)",
+       _saveall_names([("python", "print(1)", "")]) == ["ref1.py"])
 
     r = _dedent_code_block(
         "   #!/bin/bash\n"
@@ -3294,6 +3406,41 @@ def _selftest() -> int:
     _t("_DEV_MODE (por puerto): 8001 sigue siendo dev sin importar el nodo",
        urlparse("http://gpu-01:8001/v1").port != 8000)
 
+    # Bug real 8/10 (Gonzalo: "ayer no cargaba") -- _resolve_vllm_host()
+    # descubre el nodo real via squeue en vez de asumir gpu-01 siempre.
+    import types as _types_host
+    global _DEV_MODE
+    _dev_mode_real = _DEV_MODE
+    _orig_run_host = subprocess.run
+    try:
+        _DEV_MODE = False
+        subprocess.run = lambda *a, **k: _types_host.SimpleNamespace(stdout="gpu-02\n")
+        _t("_resolve_vllm_host: en prod, usa el nodo real de squeue (gpu-02), "
+           "no el hardcodeado gpu-01 -- bug real 6/10, jobs 17546/17549 "
+           "corrieron en gpu-02 y el cliente esperaba salud en gpu-01",
+           _resolve_vllm_host() == "gpu-02:8000")
+
+        subprocess.run = lambda *a, **k: _types_host.SimpleNamespace(stdout="")
+        _t("_resolve_vllm_host: si squeue no devuelve nada (job todavía no "
+           "corriendo), cae al host configurado en VLLM_BASE sin romper",
+           _resolve_vllm_host() == urlparse(VLLM_BASE).netloc)
+
+        def _raise_timeout(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="squeue", timeout=3)
+        subprocess.run = _raise_timeout
+        _t("_resolve_vllm_host: si squeue tarda/falla, NO crashea -- cae al "
+           "host configurado igual que el caso de arriba",
+           _resolve_vllm_host() == urlparse(VLLM_BASE).netloc)
+
+        _DEV_MODE = True
+        subprocess.run = lambda *a, **k: _types_host.SimpleNamespace(stdout="gpu-02\n")
+        _t("_resolve_vllm_host: en dev NUNCA consulta squeue -- devuelve el "
+           "host configurado tal cual, aunque squeue dijera otra cosa",
+           _resolve_vllm_host() == urlparse(VLLM_BASE).netloc)
+    finally:
+        _DEV_MODE = _dev_mode_real
+        subprocess.run = _orig_run_host
+
     # Bug real (1/10, prueba end-to-end "multiplicación de matrices... cuando
     # termine armame un latex"): el trigger de /workflow eligió un bloque
     # "echo '...#SBATCH...'" (una demo trunca, no un script real) en vez del
@@ -3311,6 +3458,19 @@ def _selftest() -> int:
     _t("_looks_like_real_sbatch: sin shebang como primera línea, no matchea "
        "aunque tenga #SBATCH más abajo",
        not _looks_like_real_sbatch("# comentario\n#SBATCH --partition=cpu"))
+
+    # Bug real 8/10 (caso real: pedido de multiplicación de matrices): /run
+    # sin número buscaba hacia atrás el último bloque que REALMENTE parezca
+    # sbatch, no el último literal (que puede ser solo "cómo correrlo").
+    _rn_blocks_test = [
+        ("bash", "#!/bin/bash\n#SBATCH --job-name=x\necho real", "sbatch real"),
+        ("bash", "chmod +x script.sh\nsbatch script.sh", "cómo correrlo"),
+    ]
+    _t("/run (patrón real usado en el handler): busca hacia atrás el último "
+       "bloque con #SBATCH real, no se resigna al último literal si no lo es",
+       next((b for b in reversed(_rn_blocks_test)
+             if _looks_like_real_sbatch(b[1])),
+            _rn_blocks_test[-1])[2] == "sbatch real")
 
     # Bug real #6 (1/10, misma prueba end-to-end): un bloque ```python real
     # (import numpy...) se auto-ejecutó como shell porque el loop de
@@ -3600,6 +3760,15 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
     # en silencio, para poder rescatarlo si "content" termina totalmente vacío --
     # nunca se muestra en vivo, así no reintroduce la fuga que esto reemplaza.
     _reasoning_fallback_buf: list[str] = []
+    # Bug real 3/10 (heredoc truncado a mitad de script, SyntaxError en el
+    # job): el stream SIEMPRE trae "finish_reason" en el ultimo chunk real
+    # ("stop"=terminó solo, "length"=lo cortó el límite de max_tokens) pero
+    # nunca se leía -- un corte por longitud pasaba silencioso hasta que el
+    # script roto fallaba después, lejos de la causa real. Se guarda en una
+    # lista de 1 elemento (no una var simple) porque el chequeo vive adentro
+    # del loop de parseo, que está en un try/finally separado de donde se
+    # usa el valor más abajo.
+    _finish_reason: list[str | None] = [None]
     _lv: list = [None, None]   # [live_instance, current_RichText]
     if _console is not None and not silent:
         _lv[1] = _RichText()
@@ -3758,7 +3927,10 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                 if line.startswith(b"data: "):
                     try:
                         obj = json.loads(line[6:])
-                        delta = obj["choices"][0]["delta"]
+                        _choice0 = obj["choices"][0]
+                        delta = _choice0["delta"]
+                        if _choice0.get("finish_reason"):
+                            _finish_reason[0] = _choice0["finish_reason"]
                         token = delta.get("content", "").replace("\x00", "")
                         _r_token = (delta.get("reasoning")
                                     or delta.get("reasoning_content") or "")
@@ -3892,6 +4064,16 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
         elif _console is None:
             print()  # newline after streaming (live mode no lo necesita)
     text = "".join(full_text)
+
+    # Bug real 3/10: una respuesta cortada por max_tokens a mitad de un
+    # bloque de código generaba un script roto (heredoc sin cerrar,
+    # paréntesis sin cerrar) que recién fallaba al someterlo, lejos de la
+    # causa real. Avisar ACÁ, apenas se detecta, en vez de dejar que /run
+    # lo descubra después con un error de sintaxis confuso.
+    if not silent and not user_aborted.is_set() and _finish_reason[0] == "length":
+        print(_c(YEL, " ⚠ La respuesta se cortó por límite de longitud -- si hay un "
+                       "bloque de código, puede estar incompleto. Pedí \"continuá\" "
+                       "o acotá el pedido antes de /run."))
 
     # Detectar garbage output: muchos chars repetidos o nulos
     def _is_garbage(t: str) -> bool:
@@ -4461,7 +4643,21 @@ def repl(new_session: bool = False):
                         continue
                     _rn_block = _LAST_CODE_BLOCKS[_rn_ref - 1]
                 else:
-                    _rn_block = _LAST_CODE_BLOCKS[-1]   # "el último" generado
+                    # Bug real 8/10 (caso real: pedido de multiplicación de
+                    # matrices): "el último generado" tomaba literalmente el
+                    # ÚLTIMO bloque de la respuesta, aunque fuera solo "cómo
+                    # lo vas a correr" (ej. "chmod +x script.sh && sbatch
+                    # script.sh") y el sbatch real estuviera en un bloque
+                    # ANTERIOR -- /run fallaba con "no tiene #SBATCH" a pesar
+                    # de que sí había un sbatch real más arriba en la misma
+                    # respuesta. Buscar hacia atrás el último bloque que
+                    # REALMENTE parezca un sbatch (mismo chequeo ya usado
+                    # para /workflow, no una substring cruda) antes de
+                    # resignarse al último literal.
+                    _rn_block = next(
+                        (b for b in reversed(_LAST_CODE_BLOCKS)
+                         if _looks_like_real_sbatch(b[1])),
+                        _LAST_CODE_BLOCKS[-1])
                 _rn_lang, _rn_code, _rn_title = _rn_block
                 if "#SBATCH" not in _rn_code:
                     print(_c(YEL, f"El bloque elegido ({_rn_title or _rn_lang}) no tiene "
@@ -5930,7 +6126,13 @@ def repl(new_session: bool = False):
 
         # Calcular max_tokens según la cantidad de palabras/páginas solicitadas
         import re as _re_wc
-        _max_tok = 3000
+        # Bug real 3/10: el piso de 3000 alcanzaba para prosa corta pero no
+        # para scripts con boilerplate real (ej. reportlab con varias tablas)
+        # cuando el pedido no menciona "palabras"/"páginas" -- se cortaba a
+        # mitad del código. Contexto real tiene 131072 tokens de margen
+        # (ver vllm-service.sbatch), subir el piso no cuesta nada salvo que
+        # el modelo decida usarlo.
+        _max_tok = 6000
         _wc = _re_wc.search(r'(\d[\d.]*)\s*(?:palabras?|words?)', user_input.lower())
         _pg = _re_wc.search(r'(\d[\d.]*)\s*(?:páginas?|pages?|hojas?)', user_input.lower())
         if _wc:
