@@ -31,6 +31,7 @@ jobs:
           sudo touch /apps/local/spack/spack-2026b/spack/bin/spack
           sudo chmod +x /apps/local/spack/spack-2026b/spack/bin/spack
           sudo touch /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env
+          sudo touch /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env
           sudo chmod -R a+rw /apps/local /mnt/cpu-data
 
       - name: Run selftest

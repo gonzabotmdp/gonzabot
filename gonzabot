@@ -2805,7 +2805,7 @@ def _selftest() -> int:
         "source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\n"
         "python3 << EOF\nimport numpy as np\nEOF"))
     _t("si YA está sourceado numpy.env, no se duplica la línea",
-       r.count("numpy.env") == 1)
+       r.count("source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env") == 1)
     r = _fix_sbatch(B.format("python3 script_sin_numpy.py"))
     _t("sin ningún import numpy/pandas/scipy/matplotlib, no se toca nada",
        "numpy.env" not in r)
