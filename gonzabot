@@ -367,6 +367,99 @@ def _submit_sbatch_text(sb_text: str) -> "tuple[bool, str]":
             pass
 
 
+_LAST_JOB_PROJECT: "list[tuple[str,str,str]]" = []
+
+_RE_SUBMIT_NOW = re.compile(
+    r'^\s*(?:dale[,.! ]*|ok[,.! ]*|listo[,.! ]*)?'
+    r'(?:mand[aá]|envi[aá]|env[ií]a|somet[eé]|lanz[aá]|encol[aá]|pon[eé]|corr[eé]|ejecut[aá])(?:lo|la|los|las)?'
+    r'(?:\s+(?:ya|ahora|nom[aá]s|ahora\s+mismo|a\s+la\s+cola|en\s+la\s+cola|a\s+correr|a\s+slurm|al\s+cluster))*'
+    r'\s*[.!]*\s*$', re.IGNORECASE)
+
+_RE_SUBMIT_IN_REQUEST = re.compile(
+    r'\b(?:mand[aá]|envi[aá]|env[ií]a|somet[eé]|lanz[aá]|encol[aá]|pon[eé])(?:lo|la|los|las)?\b'
+    r'[^.\n]{0,40}\b(?:cola|slurm|cluster)\b', re.IGNORECASE)
+
+
+def _project_blocks(blocks: "list[tuple[str,str,str]]") -> "list[tuple[str,str,str]]":
+    """Bloques que son archivos del trabajo (descarta los que solo dicen cómo
+    lanzarlo: 'sbatch x.sh', 'chmod +x x.sh', 'squeue ...')."""
+    keep = []
+    for b in blocks:
+        lines = [ln for ln in b[1].strip().splitlines() if ln.strip() and not ln.strip().startswith("#")]
+        if lines and len(lines) <= 3 and all(
+                ln.split()[0] in ("sbatch", "chmod", "squeue", "cd", "./") or ln.startswith("./")
+                for ln in lines):
+            continue
+        keep.append(b)
+    return keep
+
+
+_RE_CD_WORKDIR = re.compile(r'(?m)^[^\n#]*\bcd\s+"?\$\{?WORKDIR\}?"?[^\n]*$')
+
+
+def _inject_sibling_copies(sb_text: str, sibling_names: "list[str]") -> str:
+    """Si el sbatch hace 'cd $WORKDIR' y usa archivos hermanos (input, .py) que
+    no crea ni copia él mismo, agrega 'cp $SLURM_SUBMIT_DIR/<archivo> .' justo
+    después del cd (gonzabot los guardó en la carpeta del envío)."""
+    m = _RE_CD_WORKDIR.search(sb_text)
+    if not m:
+        return sb_text
+    cps = []
+    for n in sibling_names:
+        q = re.escape(n)
+        if (re.search(r'(?<![\w/.\-])' + q + r'(?![\w])', sb_text)
+                and not re.search(r'>\s*\S*' + q, sb_text)
+                and not re.search(r'\bcp\b[^\n]*' + q, sb_text)):
+            cps.append(f'cp "$SLURM_SUBMIT_DIR"/{n} .')
+    if not cps:
+        return sb_text
+    return sb_text[:m.end()] + "\n" + "\n".join(cps) + sb_text[m.end():]
+
+
+def _submit_project(blocks: "list[tuple[str,str,str]]") -> "tuple[bool, str, Path | None]":
+    """Guarda TODOS los archivos de la respuesta en ~/gonzabot-jobs/<fecha>/ y
+    somete el sbatch desde ahí (así $SLURM_SUBMIT_DIR contiene el input)."""
+    files = _project_blocks(blocks)
+    sb_idx = next((i for i in range(len(files) - 1, -1, -1) if _looks_like_real_sbatch(files[i][1])), None)
+    if sb_idx is None:
+        return (False, "Ningún bloque tiene #SBATCH, no hay nada para someter.", None)
+    names = _saveall_names(files)
+    d = Path.home() / "gonzabot-jobs" / datetime.now().strftime("%Y%m%d-%H%M%S")
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        _sibs = [n for i, n in enumerate(names) if i != sb_idx]
+        for i, ((_l, body, _t2), n) in enumerate(zip(files, names)):
+            if i == sb_idx:
+                body = _inject_sibling_copies(body, _sibs)
+            (d / n).write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
+        r = subprocess.run(["sbatch", names[sb_idx]], capture_output=True, text=True, cwd=str(d))
+    except FileNotFoundError:
+        return (False, "sbatch no disponible en este nodo.", d)
+    except OSError as e:
+        return (False, f"No pude preparar {d}: {e}", d)
+    return (r.returncode == 0, (r.stdout.strip() or r.stderr.strip()), d)
+
+
+def _offer_submit_project(blocks: "list[tuple[str,str,str]]") -> "str | None":
+    files = _project_blocks(blocks)
+    if not any(_looks_like_real_sbatch(b[1]) for b in files):
+        print(_c(YEL, "  No hay ningún sbatch generado en esta sesión para mandar a la cola."))
+        return None
+    names = _saveall_names(files)
+    print(_c(BOLD, "\n  Voy a guardar estos archivos en ~/gonzabot-jobs/<fecha>/ y someter el sbatch:"))
+    for n in names:
+        print(f"    • {n}")
+    if not _yn_raw(_c(BOLD, "  ¿Lo mando a la cola? [s/N]: ")):
+        print(_c(DIM, "  Cancelado."))
+        return None
+    ok, out, d = _submit_project(files)
+    print(_c(GRN if ok else RED, "  " + out))
+    if ok and d:
+        print(_c(DIM, f"  Archivos y resultados de este envío: {d}  ·  seguimiento: squeue -u $USER"))
+        return f"[gonzabot sometió {', '.join(names)} a la cola: {out}. Carpeta de trabajo: {d}]"
+    return None
+
+
 # ── Workflows persistentes ("gonzabot v2", 1/10) ──────────────────────────────
 # Pedido explícito de Gonzalo: que gonzabot reconozca en lenguaje natural
 # (sin comando especial) cuando un pedido implica varios pasos dependientes
@@ -586,6 +679,20 @@ _RE_DANGEROUS_CMD = re.compile(
     r')\b', re.IGNORECASE)
 
 
+_SHELL_BUILTINS = {"cd", "echo", "pwd", "type", "ulimit", "umask", "true", "false", "test", "["}
+
+
+def _first_word_is_command(segment: str) -> bool:
+    """False si la primera palabra no es un ejecutable real ni un builtin: un
+    input de LAMMPS (units, run, fix...) o prosa marcada como bash no es shell
+    y no debe auto-ejecutarse."""
+    words = segment.strip().split()
+    if not words:
+        return True
+    w = words[0]
+    return w in _SHELL_BUILTINS or shutil.which(w) is not None
+
+
 def _is_readonly_query(code: str) -> bool:
     """Nombre historico (ver comentario arriba) -- hoy es en realidad
     'es seguro auto-ejecutar sin pedir confirmacion', decidido por
@@ -600,6 +707,8 @@ def _is_readonly_query(code: str) -> bool:
             return False
         for segment in ln.split("|"):
             if _RE_DANGEROUS_CMD.match(segment.strip()):
+                return False
+            if not _first_word_is_command(segment):
                 return False
     return True
 
@@ -3464,13 +3573,16 @@ def _selftest() -> int:
     # usa tus buenas prácticas"): estos casos no estaban en la allowlist
     # vieja y antes NUNCA se auto-ejecutaban -- ahora sí, sin tener que
     # nombrarlos uno por uno, porque no matchean ningún patrón peligroso.
-    _t("_is_readonly_query (denylist): cat/ls/grep/find/df/du/ps/nvidia-smi "
+    _t("_is_readonly_query (denylist): cat/ls/grep/find/df/du/ps "
        "ahora corren solos, sin haber sido nombrados nunca en una allowlist",
        all(_is_readonly_query(c) for c in
            ("cat /etc/hostname", "ls -la /data/home", "grep -r foo .",
             "find . -name '*.sh'", "df -h", "du -sh .", "ps aux",
-            "nvidia-smi", "which python3", "git status", "git log",
+            "which python3", "git status", "git log",
             "git diff")))
+    _t("_is_readonly_query: un input de LAMMPS marcado bash NO se auto-ejecuta "
+       "(primera palabra no es un comando real)",
+       not _is_readonly_query("units metal\nlattice fcc 3.615\nrun 600000"))
     _t("_is_readonly_query (denylist): git push/commit SÍ mutan, se rechazan",
        not _is_readonly_query("git push") and not _is_readonly_query("git commit -m x"))
     _t("_is_readonly_query (denylist): spack install/load y pip SÍ mutan, se rechazan",
@@ -3621,6 +3733,46 @@ def _selftest() -> int:
     _t("_DEV_MODE (por puerto, no por host): gpu-02:8000 es PROD igual que "
        "gpu-01:8000 -- antes del fix, el host distinto lo marcaba como dev",
        urlparse("http://gpu-02:8000/v1").port == 8000)
+    _THINK_PREFILL_CACHE.clear()
+    _THINK_PREFILL_CACHE[VLLM_BASE] = False
+    def _tf_run(chunks):
+        f = _ThinkFilter(); c = r = ""
+        for ch in chunks:
+            a, b = f.feed(ch); c += a; r += b
+        a, b = f.flush(); return c + a, r + b
+    _t("_ThinkFilter: ' <think>plan</think> Respuesta' en trozos -> razonamiento aparte",
+       _tf_run([" <th", "ink>pl", "an</thi", "nk>\nResp", "uesta"]) == ("Respuesta", "plan"))
+    _t("_ThinkFilter: texto normal pasa intacto, incluso corto",
+       _tf_run(["Hola"]) == ("Hola", "") and _tf_run(["Aquí ", "va"]) == ("Aquí va", ""))
+    _t("_ThinkFilter: <think> sin cerrar -> todo razonamiento, nada de contenido",
+       _tf_run(["<think>sigo pensando"]) == ("", "sigo pensando"))
+    _t("_RE_SUBMIT_NOW: 'mandalo a la cola', 'sometelo', 'dale, lanzalo ya' sí; preguntas y pedidos nuevos no",
+       all(_RE_SUBMIT_NOW.match(x) for x in ("mandalo a la cola", "sometelo", "dale, lanzalo ya", "Ponelo en la cola!"))
+       and not any(_RE_SUBMIT_NOW.match(x) for x in ("cómo mando esto a la cola", "mandame un mail cuando termine",
+                                                      "mandalo a la cola con 16 cores")))
+    _t("_RE_SUBMIT_IN_REQUEST: 'prepará los archivos y mandalo a la cola' sí; 'cómo mando' no",
+       _RE_SUBMIT_IN_REQUEST.search("prepará los archivos y mandalo a la cola")
+       and not _RE_SUBMIT_IN_REQUEST.search("cómo mando un trabajo a la cola"))
+    _sb = "#!/bin/bash\n#SBATCH -n 1\nWORKDIR=/x/$USER\nmkdir -p $WORKDIR && cd $WORKDIR\npython3 test_gpu.py\n"
+    _t("_inject_sibling_copies: agrega cp del .py hermano tras el cd $WORKDIR",
+       'cd $WORKDIR\ncp "$SLURM_SUBMIT_DIR"/test_gpu.py .\npython3' in _inject_sibling_copies(_sb, ["test_gpu.py"]))
+    _t("_inject_sibling_copies: no duplica si el sbatch ya lo copia o lo crea",
+       _inject_sibling_copies(_sb.replace("python3", "cp ../test_gpu.py .\npython3"), ["test_gpu.py"]).count("cp ") == 1
+       and "SLURM_SUBMIT_DIR" not in _inject_sibling_copies(_sb.replace("python3 test_gpu.py", "cat > test_gpu.py <<'E'\nx\nE\npython3 test_gpu.py"), ["test_gpu.py"]))
+    _t("_project_blocks: descarta 'sbatch x.sh' y conserva input + sbatch",
+       len(_project_blocks([("bash", "sbatch submit.sh", ""), ("lmp", "units metal\nrun 10", "in.lmp"),
+                            ("bash", "#!/bin/bash\n#SBATCH -n 1\nlmp -in in.lmp", "")])) == 2)
+    _t("prefijo <think>: servidor vLLM nuevo (cacheado False) -> request sin "
+       "prefill, sin continue_final_message",
+       "continue_final_message" not in json.loads(
+           _build_request([{"role": "user", "content": "x"}]).data))
+    _THINK_PREFILL_CACHE[VLLM_BASE] = True
+    _t("prefijo <think>: servidor viejo (cacheado True) -> prefill como antes "
+       "(solo aplica si MODEL es de razonamiento)",
+       ("continue_final_message" in json.loads(
+           _build_request([{"role": "user", "content": "x"}]).data))
+       == (MODEL in _REASONING_MODELS))
+    _THINK_PREFILL_CACHE.clear()
     _t("_DEV_MODE (por puerto): 8001 sigue siendo dev sin importar el nodo",
        urlparse("http://gpu-01:8001/v1").port != 8000)
 
@@ -3844,6 +3996,29 @@ def _looks_like_reasoning_leak(text: str) -> bool:
                 re.search(r'\b(debo|deber[ií]a|necesito|voy a|tengo que)\b', head))
 
 
+_THINK_PREFILL_CACHE: dict[str, bool] = {}
+
+
+def _server_needs_think_prefill() -> bool:
+    """El prefijo "<think>\\n" solo hace falta en vLLM viejo (0.10.x). En 0.20+ el
+    parser glm45 ya separa bien solo, y con el prefijo puesto manda TODO a
+    "reasoning" (o, en 0.10.2, deja el razonamiento como texto visible en content,
+    medido 9/10). Versión desconocida -> comportamiento viejo."""
+    base = VLLM_BASE
+    if base in _THINK_PREFILL_CACHE:
+        return _THINK_PREFILL_CACHE[base]
+    need = True
+    try:
+        with urlopen(Request(base.rsplit("/v1", 1)[0] + "/version"), timeout=3) as r:
+            ver = json.loads(r.read().decode()).get("version", "")
+        major_minor = tuple(int(x) for x in re.findall(r"\d+", ver)[:2])
+        need = major_minor < (0, 20)
+        _THINK_PREFILL_CACHE[base] = need
+    except Exception:
+        pass
+    return need
+
+
 def _build_request(messages: list[dict], max_tokens: int = 8000) -> Request:
     # temperature bajada de 0.6 a 0.3 (rango recomendado para generación de comandos/paths
     # exactos, ver discusión 23/8 — gonzabot genera sbatch/rutas/hashes la mayor parte del
@@ -3860,7 +4035,8 @@ def _build_request(messages: list[dict], max_tokens: int = 8000) -> Request:
         "repetition_penalty": 1.1,
         "max_tokens": max_tokens,
     }
-    if MODEL in _REASONING_MODELS and messages and messages[-1].get("role") != "assistant":
+    if (MODEL in _REASONING_MODELS and messages and messages[-1].get("role") != "assistant"
+            and _server_needs_think_prefill()):
         # No mutar la lista original (se reutiliza para historial/context_msgs)
         body["messages"] = list(messages) + [{"role": "assistant", "content": "<think>\n"}]
         body["continue_final_message"] = True
@@ -3920,6 +4096,45 @@ def _auto_start_service() -> bool:
             return True
     print(_c(RED, "  Timeout esperando el servicio. Intentar más tarde."))
     return False
+
+
+class _ThinkFilter:
+    """vLLM 0.30 con glm45 a veces deja '<think>...</think>' literal en content
+    (con espacio previo, el parser no lo reconoce). Separa ese bloque inicial
+    como razonamiento y deja pasar el resto como contenido."""
+    _OPEN, _CLOSE = "<think>", "</think>"
+
+    def __init__(self):
+        self.mode = "probe"
+        self.buf = ""
+
+    def feed(self, t: str) -> tuple[str, str]:
+        if self.mode == "out":
+            return t, ""
+        self.buf += t
+        if self.mode == "probe":
+            st = self.buf.lstrip()
+            if len(st) < len(self._OPEN) and self._OPEN.startswith(st):
+                return "", ""
+            if st.startswith(self._OPEN):
+                self.mode = "in"
+                self.buf = st[len(self._OPEN):]
+            else:
+                self.mode, out, self.buf = "out", self.buf, ""
+                return out, ""
+        i = self.buf.find(self._CLOSE)
+        if i >= 0:
+            r, c = self.buf[:i], self.buf[i + len(self._CLOSE):].lstrip("\n")
+            self.mode, self.buf = "out", ""
+            return c, r
+        keep = len(self._CLOSE) - 1
+        r, self.buf = self.buf[:-keep], self.buf[-keep:]
+        return "", r
+
+    def flush(self) -> tuple[str, str]:
+        b, m, self.buf = self.buf, self.mode, ""
+        self.mode = "out"
+        return (b, "") if m == "probe" else ("", b)
 
 
 def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool = False,
@@ -4066,6 +4281,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
     # en silencio, para poder rescatarlo si "content" termina totalmente vacío --
     # nunca se muestra en vivo, así no reintroduce la fuga que esto reemplaza.
     _reasoning_fallback_buf: list[str] = []
+    _tf = _ThinkFilter()
     # Bug real 3/10 (heredoc truncado a mitad de script, SyntaxError en el
     # job): el stream SIEMPRE trae "finish_reason" en el ultimo chunk real
     # ("stop"=terminó solo, "length"=lo cortó el límite de max_tokens) pero
@@ -4240,6 +4456,9 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                         token = delta.get("content", "").replace("\x00", "")
                         _r_token = (delta.get("reasoning")
                                     or delta.get("reasoning_content") or "")
+                        if token:
+                            token, _tf_r = _tf.feed(token)
+                            _r_token += _tf_r
                         if _r_token:
                             _reasoning_fallback_buf.append(_r_token.replace("\x00", ""))
                         if token:
@@ -4330,6 +4549,13 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                                     line_buf = ""
                     except (json.JSONDecodeError, KeyError, IndexError):
                         pass
+        _tf_c, _tf_r = _tf.flush()
+        if _tf_r:
+            _reasoning_fallback_buf.append(_tf_r)
+        if _tf_c:
+            first_token.set()
+            _raw_buf.append(_tf_c)
+            line_buf += _tf_c
         if line_buf:  # vuelca lo que quedó (sin newline final) respetando filtros
             _flush_line(line_buf)
     except KeyboardInterrupt:
@@ -4459,6 +4685,8 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
         pass
     if _new_blocks:
         _LAST_CODE_BLOCKS = _new_blocks
+        if any(_looks_like_real_sbatch(_b[1]) for _b in _new_blocks):
+            _LAST_JOB_PROJECT[:] = _new_blocks
 
     # Renderizar respuesta formateada: prose con rich.Markdown + código con rich.Syntax
     if _console is not None and not silent and _raw_buf:
@@ -6294,6 +6522,14 @@ def repl(new_session: bool = False):
                     last_reply = _ml_reply
                 continue
 
+        if _LAST_JOB_PROJECT and _RE_SUBMIT_NOW.match(user_input):
+            _sub_note = _offer_submit_project(_LAST_JOB_PROJECT)
+            if _sub_note:
+                for _r_, _c_ in (("user", user_input), ("assistant", _sub_note)):
+                    context_msgs.append({"role": _r_, "content": _c_})
+                    save_message(con, session_id, _r_, _c_[:500])
+            continue
+
         if "\n" not in user_input and not _INJECT.search(user_input) and not _INJECT_PIPE.search(user_input) and _first_word in _AUTO_RUN_CMDS:
             _is_dangerous = _first_word in _DANGEROUS_CMDS or any(p in user_input for p in _DANGEROUS_PATTERNS)
             if _is_dangerous:
@@ -6652,6 +6888,12 @@ def repl(new_session: bool = False):
                               f"solo lectura, sin pedir confirmación)..."))
                 _bare_out = _run_readonly_query(_bare_cmd)
                 print(_c(DIM, "  " + "\n  ".join(_bare_out.splitlines()[:40])))
+
+        if (_RE_SUBMIT_IN_REQUEST.search(user_input) and _LAST_JOB_PROJECT
+                and not _RE_WORKFLOW_INTENT.search(user_input)):
+            _sub_note = _offer_submit_project(_LAST_JOB_PROJECT)
+            if _sub_note:
+                reply += "\n\n" + _sub_note
 
         # Workflow persistente, 1/10: el pedido del usuario (no la respuesta del
         # modelo) es lo que se chequea -- si suena a varios pasos encadenados

@@ -130,7 +130,7 @@ WORKDIR en sbatch (OBLIGATORIO para scripts NUEVOS, cualquier software):
   AL CORREGIR scripts ajenos: reemplazar username hardcodeado por %u en --output/--error, siempre, aunque no se pida.
 
 Specs CPU (quad-11/12/33/34-n01..04, 16 nodos): 256 cores AMD EPYC 9754 Zen4/nodo (2×128c, 32 NUMA/nodo), 377 GiB RAM (~395GB físicos), 32 dominios L3 (1/CCD, 8 cores, 16MB c/u). InfiniBand HDR.
-Specs GPU (gpu-01, gpu-02): 4× A100 80GB PCIe/nodo = 8 GPUs total. Host: 2× EPYC 9754 (96 cores, 48c/socket, 2 NUMA), 377 GiB RAM (--mem=350G max). CUDA Driver 550.144.03 / CUDA 12.4+. InfiniBand + GPU-Direct RDMA.
+Specs GPU (gpu-01, gpu-02): 4× A100 80GB PCIe/nodo = 8 GPUs total. Host: 2× EPYC 9754 (96 cores, 48c/socket, 2 NUMA), 377 GiB RAM (--mem=350G max). CUDA Driver 580.178.04 (gpu-01 y gpu-02, verificado 9/10) / CUDA 13.x soportada (cuda@13.0.2 validado; para compilar sigue siendo preferible 12.6.2). InfiniBand + GPU-Direct RDMA.
 
 Power-save (softadm 28-29/9): nodos con Weight rotativo (menor Weight se llena primero,
 rota diario 3am) se apagan tras 30 min idle y se despiertan on-demand — Slurm SIEMPRE

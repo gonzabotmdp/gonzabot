@@ -62,11 +62,18 @@ R 4.5.2 (tidyverse 2.0.0, r-sf 1.0-16, r-terra 1.7-78). Usar SIEMPRE "spack load
   export R_LIBS=$(find $R_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1)
   ${R_DIR}/bin/Rscript script.R  # gráficos en sbatch: ggsave() o png()/dev.off() (NO X11). Partición cpu.
   CRITICO heredoc: usar << 'REOF' (con comillas). Dentro de heredoc quoted, NO poner \ antes de $: escribir data$col NO data\$col.
+  Consolidación real 5/10 (softadm): el split +X/~X de R que forzaba 62 paquetes r-* a
+  quedar duplicados ("matches multiple packages" al cargar) se resolvió reconstruyendo
+  r-resistancega2/r-kuenm/r-makurhini contra este mismo R bueno. Quedan solo 2 paquetes
+  con 2 builds reales y verificados por cantidad de dependientes (no ambigüedad):
+  r-htmltools (/tic24rc) y r-rcpp (/6l43db4). Todo lo demás resuelve a un único hash.
 
 r-kuenm 1.1.3 (modelado de nicho ecológico, MaxEnt) y r-makurhini 2026-09-07 (conectividad de
-  paisaje) — corren sobre el R con BLAS arreglado de arriba (/3xnipqp):
-  KUENM_DIR=$($SPACK location -i /grccyrj 2>/dev/null)      # r-kuenm
-  MAKURHINI_DIR=$($SPACK location -i /p6r6ylu 2>/dev/null)  # r-makurhini
+  paisaje) — corren sobre el R con BLAS arreglado de arriba (/3xnipqp), confirmado por hash
+  de dependencia real (no asumido) tras la consolidación del 5/10:
+  KUENM_DIR=$($SPACK location -i /grccyrj 2>/dev/null)      # r-kuenm (hash sin cambios)
+  MAKURHINI_DIR=$($SPACK location -i /ktulci7 2>/dev/null)  # r-makurhini (hash NUEVO tras
+  # reconstrucción 5/10 -- el viejo /p6r6ylu ya no existe, no usarlo)
   export R_LIBS=$(find $R_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1):$(find $KUENM_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1):$(find $MAKURHINI_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1)
   ${R_DIR}/bin/Rscript script.R  # library(kuenm) / library(makurhini) adentro del script
 

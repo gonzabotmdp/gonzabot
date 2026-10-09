@@ -6,6 +6,45 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-09
+
+### Added
+- Natural-language job submission: after gonzabot generates a job, saying
+  "mandalo a la cola" / "sometelo" / "lanzalo" (or including that in the
+  original request) offers to submit it. All files of the answer (input,
+  scripts, sbatch) are saved to `~/gonzabot-jobs/<timestamp>/` and the sbatch
+  is submitted from there, so sibling files really exist; a `cp
+  "$SLURM_SUBMIT_DIR"/<file> .` is injected after `cd $WORKDIR` for sibling
+  files the sbatch uses but does not create. Always asks `[s/N]` first, and the
+  submitted job ID is added to the conversation context (previously the bot
+  asked the user for the ID of a job it had just submitted).
+- LAMMPS knowledge: canonical fcc template for pure metals (no hand-made
+  `.data` files, no invented `potential` command, one atom type) and the rule
+  that a wall-clock request ("10 minutes") is a `--time` limit plus `timer
+  timeout`, never "N steps".
+
+### Fixed
+- Reasoning leak on vLLM 0.30: the model sometimes emits a literal
+  `<think>...</think>` (with a leading space) inside `content`, which the
+  `glm45` parser does not recognise. New `_ThinkFilter` splits that block
+  into reasoning on the client, streaming-safe. Verified on the real bot with
+  the exact request that used to leak (2/2 clean).
+- Auto-execution of "read-only" blocks ran any text marked as bash whose
+  first word was not on the deny-list, e.g. a LAMMPS input printed as
+  `/bin/sh: units: not found`. The first word of every line must now be a real
+  executable or shell builtin.
+- vLLM server upgrade (production moved from 0.10.2 to 0.30.0, single engine):
+  the `<think>\n` prefill trick needed by 0.10.x is now applied only when
+  `GET /version` reports a server older than 0.20 (`_server_needs_think_prefill`);
+  on newer servers it made the reasoning parser leak or return empty content.
+- Context: GPU node driver is 580.178.04 on both nodes (CUDA 13 supported,
+  `cuda@13.0.2` validated; 12.6.2 still preferred for compiling); R/Spack hash
+  updates (r-makurhini) and the corrected `gonzabot-watcher.sh` (never submits a
+  second vLLM job) synced from production.
+
+### Tests
+- `--selftest` grows from 212 to 221 checks.
+
 ## [1.6.0] - 2026-10-08
 
 ### Added

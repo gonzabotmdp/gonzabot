@@ -53,3 +53,11 @@ Notas técnicas (por qué plink/plink-ng/r-resistancega2 NO son el builtin de Sp
   r-spdep (otra dependencia): el builtin tiene una versión vieja (0.6-13) con un bug de
   compilación real; se pineó a una versión moderna (1.3-5) en la receta de
   resistancega2.
+
+Bug real de Spack encontrado y arreglado por softadm (5/10, durante la consolidación de
+  R): la clase base RPackage no fuerza que las extensiones de R (r-terra, r-igraph, ambas
+  dependencias de resistancega2) usen el MISMO compilador que el R al que se adjuntan --
+  causaba errores reales de compilación (-std=gnu23 contra aocc, símbolo Fortran
+  indefinido). Fix local en packages.yaml, confirmado con build real. Si alguien reporta un
+  error de compilación raro con una extensión de R nueva (no r-terra/r-igraph, otra), es la
+  primera cosa a revisar.
