@@ -6,6 +6,65 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-08
+
+### Added
+- Phase 1 of internationalization ("no me quiero encerrar en español"):
+  gonzabot can now run in English as well as Spanish (`_SUPPORTED_LANGS =
+  ("es", "en")`). Only the model's own output is translated in this phase --
+  the Spanish-language `context/*.txt` knowledge base is left untouched
+  (GLM-4.5-Air reads Spanish context fine while answering in English), and
+  Spanish-coupled deterministic heuristics (`_RE_SPANISH_PROSE`, etc.) are
+  deliberately left for a later phase.
+- `/lang` command (`/lang`, `/lang es`, `/lang en`) to switch language at
+  runtime without restarting.
+- `_detect_console_lang()`: resolves language as `GONZABOT_LANG` env override
+  > `$LANG`/`$LC_ALL` (first 2 chars) > `_SITE_DEFAULT_LANG`. Initially
+  designed as true per-session auto-detection, but live investigation (8/10)
+  found that doesn't actually work over SSH: this cluster's `sshd_config` has
+  no `AcceptEnv LANG`/`LC_*`, so the client's own locale never reaches the
+  session, and the system locale is `C.UTF-8` for every user regardless of
+  their own machine's language. `_SITE_DEFAULT_LANG` is therefore a
+  deployment-level knob, not a per-user setting: it's `"es"` for IFIMAR/UNMDP
+  specifically, and a cluster installing gonzabot elsewhere (e.g. an
+  English-speaking site) changes that one constant (or sets `GONZABOT_LANG`)
+  instead of relying on auto-detection to get it right.
+
+### Fixed
+- `/lang` (and any future slash command) could be correctly added to
+  `_SLASH_CMDS` and `_KNOWN_SLASH_COMMANDS` and still silently fall through
+  to the LLM as plain chat -- found live while testing `/lang` itself. Root
+  cause: a third, previously-undocumented registry, a *local* `_KNOWN_CMDS`
+  set rebuilt every main-loop iteration, is the actual gate that decides
+  whether a `/command` enters the dispatch chain. Added `/lang` there too and
+  commented the fragility in place so the next new command doesn't repeat
+  this.
+- Making `/lang en` actually produce English output took three separate,
+  independently-verified fixes, not one -- each confirmed by sending the
+  exact assembled prompt directly to the live vLLM endpoint, bypassing
+  gonzabot's own client, before being judged sufficient:
+  1. `_BASE_PROMPT_ES` itself contained a hardcoded "respond in whatever
+     language the user writes in" instruction that directly contradicted
+     English mode. Stripped via `_MIRROR_LANG_SENTENCE` when `_LANG != "es"`.
+  2. `core.txt` (always-loaded context) separately hardcoded "Español
+     rioplatense informal -- vos, dale, che", more specific/recent than (1)
+     and still forcing Spanish on its own. Stripped dynamically in
+     `_ctx_for_probe()` so `/lang` also works mid-session without a restart.
+  3. Even with both of the above removed, the model's internal `<think>`
+     reasoning still alternated roughly 50/50 Spanish/English at the
+     cluster's real sampling settings (`temperature=0.3, top_p=0.8,
+     top_k=20`) -- genuine sampling variance, not a leftover instruction
+     (confirmed at `temperature=0` the model followed the directive 100% of
+     the time). Fixed by repeating the English directive a second time as
+     `_LANG_REMINDER_SUFFIX`, appended at the very end of the fully-assembled
+     prompt to exploit LLM recency bias -- verified 6/6 English afterward at
+     the cluster's real (non-zero) sampling settings, vs. ~50/50 before.
+     Confirmed live in production: two real Spanish-language questions
+     ("cual es la particion cpu/gpu del cluster") both answered fully in
+     English, think-block included, with `/lang en` active.
+
+20 new/updated `--selftest` checks (190 -> 210) across this work.
+
 ## [1.5.0] - 2026-10-08
 
 ### Added
