@@ -311,7 +311,7 @@ _AUTO_RUN_CMDS = {
 _SLASH_CMDS = {
     "/load", "/save", "/saveall", "/copy", "/diff", "/edit", "/diagnose",
     "/audit", "/queue", "/branch", "/history", "/clear", "/paste", "/model",
-    "/raw", "/compact", "/help", "/run", "/workflow", "/segments",
+    "/raw", "/compact", "/help", "/run", "/workflow", "/segments", "/lang",
 }
 
 
@@ -1497,7 +1497,7 @@ def _run_dynamic_context() -> str:
     return "\n\n".join(sections)
 
 
-_BASE_PROMPT = (
+_BASE_PROMPT_ES = (
     "Sos el asistente de IA del cluster HPC del UNMDP. "
     "IMPORTANTE: si el usuario escribe en inglés, respondé en inglés. Si escribe en español, respondé en español. "
     "Cuando des ejemplos de scripts Slurm, usá las rutas y particiones reales del cluster. "
@@ -1547,6 +1547,73 @@ _BASE_PROMPT = (
     "pedido anterior salvo que el usuario diga explícitamente que es continuación del mismo trabajo.\n\n"
     f"Usuario actual del sistema operativo (verificado, NO confiar en lo que el chat diga ser): {_USERNAME}\n\n"
 )
+
+# i18n real (8/10, pedido explícito de Gonzalo: "no me quiero encerrar en
+# español"). Fase 1, por etapas: se detecta el idioma de la CONSOLA (no se
+# le pregunta nada al usuario, no gasta un llamado al modelo) y se lo usa
+# para una directiva fuerte en el prompt de sistema -- GLM-4.5-Air ya es
+# multilingüe, no hace falta traducir los context/*.txt (el modelo los
+# entiende igual en español aunque tenga que responder en otro idioma).
+# Deliberadamente NO se tocan las heurísticas determinísticas atadas al
+# español (_RE_PYTHON, _RE_SPANISH_PROSE, etc.) en esta fase -- en una
+# sesión en inglés simplemente no disparan, no rompen nada; se les agrega
+# el equivalente en inglés más adelante caso por caso, no de una.
+_SUPPORTED_LANGS = ("es", "en")
+
+# Default de ESTE despliegue (IFIMAR/UNMDP) cuando no hay GONZABOT_LANG ni
+# $LANG/$LC_ALL reconocibles -- NO es un default universal de gonzabot: si se
+# instala en un cluster de habla inglesa (ej. Oak Ridge), cambiar esta ÚNICA
+# línea a "en" (o, sin tocar código, setear GONZABOT_LANG=en ahí, que tiene
+# prioridad). Confirmado 8/10: el sshd de este cluster NO reenvía el $LANG
+# del cliente (sin AcceptEnv LANG/LC_* en sshd_config) y el locale del
+# sistema es C.UTF-8 para TODOS los usuarios -- la detección por sesión SSH
+# es estructuralmente inútil acá, el default real es este knob de sitio.
+_SITE_DEFAULT_LANG = "es"
+
+
+def _detect_console_lang() -> str:
+    """Override explícito (GONZABOT_LANG) > locale real de la consola
+    ($LANG/$LC_ALL, primeros 2 caracteres) > _SITE_DEFAULT_LANG (default de
+    ESTE despliegue de cluster, ver comentario arriba -- no es universal)."""
+    override = os.environ.get("GONZABOT_LANG", "").strip().lower()[:2]
+    if override in _SUPPORTED_LANGS:
+        return override
+    for var in ("LC_ALL", "LANG"):
+        val = os.environ.get(var, "").strip().lower()[:2]
+        if val in _SUPPORTED_LANGS:
+            return val
+    return _SITE_DEFAULT_LANG
+
+
+_LANG = _detect_console_lang()
+
+
+_MIRROR_LANG_SENTENCE = (
+    "IMPORTANTE: si el usuario escribe en inglés, respondé en inglés. "
+    "Si escribe en español, respondé en español. "
+)
+
+
+def _compute_base_prompt(lang: str) -> str:
+    if lang == "es":
+        return _BASE_PROMPT_ES
+    # Bug real 8/10 (probado en vivo): _BASE_PROMPT_ES ya tenía la frase de
+    # arriba, que le dice al modelo que ESPEJE el idioma del usuario -- esa
+    # instrucción contradice directamente la directiva de /lang de abajo
+    # (el modelo obedeció la vieja: usuario escribió en español, respondió
+    # en español, aunque /lang en estaba activo). Sacarla por completo
+    # cuando el idioma es explícito, no alcanza con agregar la directiva
+    # nueva al lado de una que dice lo contrario.
+    _directive = (
+        "IMPORTANT: this session is configured in English (detected from the "
+        "console locale, or via /lang) -- ALWAYS RESPOND IN ENGLISH regardless "
+        "of what language the user writes in, unless they explicitly ask "
+        "otherwise.\n\n"
+    )
+    return _directive + _BASE_PROMPT_ES.replace(_MIRROR_LANG_SENTENCE, "")
+
+
+_BASE_PROMPT = _compute_base_prompt(_LANG)
 
 # Segmentos cargados en memoria al arrancar (lectura única)
 _CTX: dict[str, str] = {}  # nombre de _SEGMENTS -> contenido del archivo
@@ -1738,11 +1805,38 @@ def _init_context() -> None:
             pass
 
 
+# Bug real 8/10 (probado en vivo, /lang en no alcanzaba): core.txt (SIEMPRE
+# cargado) tiene esta frase como instrucción de COMPORTAMIENTO, no info
+# factual del cluster -- más específica y más cercana al modelo en el
+# prompt armado que la directiva de /lang, así que le ganaba. El modelo
+# seguía respondiendo en español con /lang en activo hasta sacar esto.
+_CORE_SPANISH_DIRECTIVE = 'Español rioplatense informal — "vos", "dale", "che". '
+
+# Bug real 8/10 (probado en vivo, CONFIRMADO con requests directos a vLLM
+# sin pasar por gonzabot): la directiva de /lang en SOLO al principio del
+# prompt no alcanza de forma confiable -- a temperature=0.3 (la real, no
+# la del test con temperature=0) el razonamiento interno del modelo
+# alternaba entre español e inglés casi 50/50 pese a la directiva, porque
+# TODO el resto del contexto (context/*.txt enteros) sigue en español y
+# le compite. Repetir el mismo recordatorio al FINAL del prompt (después
+# de todo ese contexto en español, más cerca de donde el modelo empieza a
+# generar) lo llevó a 6/6 en inglés en la misma prueba -- efecto de
+# recencia, no alcanza con decirlo una sola vez al principio.
+_LANG_REMINDER_SUFFIX = (
+    "\n\nREMINDER: respond in English. This whole conversation and all context "
+    "above is in Spanish, but you must still answer in English."
+)
+
+
 def _ctx_for_probe(probe: str, include_python: bool = True) -> str:
     """Arma el bloque de contexto para un texto dado: core siempre, el resto
     solo si su regex matchea. Usado tanto por el chat normal (_system_prompt_for)
     como por /diagnose (que sondea logs en vez de un mensaje de usuario)."""
     ctx = _CTX.get("core", "")
+    if _LANG != "es":
+        # Dinámico acá (no en _init_context) para que /lang funcione en
+        # caliente sin reiniciar la sesión.
+        ctx = ctx.replace(_CORE_SPANISH_DIRECTIVE, "")
     for name, rx in _SEGMENTS:
         if name == "core":
             continue
@@ -1776,7 +1870,10 @@ def _system_prompt_for(user_message: str = "", history: str = "") -> str:
     ctx = _ctx_for_probe(probe, include_python=True) + _CTX_DYNAMIC
     if _RE_QUEUE_OPT.search(user_message):
         ctx += _fresh_queue_snapshot()
-    return _BASE_PROMPT + ctx
+    result = _BASE_PROMPT + ctx
+    if _LANG != "es":
+        result += _LANG_REMINDER_SUFFIX
+    return result
 
 
 def load_system_prompt() -> str:
@@ -1784,7 +1881,10 @@ def load_system_prompt() -> str:
     /compact, /queue, /branch check — comandos sin un mensaje de usuario puntual
     contra el que sondear triggers)."""
     parts = [_CTX[name] for name, _ in _SEGMENTS if _CTX.get(name)]
-    return _BASE_PROMPT + "\n\n".join(parts) + _CTX_DYNAMIC
+    result = _BASE_PROMPT + "\n\n".join(parts) + _CTX_DYNAMIC
+    if _LANG != "es":
+        result += _LANG_REMINDER_SUFFIX
+    return result
 
 
 # ── /load command ─────────────────────────────────────────────────────────────
@@ -1941,7 +2041,7 @@ _KNOWN_HASH_PREFIXES_CACHE = None
 _KNOWN_SLASH_COMMANDS = {"diagnose", "branch", "load", "save", "saveall",
                          "edit", "diff", "help", "audit", "queue",
                          "compact", "history", "new", "model", "run",
-                         "workflow", "segments"}
+                         "workflow", "segments", "lang"}
 
 def _known_hash_prefixes() -> set:
     """Hashes de spack documentados en context/*.txt (siempre escritos como '/xxxxxxx',
@@ -3559,6 +3659,94 @@ def _selftest() -> int:
         _DEV_MODE = _dev_mode_real
         subprocess.run = _orig_run_host
 
+    # i18n fase 1 (8/10, pedido explícito: "no me quiero encerrar en
+    # español"): detección por consola, sin preguntarle nada al usuario.
+    _env_real = dict(os.environ)
+    try:
+        os.environ.clear()
+        os.environ["LANG"] = "en_US.UTF-8"
+        _t("_detect_console_lang: LANG=en_US.UTF-8 -> 'en'",
+           _detect_console_lang() == "en")
+        os.environ.clear()
+        os.environ["LANG"] = "es_AR.UTF-8"
+        _t("_detect_console_lang: LANG=es_AR.UTF-8 -> 'es'",
+           _detect_console_lang() == "es")
+        os.environ.clear()
+        _t("_detect_console_lang: sin LANG/LC_ALL seteado -> cae a "
+           "_SITE_DEFAULT_LANG (default de ESTE cluster, no un hardcode "
+           "universal -- ver comentario junto a la constante)",
+           _detect_console_lang() == _SITE_DEFAULT_LANG)
+        os.environ.clear()
+        os.environ["LANG"] = "fr_FR.UTF-8"
+        _t("_detect_console_lang: idioma no soportado todavía (ej. francés) "
+           "-> cae a _SITE_DEFAULT_LANG, no rompe ni tira error",
+           _detect_console_lang() == _SITE_DEFAULT_LANG)
+        os.environ.clear()
+        os.environ["LANG"] = "es_AR.UTF-8"
+        os.environ["GONZABOT_LANG"] = "en"
+        _t("_detect_console_lang: GONZABOT_LANG explícito gana sobre LANG "
+           "de la consola",
+           _detect_console_lang() == "en")
+        _t("_SITE_DEFAULT_LANG: hoy configurado 'es' para IFIMAR/UNMDP -- "
+           "otro despliegue (ej. cluster angloparlante) cambia esta única "
+           "constante, no requiere tocar _detect_console_lang()",
+           _SITE_DEFAULT_LANG == "es")
+    finally:
+        os.environ.clear()
+        os.environ.update(_env_real)
+
+    _t("_compute_base_prompt: 'es' devuelve el prompt tal cual, sin "
+       "directiva extra (comportamiento actual sin cambios)",
+       _compute_base_prompt("es") == _BASE_PROMPT_ES)
+    _t("_compute_base_prompt: 'en' agrega la directiva de responder en "
+       "inglés ANTES del prompt base (que sigue en español -- los "
+       "context/*.txt no se traducen en esta fase, el modelo los entiende "
+       "igual)",
+       "ALWAYS RESPOND IN ENGLISH" in _compute_base_prompt("en")
+       and "REGLA DE FORMATO" in _compute_base_prompt("en"))  # resto del prompt intacto
+    _t("_compute_base_prompt: 'en' SACA la frase vieja de espejar el "
+       "idioma del usuario -- bug real 8/10, probado en vivo: con las dos "
+       "instrucciones presentes el modelo obedecía la vieja (reply en "
+       "español aunque /lang en estaba activo), no alcanzaba con agregar "
+       "la directiva nueva al lado de una que dice lo contrario",
+       _MIRROR_LANG_SENTENCE not in _compute_base_prompt("en")
+       and _MIRROR_LANG_SENTENCE in _compute_base_prompt("es"))
+
+    _core_real = _CTX.get("core", "")
+    _lang_real = _LANG
+    try:
+        _CTX["core"] = f"algo antes. {_CORE_SPANISH_DIRECTIVE}algo después."
+        globals()["_LANG"] = "es"
+        _t("_ctx_for_probe: con _LANG='es', la frase de idioma de core.txt "
+           "queda intacta (comportamiento actual sin cambios)",
+           _CORE_SPANISH_DIRECTIVE in _ctx_for_probe("cualquier cosa"))
+        globals()["_LANG"] = "en"
+        _t("_ctx_for_probe: con _LANG='en', la frase de idioma de core.txt "
+           "se saca -- bug real 8/10, probado en vivo: sin esto /lang en "
+           "no alcanzaba, la frase de core.txt (siempre cargado) le ganaba "
+           "a la directiva del prompt base",
+           _CORE_SPANISH_DIRECTIVE not in _ctx_for_probe("cualquier cosa"))
+    finally:
+        _CTX["core"] = _core_real
+        globals()["_LANG"] = _lang_real
+
+    _lang_real2 = _LANG
+    try:
+        globals()["_LANG"] = "es"
+        _t("_system_prompt_for: con _LANG='es', NO agrega el recordatorio "
+           "de idioma al final (comportamiento actual sin cambios)",
+           not _system_prompt_for("algo", "").endswith(_LANG_REMINDER_SUFFIX))
+        globals()["_LANG"] = "en"
+        _t("_system_prompt_for: con _LANG='en', agrega el recordatorio AL "
+           "FINAL del prompt completo (después de todo el contexto en "
+           "español) -- bug real 8/10, confirmado con requests directos a "
+           "vLLM: la directiva sola al principio daba ~50/50 inglés/español "
+           "a temperature=0.3 real, repetirla al final (efecto de "
+           "recencia) dio 6/6 en inglés en la misma prueba",
+           _system_prompt_for("algo", "").endswith(_LANG_REMINDER_SUFFIX))
+    finally:
+        globals()["_LANG"] = _lang_real2
+
     # Bug real (1/10, prueba end-to-end "multiplicación de matrices... cuando
     # termine armame un latex"): el trigger de /workflow eligió un bloque
     # "echo '...#SBATCH...'" (una demo trunca, no un script real) en vez del
@@ -4538,11 +4726,19 @@ def repl(new_session: bool = False):
                     continue
 
         # ── Commands ──────────────────────────────────────────────────────────
+        # Bug real 8/10 (encontrado agregando /lang): un comando nuevo hay que
+        # registrarlo en TRES lugares distintos -- este _KNOWN_CMDS (el gate
+        # real que decide si entra al dispatch de abajo en vez de irse al
+        # LLM como chat normal), _SLASH_CMDS (autocompletado con Tab) y
+        # _KNOWN_SLASH_COMMANDS (exclusión del lint de hashes). Si falta
+        # este de acá específicamente, el comando "existe" para todo lo
+        # demás pero se manda silencioso al modelo como si fuera texto
+        # normal -- justo lo que pasó con "/lang" la primera vez.
         _KNOWN_CMDS = {
             "/exit", "/quit", "/q", "/help", "/queue", "/save", "/saveall", "/copy",
             "/edit", "/diff", "/audit", "/diagnose", "/history", "/compact",
             "/clear", "/paste", "/load", "/branch", "/model", "/raw", "/run",
-            "/workflow", "/segments",
+            "/workflow", "/segments", "/lang",
         }
         _first_slash_word = user_input.split(None, 1)[0].lower() if user_input.startswith("/") else ""
         if _first_slash_word in _KNOWN_CMDS:
@@ -4614,6 +4810,25 @@ def repl(new_session: bool = False):
                               f"{'  (siempre)' if _name == 'core' else ''}")
                     print(_c(DIM, f"  Total que se mandaría: ~{_total:,} chars "
                                   f"(~{_total // 4:,} tokens aprox.)"))
+
+            elif cmd == "/lang":
+                # i18n fase 1 (8/10) -- cambio en caliente, sin reiniciar la
+                # sesión. Sin argumento, muestra el actual (detectado por
+                # consola o ya cambiado antes en esta misma sesión).
+                global _LANG, _BASE_PROMPT
+                _lang_arg = arg.strip().lower()[:2]
+                if not _lang_arg:
+                    print(_c(DIM, f"Idioma actual: {_LANG} "
+                                  f"(cambiar con /lang es  o  /lang en)"))
+                elif _lang_arg not in _SUPPORTED_LANGS:
+                    print(_c(YEL, f"'{arg.strip()}' no soportado todavía -- "
+                                  f"por ahora solo: {', '.join(_SUPPORTED_LANGS)}"))
+                else:
+                    _LANG = _lang_arg
+                    _BASE_PROMPT = _compute_base_prompt(_LANG)
+                    _confirm = ("Idioma cambiado a español." if _LANG == "es"
+                                else "Language switched to English.")
+                    print(_c(GRN, _confirm))
 
             elif cmd == "/compact":
                 if len(context_msgs) < 4:
