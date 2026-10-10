@@ -3485,7 +3485,7 @@ def _selftest() -> int:
        and r.index("setup-env.sh") < r.index("eval $(spack"))
     r = _fix_sbatch(B.format("source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh\neval $(spack load --sh bwa)\nbwa mem"))
     _t("spack: eval $(spack load --sh X) ya correcto → intacto",
-       r.count("eval $(spack load --sh bwa)") == 1 and r.count("setup-env.sh") == 1)
+       r.count("eval $(spack load --sh bwa)") == 1 and r.split("```")[1].count("setup-env.sh") == 1)
     if not os.path.exists("/apps/local/spack/spack-2026b/site/preferred-hashes.conf"):
         import tempfile as _tf
         _pc = _tf.NamedTemporaryFile("w", suffix=".conf", delete=False)
