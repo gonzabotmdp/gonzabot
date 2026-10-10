@@ -3782,6 +3782,15 @@ def _selftest() -> int:
         WORKFLOW_DB_PATH = _wf_real_db
         _wf_tmp.unlink(missing_ok=True)
 
+    import tempfile as _tf2
+    _fake_bin = _tf2.mkdtemp()
+    for _c in ("squeue", "scontrol", "sinfo", "sacct"):
+        if not shutil.which(_c):
+            _fp = os.path.join(_fake_bin, _c)
+            open(_fp, "w").write("#!/bin/sh\n")
+            os.chmod(_fp, 0o755)
+    os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + _fake_bin
+
     # Consultas de solo lectura auto-ejecutadas (1/10, bug real: "me decís
     # que lo hacés pero no lo hacés" -- gonzabot solo sugería, nunca corría).
     _t("_is_readonly_query: squeue solo es de lectura",
