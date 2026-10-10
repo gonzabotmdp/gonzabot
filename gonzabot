@@ -2796,6 +2796,130 @@ def _fix_sbatch(text: str) -> str:
                 + f"{indent}source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\n"
                 + block[insert_at:])
 
+    _RE_GMX_INVOKE = _re.compile(r'^([ \t]*)(?:mpirun[^\n]*?\s|srun[^\n]*?\s)?gmx(?:_mpi)?\s+\w', _re.M)
+    _RE_GMX_ENV = _re.compile(
+        r'GROMACS_DIR|spack\s+load\b[^\n]*gromacs|location\s+-i\s+/humbjkf|'
+        r'spack\s+load\s+/humbjkf|gromacs[^\n]*/bin', _re.I)
+
+    def _fix_missing_gromacs_env(block: str) -> str:
+        """sbatch CPU que invoca gmx_mpi sin cargar GROMACS: el job muere con
+        'command not found' (gmx_mpi no está en el PATH base). Se inyecta el
+        bloque canónico de md-sim.txt (/humbjkf + openmpi /2cgnkug)."""
+        if '#SBATCH' not in block or _RE_GMX_ENV.search(block):
+            return block
+        if _re.search(r'--gres[= ]\s*gpu|--partition[= ]\s*gpu|-p\s+gpu', block):
+            return block
+        m = _RE_GMX_INVOKE.search(block)
+        if not m:
+            return block
+        ind = m.group(1)
+        has_spack = bool(_re.search(r'^\s*SPACK\s*=', block, _re.M))
+        lines = []
+        if not has_spack:
+            lines.append("SPACK=/apps/local/spack/spack-2026b/spack/bin/spack")
+        lines += [
+            "GROMACS_DIR=$($SPACK --disable-locks location -i /humbjkf 2>/dev/null)",
+            "OMPI_DIR=$($SPACK --disable-locks location -i /2cgnkug 2>/dev/null)",
+            "export PATH=${GROMACS_DIR}/bin:${OMPI_DIR}/bin:$PATH",
+        ]
+        if 'OMP_NUM_THREADS' not in block:
+            lines.append("export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}")
+        ins = ''.join(f"{ind}{l}\n" for l in lines)
+        return block[:m.start()] + ins + block[m.start():]
+
+    _RE_GMX_LINE = _re.compile(r'^[^#\n]*\bgmx(?:_mpi)?\s+\w+[^\n]*', _re.M)
+    _RE_CD_WD = _re.compile(r'\bcd\s+"?\$\{?WORKDIR\}?"?')
+
+    def _fix_gmx_input_copy(block: str) -> str:
+        """gmx lee un input por ruta relativa (-s topol.tpr, -f x.mdp...) pero el
+        script hace cd a un WORKDIR nuevo y vacío: mdrun falla 'file not found'.
+        Se agrega cp desde $SLURM_SUBMIT_DIR justo después del cd (salvo que el
+        archivo lo cree o copie el propio script)."""
+        if '#SBATCH' not in block:
+            return block
+        lines = block.split('\n')
+        cd_i = next((i for i, l in enumerate(lines)
+                     if not l.lstrip().startswith('#') and _RE_CD_WD.search(l)), None)
+        if cd_i is None:
+            return block
+        rest = '\n'.join(lines[cd_i + 1:])
+        names = []
+        for gm in _RE_GMX_LINE.finditer(rest):
+            for am in _re.finditer(r'\s-(?:s|f|c|p|n|t|cpi|r|ref)\s+([A-Za-z0-9_.\-]+\.[A-Za-z]{2,4})\b', gm.group(0)):
+                n = am.group(1)
+                if n in names:
+                    continue
+                if _re.search(r'-o\s+' + _re.escape(n) + r'\b|>\s*' + _re.escape(n)
+                              + r'|\bcp\b[^\n]*' + _re.escape(n), rest):
+                    continue
+                names.append(n)
+        if not names:
+            return block
+        ind = _re.match(r'\s*', lines[cd_i]).group(0)
+        cps = [f'{ind}cp "$SLURM_SUBMIT_DIR"/{n} .' for n in names]
+        lines[cd_i + 1:cd_i + 1] = cps
+        return '\n'.join(lines)
+
+    def _fix_undefined_spack_var(block: str) -> str:
+        """El modelo usa $SPACK (location -i ...) sin definirlo: el job falla con
+        'command not found'. Se define justo antes del primer uso."""
+        if '#SBATCH' not in block:
+            return block
+        if _re.search(r'^\s*(?:export\s+)?SPACK\s*=', block, _re.M):
+            return block
+        m = _re.search(r'^([ \t]*)[^#\n]*\$\{?SPACK\}?(?![A-Za-z0-9_])', block, _re.M)
+        if not m:
+            return block
+        return (block[:m.start()] + m.group(1)
+                + "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n" + block[m.start():])
+
+    def _fix_bare_spack_load_sh(block: str) -> str:
+        """'spack load --sh X' suelto (sin eval) no activa nada: se envuelve en
+        eval $(...) y se asegura el setup-env de spack en el sbatch."""
+        if '#SBATCH' not in block:
+            return block
+        pat = _re.compile(r'^([ \t]*)(spack\s+load\s+--sh\s+[^\n$`;&|()]+?)[ \t]*$', _re.M)
+        if not pat.search(block):
+            return block
+        block = pat.sub(lambda m: f"{m.group(1)}eval $({m.group(2)})", block)
+        if 'setup-env.sh' not in block:
+            m = _re.search(r'^[ \t]*eval \$\(spack load --sh', block, _re.M)
+            block = (block[:m.start()]
+                     + "export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config\n"
+                     + "source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh\n"
+                     + block[m.start():])
+        return block
+
+    _PREF_CONF = "/apps/local/spack/spack-2026b/site/preferred-hashes.conf"
+
+    def _fix_spack_load_aliases(block: str) -> str:
+        """En sbatch no existe el wrapper de preferred-hashes.conf: 'spack load
+        lammps-cpu' (alias) o 'lammps' (2 builds) falla. Se reescribe a /hash."""
+        try:
+            prefs = {}
+            for ln in open(_PREF_CONF):
+                ln = ln.strip()
+                if ln and not ln.startswith('#'):
+                    parts = ln.split()
+                    if len(parts) == 2 and len(parts[1]) >= 7:
+                        prefs[parts[0]] = parts[1][:7]
+        except OSError:
+            return block
+        in_batch = '#SBATCH' in block
+
+        def _sub(m):
+            args = m.group(2).split()
+            new = [('/' + prefs[a]) if a in prefs else a for a in args]
+            return m.group(1) + ' '.join(new)
+
+        pat = _re.compile(r'(spack\s+load\s+(?:--sh\s+)?)([^\n$`;&|()]+)')
+        out = []
+        for ln in block.split('\n'):
+            if '--sh' in ln or (in_batch and not ln.lstrip().startswith('#')):
+                ln = pat.sub(_sub, ln)
+            out.append(ln)
+        return '\n'.join(out)
+
     def _fix_latex_heredoc(block: str) -> str:
         """Fix \\\\cmd → \\cmd in LaTeX heredoc sections targeting .tex files."""
         lines = block.split('\n')
@@ -2832,7 +2956,14 @@ def _fix_sbatch(text: str) -> str:
             body = _fix_dollar_escapes(body)
             body = _fix_module_load(body)
             body = _fix_missing_python_env(body)
+            body = _fix_bare_spack_load_sh(body)
+            body = _fix_spack_load_aliases(body)
+            body = _fix_undefined_spack_var(body)
+            body = _fix_missing_gromacs_env(body)
+            body = _fix_gmx_input_copy(body)
             body = _fix_latex_heredoc(body)
+        elif not is_lmp and '--sh' in body:
+            body = _fix_spack_load_aliases(body)
         if is_bash or is_lmp:
             warns = _lint_lammps(body)
             if is_bash:
@@ -3137,7 +3268,8 @@ def _selftest() -> int:
         "export PATH=${AOCC}/bin:$PATH\n"
         "clang -O3 -march=znver4 -I${GSL}/include prog.c -L${GSL}/lib -lgsl -o prog"))
     _t("lint: SPACK/AOCC bare (sin sufijo _DIR) usados sin definir (bug real 30/8)",
-       "'SPACK' se usa pero nunca se define" in r and "'AOCC' se usa pero nunca se define" in r)
+       "'SPACK' se usa pero nunca se define" not in r and "SPACK=/apps" in r
+       and "'AOCC' se usa pero nunca se define" in r)
     r = _fix_sbatch(B.format(
         "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
         "AOCC=$($SPACK --disable-locks location -i /vs4buop 2>/dev/null)\n"
@@ -3272,6 +3404,48 @@ def _selftest() -> int:
         "ADIOS_DIR=$($SPACK --disable-locks location -i adios2 2>/dev/null)"))
     _t("lint: nombre de paquete real bare (adios2, no es hash) → sin falso positivo",
        "⚠" not in r)
+    r = _fix_sbatch(B.format("mpirun -np $SLURM_NTASKS gmx_mpi mdrun -deffnm output"))
+    _t("gromacs: sbatch CPU sin entorno → se inyecta /humbjkf + openmpi",
+       "location -i /humbjkf" in r and "location -i /2cgnkug" in r
+       and r.index("location -i /humbjkf") < r.index("gmx_mpi mdrun")
+       and "SPACK=/apps" in r)
+    r = _fix_sbatch(B.format("GROMACS_DIR=$($SPACK location -i /humbjkf)\nmpirun gmx_mpi mdrun"))
+    _t("gromacs: sbatch con entorno ya definido → no se duplica",
+       r.count("location -i /humbjkf") == 1)
+    r = _fix_sbatch(B.format("X=$($SPACK location -i /humbjkf 2>/dev/null)\necho $X"))
+    _t("spack: $SPACK usado sin definir → se define antes del primer uso",
+       r.index("SPACK=/apps") < r.index("$($SPACK") and "nunca se define" not in r)
+    r = _fix_sbatch(B.format("spack load --sh samtools\nsamtools sort a.bam -o b.bam"))
+    _t("spack: 'spack load --sh X' suelto → eval $(...) + setup-env",
+       "eval $(spack load --sh samtools)" in r and "setup-env.sh" in r
+       and r.index("setup-env.sh") < r.index("eval $(spack"))
+    r = _fix_sbatch(B.format("source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh\neval $(spack load --sh bwa)\nbwa mem"))
+    _t("spack: eval $(spack load --sh X) ya correcto → intacto",
+       r.count("eval $(spack load --sh bwa)") == 1 and r.count("setup-env.sh") == 1)
+    r = _fix_sbatch(B.format("eval $(spack load --sh lammps-cpu)\neval $(spack load --sh lammps-gpu)\nlmp -in x"))
+    _t("spack: alias lammps-cpu/gpu en sbatch → /hash (no hay wrapper en batch)",
+       "--sh /mgsqgyo)" in r and "--sh /odhttgc)" in r and "lammps-cpu" not in r)
+    r = _fix_sbatch("En sbatch:\n```bash\nexport X=1\neval $(spack load --sh lammps-cpu)\n```")
+    _t("spack: snippet sin #SBATCH con eval spack load --sh alias → /hash",
+       "--sh /mgsqgyo)" in r)
+    r = _fix_sbatch("Interactivo:\n```bash\nspack load lammps-cpu\n```")
+    _t("spack: 'spack load alias' interactivo (wrapper de login) → intacto",
+       "spack load lammps-cpu" in r)
+    r = _fix_sbatch(B.format("eval $(spack load --sh samtools)\nsamtools view a.bam"))
+    _t("spack: paquete sin entrada en preferred-hashes → intacto",
+       "--sh samtools)" in r)
+    r = _fix_sbatch(B.format("SPACK=/x/spack\nX=$($SPACK location -i /humbjkf)"))
+    _t("spack: $SPACK ya definido → no se duplica", r.count("SPACK=/") == 1)
+    r = _fix_sbatch(B.format("WORKDIR=/mnt/cpu-data/$USER/g_$SLURM_JOB_ID\nmkdir -p $WORKDIR\ncd $WORKDIR\n"
+                             "mpirun -np 4 gmx_mpi mdrun -s topol.tpr -deffnm output"))
+    _t("gromacs: input relativo tras cd WORKDIR → cp desde SLURM_SUBMIT_DIR",
+       'cp "$SLURM_SUBMIT_DIR"/topol.tpr .' in r
+       and r.index("cp \"$SLURM_SUBMIT_DIR\"") < r.index("gmx_mpi mdrun"))
+    r = _fix_sbatch(B.format("cd $WORKDIR\ngmx_mpi grompp -f a.mdp -c b.gro -p t.top -o topol.tpr\n"
+                             "mpirun gmx_mpi mdrun -s topol.tpr"))
+    _t("gromacs: topol.tpr generado por grompp NO se copia; a.mdp/b.gro/t.top sí",
+       "SLURM_SUBMIT_DIR\"/topol.tpr" not in r and "SLURM_SUBMIT_DIR\"/a.mdp" in r
+       and "SLURM_SUBMIT_DIR\"/t.top" in r)
     r = _fix_sbatch(B.format(
         "SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\n"
         "GROMACS_DIR=$($SPACK location -i gromacs@2024.3%gcc@14.2.0+cuda 2>/dev/null)"))

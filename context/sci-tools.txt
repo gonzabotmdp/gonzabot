@@ -53,7 +53,7 @@ Intel MPI: ⚠ NO INSTALADO — `spack find intel-oneapi-mpi` no devuelve nada (
   Intel oneAPI Compilers, mismo motivo). Si lo piden, avisar que no está disponible.
   Códigos del cluster compilados con OpenMPI — openmpi único en spack-2026b ahora: /2cgnkug.
 
-R 4.5.2 (tidyverse 2.0.0, r-sf 1.0-16, r-terra 1.7-78). Usar SIEMPRE "spack load r" bare (vía
+R 4.5.2 (r-sf 1.1-0, r-terra 1.9-11; el metapaquete TIDYVERSE NO está instalado: library(tidyverse) falla — usar dplyr/tidyr/readr/purrr/stringr/ggplot2/tibble por separado). Usar SIEMPRE "spack load r" bare (vía
   preferred-hashes.conf ya resuelve al hash bueno) o el hash explícito /3xnipqp:
   ⚠ CRÍTICO: /aktpqec (otro hash de r@4.5.2 que también existe) tiene un bug real de BLAS
   silencioso — cae a libRblas.so interno en vez de openblas, sin ningún error visible, solo
@@ -62,6 +62,15 @@ R 4.5.2 (tidyverse 2.0.0, r-sf 1.0-16, r-terra 1.7-78). Usar SIEMPRE "spack load
   export R_LIBS=$(find $R_DIR -maxdepth 4 -name "library" -type d 2>/dev/null | head -1)
   ${R_DIR}/bin/Rscript script.R  # gráficos en sbatch: ggsave() o png()/dev.off() (NO X11). Partición cpu.
   CRITICO heredoc: usar << 'REOF' (con comillas). Dentro de heredoc quoted, NO poner \ antes de $: escribir data$col NO data\$col.
+  PAQUETES R (ggplot2, dplyr, sf, terra, data.table, vegan, lme4, etc.) — verificado con job real 9/10: el R_LIBS de arriba
+  NO los incluye (library(ggplot2) falla). Hay que cargarlos con spack junto con R en UN solo eval:
+  export SPACK_USER_CONFIG_PATH=/apps/local/spack/spack-2026b/user-config
+  source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh
+  eval $(spack load --sh /3xnipqp /ofunba5 r-dplyr r-tidyr r-readr)   # R + ggplot2 3.5.2 (/ofunba5; 4.0.3 es /tfoorykl) + los r-* que pida el script
+  Rscript script.R    # (ya en PATH tras el eval; con heredoc usar << 'REOF')
+  Nombre pelado "r-X" resuelve solo (1 build); excepciones con 2 builds: r-ggplot2 (usar hash), r-htmltools (/tic24rc), r-rcpp (/6l43db4).
+  Instalados: ggplot2 dplyr tidyr readr purrr tibble stringr stringi data.table sf terra raster sp vegan lme4 mgcv igraph shiny knitr rmarkdown ape adegenet cowplot ggpubr ggrepel scales viridislite lattice MASS Matrix e1071 y otros r-*. Si piden uno que no esté en `spack find r-X`: avisar que no está y pedirlo a Gonzalo/softadm.
+  El aviso "codetools not available" al cargar terra es inofensivo.
   Consolidación real 5/10 (softadm): el split +X/~X de R que forzaba 62 paquetes r-* a
   quedar duplicados ("matches multiple packages" al cargar) se resolvió reconstruyendo
   r-resistancega2/r-kuenm/r-makurhini contra este mismo R bueno. Quedan solo 2 paquetes

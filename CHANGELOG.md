@@ -41,9 +41,26 @@ into production on the IFIMAR cluster.
   `cuda@13.0.2` validated; 12.6.2 still preferred for compiling); R/Spack hash
   updates (r-makurhini) and the corrected `gonzabot-watcher.sh` (never submits a
   second vLLM job) synced from production.
+- Spack hardening (the most requested topic), all deterministic post-processing
+  in `_fix_sbatch`, each with selftests:
+  - `spack load --sh X` written bare (no `eval`) does nothing; it is now wrapped
+    in `eval $(...)` and the spack `setup-env.sh` lines are added if missing.
+  - Aliases from `preferred-hashes.conf` (`lammps-cpu`, `lammps-gpu`, bare
+    `lammps`, ...) only resolve in login shells; inside batch jobs they fail
+    ("matches no installed packages" / ambiguous). They are rewritten to
+    `/hash` (read from the live conf file; interactive use is left untouched).
+  - GROMACS sbatch without environment: `GROMACS_DIR`/`OMPI_DIR`/`PATH` are
+    injected (CPU jobs); relative input files are copied from
+    `$SLURM_SUBMIT_DIR` after `cd $WORKDIR`; `$SPACK` used but never defined
+    is defined before first use.
+  - Context: never "module load" / `~/.bashrc` advice (core rule), mpi4py via
+    its env file (bare `py-mpi4py` is ambiguous), geopandas documented as not
+    installed, R packages (ggplot2, dplyr, sf, ...) must be loaded with
+    `spack load` next to R (the old `R_LIBS` recipe only exposed base R), and
+    `tidyverse` is not installed.
 
 ### Tests
-- `--selftest` grows from 212 to 221 checks.
+- `--selftest` grows from 212 to 233 checks.
 
 ## [1.6.0] - 2026-10-08
 
