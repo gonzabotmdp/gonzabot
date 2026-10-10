@@ -58,9 +58,24 @@ into production on the IFIMAR cluster.
     installed, R packages (ggplot2, dplyr, sf, ...) must be loaded with
     `spack load` next to R (the old `R_LIBS` recipe only exposed base R), and
     `tidyverse` is not installed.
+  - sbatch with `mpirun`/`mpiexec` that never loads OpenMPI (fails on the
+    node with `mpirun: command not found`): the OpenMPI environment is injected.
+  - sbatch in a `gpu*` partition without `--gres`/`--gpus` (job lands on a GPU
+    node with no GPU assigned): `#SBATCH --gres=gpu:1` is added.
+- Lost opening code fence: the `glm45` parser sometimes swallows the opening
+  "```bash", which left the whole sbatch as one collapsed paragraph that
+  skipped the post-processor. A bare `#!/bin/bash` / `#SBATCH` script is now
+  re-fenced deterministically before rendering.
+- Natural-language submission also understands "en un nodo" / "en el
+  cluster" ("corrélo en un nodo"), and when a job is complete (real sbatch, no
+  placeholders left to fill) the bot proactively asks "¿Lo mando a la cola?
+  [s/N]".
 
 ### Tests
-- `--selftest` grows from 212 to 233 checks.
+- `--selftest` grows from 212 to 246 checks. An out-of-tree evaluation set
+  (30 real user requests, automatic checks for bash syntax, live Spack
+  hashes, ambiguity and style) measured 91% -> 96% passing on the
+  OpenMPI fix.
 
 ## [1.6.0] - 2026-10-08
 

@@ -5,7 +5,11 @@
 
 Fortran: gfortran /usr/bin. OpenMP: gfortran -O2 -fopenmp + --ntasks=1 --cpus-per-task=N. integer default 32 bits → overflow silencioso → usar integer(8).
 
-Octave 9.4.0: spack load octave (wrapper); octave --no-gui script.m. Partición cpu.
+Octave 9.4.0 (hash /kysgkfz): en sbatch SIEMPRE esto antes de llamar a octave (sin esto 'octave: command not found'):
+  SPACK=/apps/local/spack/spack-2026b/spack/bin/spack
+  OCTAVE_DIR=$($SPACK --disable-locks location -i /kysgkfz 2>/dev/null)
+  export PATH=${OCTAVE_DIR}/bin:$PATH
+  octave --no-gui script.m   # Partición cpu. El script .m se escribe con heredoc 'EOF' (con comillas) o se copia al WORKDIR.
   CORREGIDO 24/9: la nota vieja "sin GUI/gnuplot" ya no es cierta — el build actual tiene
   +qt+gnuplot (reusa el Qt5 de la instalación de gnuplot+qt del 11/9), confirmado con un
   plot real headless: graphics_toolkit("gnuplot") + print a SVG funciona (probado en vivo).

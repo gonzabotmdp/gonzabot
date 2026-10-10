@@ -372,12 +372,23 @@ _LAST_JOB_PROJECT: "list[tuple[str,str,str]]" = []
 _RE_SUBMIT_NOW = re.compile(
     r'^\s*(?:dale[,.! ]*|ok[,.! ]*|listo[,.! ]*)?'
     r'(?:mand[aá]|envi[aá]|env[ií]a|somet[eé]|lanz[aá]|encol[aá]|pon[eé]|corr[eé]|ejecut[aá])(?:lo|la|los|las)?'
-    r'(?:\s+(?:ya|ahora|nom[aá]s|ahora\s+mismo|a\s+la\s+cola|en\s+la\s+cola|a\s+correr|a\s+slurm|al\s+cluster))*'
+    r'(?:\s+(?:ya|ahora|nom[aá]s|ahora\s+mismo|a\s+la\s+cola|en\s+la\s+cola|a\s+correr|a\s+slurm|al\s+cluster|'
+    r'en\s+(?:un|el|alg[uú]n)\s+nodo|en\s+(?:el\s+)?(?:cluster|slurm|cpu|gpu)))*'
     r'\s*[.!]*\s*$', re.IGNORECASE)
 
 _RE_SUBMIT_IN_REQUEST = re.compile(
     r'\b(?:mand[aá]|envi[aá]|env[ií]a|somet[eé]|lanz[aá]|encol[aá]|pon[eé])(?:lo|la|los|las)?\b'
     r'[^.\n]{0,40}\b(?:cola|slurm|cluster)\b', re.IGNORECASE)
+
+
+_RE_PLACEHOLDER = re.compile(r'<[A-Za-z_ ]{2,20}>|\btu_|\bTU_|mi_archivo|/ruta/(?:a|al|del)|path/to|XXX|CAMBIAR', re.IGNORECASE)
+
+
+def _project_ready(blocks: "list[tuple[str,str,str]]") -> bool:
+    """Hay un sbatch real y ningún archivo/valor pendiente de completar por el usuario."""
+    files = _project_blocks(blocks)
+    return (any(_looks_like_real_sbatch(b[1]) for b in files)
+            and not any(_RE_PLACEHOLDER.search(b[1]) for b in files))
 
 
 def _project_blocks(blocks: "list[tuple[str,str,str]]") -> "list[tuple[str,str,str]]":
@@ -2707,16 +2718,13 @@ def _fix_sbatch(text: str) -> str:
 
     # module name → (hash spack, nombre variable). Ver hpc.txt para la fuente de verdad.
     _MODULE_ALIASES = {
-        "octave":    ("okdqlkti", "OCTAVE_DIR"),
-        "r":         ("u2wwo4jw", "R_DIR"),
-        "julia":     ("xr2wc6tn", "JULIA_DIR"),
-        "wannier90": ("ih77wus",  "WANN_DIR"),
-        "elk":       ("3lkw46bw", "ELK_DIR"),
-        "siesta":    ("hauosan",  "SIESTA_DIR"),
-        "abinit":    ("hiss2mz6", "ABINIT_DIR"),
-        "plumed":    ("4jmhzvb",  "PLUMED_DIR"),
+        "octave":    ("kysgkfz", "OCTAVE_DIR"),
+        "r":         ("3xnipqp", "R_DIR"),
+        "wannier90": ("lxfna7w",  "WANN_DIR"),
+        "elk":       ("zvwixry", "ELK_DIR"),
+        "abinit":    ("gvs6ncj", "ABINIT_DIR"),
     }
-    _MODULE_ROOT_HASH = "llflfpm"
+    _MODULE_ROOT_HASH = "qiwxnch"
     _MODULE_PYTHON_PKGS = {"python", "python3", "anaconda", "anaconda3",
                            "miniconda", "miniconda3", "conda"}
 
@@ -2826,6 +2834,38 @@ def _fix_sbatch(text: str) -> str:
             lines.append("export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-1}")
         ins = ''.join(f"{ind}{l}\n" for l in lines)
         return block[:m.start()] + ins + block[m.start():]
+
+    _RE_MPIRUN_CMD = _re.compile(r'^([ \t]*)(?:mpirun|mpiexec)\b', _re.M)
+    _RE_OMPI_ENV = _re.compile(r'2cgnkug|openmpi|OMPI_DIR|spack\s+load\b[^\n]*\bmpi', _re.I)
+
+    def _fix_missing_openmpi_env(block: str) -> str:
+        """sbatch CPU con mpirun/mpiexec sin cargar OpenMPI: 'mpirun: command not found'
+        en el nodo. Se inyecta /2cgnkug (lmp y gmx tienen su propio arreglo)."""
+        if '#SBATCH' not in block or _RE_OMPI_ENV.search(block):
+            return block
+        if _re.search(r'\b(?:lmp|gmx|gmx_mpi)\b', block):
+            return block
+        m = _RE_MPIRUN_CMD.search(block)
+        if not m:
+            return block
+        ind = m.group(1)
+        has_spack = bool(_re.search(r'^\s*SPACK\s*=', block, _re.M))
+        lines = [] if has_spack else ["SPACK=/apps/local/spack/spack-2026b/spack/bin/spack"]
+        lines += ["OMPI_DIR=$($SPACK --disable-locks location -i /2cgnkug 2>/dev/null)",
+                  "export PATH=${OMPI_DIR}/bin:$PATH"]
+        ins = ''.join(f"{ind}{l}\n" for l in lines)
+        return block[:m.start()] + ins + block[m.start():]
+
+    _RE_GPU_PART = _re.compile(r'^(#SBATCH\s+(?:--partition[= ]\s*|-p\s+)gpu[\w-]*)[ \t]*$', _re.M)
+
+    def _fix_missing_gres(block: str) -> str:
+        """Partición gpu sin --gres: el job corre en el nodo GPU pero sin ninguna GPU asignada."""
+        if '#SBATCH' not in block or _re.search(r'--gres|--gpus', block):
+            return block
+        m = _RE_GPU_PART.search(block)
+        if not m:
+            return block
+        return block[:m.end()] + "\n#SBATCH --gres=gpu:1" + block[m.end():]
 
     _RE_GMX_LINE = _re.compile(r'^[^#\n]*\bgmx(?:_mpi)?\s+\w+[^\n]*', _re.M)
     _RE_CD_WD = _re.compile(r'\bcd\s+"?\$\{?WORKDIR\}?"?')
@@ -2960,6 +3000,8 @@ def _fix_sbatch(text: str) -> str:
             body = _fix_spack_load_aliases(body)
             body = _fix_undefined_spack_var(body)
             body = _fix_missing_gromacs_env(body)
+            body = _fix_missing_openmpi_env(body)
+            body = _fix_missing_gres(body)
             body = _fix_gmx_input_copy(body)
             body = _fix_latex_heredoc(body)
         elif not is_lmp and '--sh' in body:
@@ -3107,6 +3149,17 @@ def _selftest() -> int:
     def _t(name: str, cond: bool):
         results.append((name, bool(cond)))
 
+    _rf = _refence_bare_script("#!/bin/bash\n#SBATCH -n 1\n\noctave x.m\n\nEste script resuelve el sistema con Octave hoy.")
+    _t("script sin valla se re-cerca", _rf.startswith("```bash\n#!/bin/bash") and "octave x.m\n```" in _rf and _rf.rstrip().endswith("hoy."))
+    _t("respuesta con valla intacta", _refence_bare_script("a\n```bash\n#!/bin/bash\n```") == "a\n```bash\n#!/bin/bash\n```")
+    _t("prosa sin script intacta", _refence_bare_script("Hola, usá srun.") == "Hola, usá srun.")
+
+    _t("'corrélo en un nodo' pide someter", bool(_RE_SUBMIT_NOW.match("dale, corrélo en un nodo")))
+    _t("'corrélo en el cluster' pide someter", bool(_RE_SUBMIT_NOW.match("corrélo en el cluster")))
+    _t("pedido nuevo no es 'someter'", not _RE_SUBMIT_NOW.match("corré un benchmark de dgemm"))
+    _t("sbatch completo está listo", _project_ready([("bash", "#!/bin/bash\n#SBATCH -n 1\nsrun hostname", "")]))
+    _t("sbatch con placeholder no está listo", not _project_ready([("bash", "#!/bin/bash\n#SBATCH -n 1\n./correr /ruta/a/tu_input", "")]))
+
     B = "```bash\n#!/bin/bash\n#SBATCH --partition=cpu\n{}\n```"
     L = "```lmp\n{}\n```"
 
@@ -3196,10 +3249,10 @@ def _selftest() -> int:
 
     r = _fix_sbatch(B.format("module load octave\noctave --no-gui script.m"))
     _t("module load octave → auto-fix con hash spack (bug real iperez 13 jul 2026)",
-       "module load" not in r and "/okdqlkti" in r and "export PATH=${OCTAVE_DIR}/bin:$PATH" in r
+       "module load" not in r and "/kysgkfz" in r and "export PATH=${OCTAVE_DIR}/bin:$PATH" in r
        and "octave --no-gui script.m" in r)
     r = _fix_sbatch(B.format("module load r\nRscript a.R"))
-    _t("module load r → auto-fix", "/u2wwo4jw" in r and "module load" not in r)
+    _t("module load r → auto-fix", "/3xnipqp" in r and "module load" not in r)
     r = _fix_sbatch(B.format("module load root\nroot -b -q s.C"))
     _t("module load root → thisroot.sh (caso especial)",
        "source ${ROOT_DIR}/bin/thisroot.sh" in r and "module load" not in r)
@@ -3229,9 +3282,9 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\nmodule load octave\noctave s.m"))
     _t("module load con SPACK ya definido → no lo duplica",
        r.count("SPACK=/apps/local/spack/spack-2026b/spack/bin/spack") == 1)
-    r = _fix_sbatch(B.format("module avail\nmodule load julia"))
-    _t("module avail siempre warnea aunque julia se auto-arregle",
-       "module avail" in r and "no existe en este cluster" in r and "/xr2wc6tn" in r)
+    r = _fix_sbatch(B.format("module avail\nmodule load wannier90"))
+    _t("module avail siempre warnea aunque wannier90 se auto-arregle",
+       "module avail" in r and "no existe en este cluster" in r and "/lxfna7w" in r)
 
     r = _fix_sbatch(B.format("source /mnt/cpu-data/shared/ifimar-ai/envs/casa.env\necho hola"))
     _t("lint: source a archivo inexistente (bug real casa.env 13 jul 2026)",
@@ -3409,6 +3462,17 @@ def _selftest() -> int:
        "location -i /humbjkf" in r and "location -i /2cgnkug" in r
        and r.index("location -i /humbjkf") < r.index("gmx_mpi mdrun")
        and "SPACK=/apps" in r)
+    r = _fix_sbatch(B.format("mpirun -np $SLURM_NTASKS ./programa"))
+    _t("mpi: mpirun sin OpenMPI → se inyecta /2cgnkug antes del mpirun",
+       "location -i /2cgnkug" in r and r.index("location -i /2cgnkug") < r.index("mpirun -np"))
+    r = _fix_sbatch(B.format("OMPI_DIR=$($SPACK location -i /2cgnkug)\nmpirun ./a"))
+    _t("mpi: con OpenMPI ya cargado → no se duplica", r.count("2cgnkug") == 1)
+    r = _fix_sbatch("```bash\n#!/bin/bash\n#SBATCH --partition=gpu\n#SBATCH --time=01:00:00\npython3 a.py\n```")
+    _t("gpu: partición gpu sin --gres → se agrega --gres=gpu:1", "#SBATCH --gres=gpu:1" in r)
+    r = _fix_sbatch("```bash\n#!/bin/bash\n#SBATCH --partition=gpu\n#SBATCH --gres=gpu:2\npython3 a.py\n```")
+    _t("gpu: con --gres ya puesto → no se duplica", r.count("--gres") == 1)
+    r = _fix_sbatch(B.format("echo hola"))
+    _t("gpu: partición cpu → no se agrega --gres", "--gres" not in r)
     r = _fix_sbatch(B.format("GROMACS_DIR=$($SPACK location -i /humbjkf)\nmpirun gmx_mpi mdrun"))
     _t("gromacs: sbatch con entorno ya definido → no se duplica",
        r.count("location -i /humbjkf") == 1)
@@ -4311,6 +4375,31 @@ class _ThinkFilter:
         return (b, "") if m == "probe" else ("", b)
 
 
+def _refence_bare_script(t: str) -> str:
+    """Respuesta con un script (#!/bin/bash o #SBATCH) pero SIN ningún ```: el
+    modelo/parser perdió la valla de apertura; sin ella el script se muestra como
+    prosa colapsada y el postproceso no corre. Re-cerca el script."""
+    import re as _re
+    if "```" in t:
+        return t
+    lines = t.split("\n")
+    start = next((i for i, l in enumerate(lines)
+                  if l.startswith("#!/bin/bash") or l.startswith("#SBATCH")), None)
+    if start is None:
+        return t
+    prose = _re.compile(r"^[A-ZÁÉÍÓÚ][a-záéíóúñ]+[ ,]\S+(?:\s+\S+){3,}")
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if prose.match(lines[i]) and not _re.match(r"^[A-Z_]+=", lines[i]) \
+                and not lines[i - 1].strip():
+            end = i
+            break
+    body = "\n".join(lines[start:end]).rstrip("\n")
+    head = "\n".join(lines[:start]).rstrip("\n")
+    tail = "\n".join(lines[end:]).strip("\n")
+    out = (head + "\n\n" if head else "") + "```bash\n" + body + "\n```"
+    return out + ("\n\n" + tail if tail else "") + "\n"
+
 def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool = False,
                     check_garbage: bool = True) -> str:
     """Stream chat completion; print tokens as they arrive; return full text.
@@ -4769,6 +4858,14 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
             print(_c(YEL, " [cancelado — Ctrl-C de nuevo en el prompt para salir]"))
         elif _console is None:
             print()  # newline after streaming (live mode no lo necesita)
+    if not user_aborted.is_set():
+        _rf_raw = "".join(_raw_buf)
+        _rf_fixed = _refence_bare_script(_rf_raw)
+        if _rf_fixed != _rf_raw:
+            _raw_buf = [_rf_fixed]
+            full_text = [_rf_fixed]
+            _rich_blocks.clear()
+            _rich_blocks.extend(_extract_code_blocks_from_text(_rf_fixed))
     text = "".join(full_text)
 
     # Bug real 3/10: una respuesta cortada por max_tokens a mitad de un
@@ -6948,6 +7045,7 @@ def repl(new_session: bool = False):
                 print(_c(RED, "\nEl servicio de IA no está disponible. Contactá a Gonzalo: garroyo@ifimar-conicet.gob.ar\n"))
                 continue
 
+        _pj_before = [tuple(b) for b in _LAST_JOB_PROJECT]
         try:
             reply = stream_response(messages_to_send, max_tokens=_max_tok)
         except RuntimeError as e:
@@ -7064,6 +7162,12 @@ def repl(new_session: bool = False):
                 print(_c(DIM, "  " + "\n  ".join(_bare_out.splitlines()[:40])))
 
         if (_RE_SUBMIT_IN_REQUEST.search(user_input) and _LAST_JOB_PROJECT
+                and not _RE_WORKFLOW_INTENT.search(user_input)):
+            _sub_note = _offer_submit_project(_LAST_JOB_PROJECT)
+            if _sub_note:
+                reply += "\n\n" + _sub_note
+        elif ([tuple(b) for b in _LAST_JOB_PROJECT] != _pj_before
+                and _project_ready(_LAST_JOB_PROJECT)
                 and not _RE_WORKFLOW_INTENT.search(user_input)):
             _sub_note = _offer_submit_project(_LAST_JOB_PROJECT)
             if _sub_note:
