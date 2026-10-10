@@ -2937,7 +2937,7 @@ def _fix_sbatch(text: str) -> str:
         lammps-cpu' (alias) o 'lammps' (2 builds) falla. Se reescribe a /hash."""
         try:
             prefs = {}
-            for ln in open(_PREF_CONF):
+            for ln in open(os.environ.get('GONZABOT_PREFERRED_HASHES') or _PREF_CONF):
                 ln = ln.strip()
                 if ln and not ln.startswith('#'):
                     parts = ln.split()
@@ -3486,6 +3486,12 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh\neval $(spack load --sh bwa)\nbwa mem"))
     _t("spack: eval $(spack load --sh X) ya correcto → intacto",
        r.count("eval $(spack load --sh bwa)") == 1 and r.count("setup-env.sh") == 1)
+    if not os.path.exists("/apps/local/spack/spack-2026b/site/preferred-hashes.conf"):
+        import tempfile as _tf
+        _pc = _tf.NamedTemporaryFile("w", suffix=".conf", delete=False)
+        _pc.write("lammps-cpu mgsqgyo42lix7gd3xn5ltak6efd6idgs\nlammps-gpu odhttgc2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n")
+        _pc.close()
+        os.environ["GONZABOT_PREFERRED_HASHES"] = _pc.name
     r = _fix_sbatch(B.format("eval $(spack load --sh lammps-cpu)\neval $(spack load --sh lammps-gpu)\nlmp -in x"))
     _t("spack: alias lammps-cpu/gpu en sbatch → /hash (no hay wrapper en batch)",
        "--sh /mgsqgyo)" in r and "--sh /odhttgc)" in r and "lammps-cpu" not in r)
