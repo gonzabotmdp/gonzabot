@@ -262,9 +262,9 @@ def _handle_runtime_error(e: Exception) -> None:
         sys.stdout.write("\r\x1b[2K")
         sys.stdout.flush()
         if _console:
-            _console.print("\n[yellow]↺ Respuesta inválida — intentá reformular la pregunta.[/yellow]\n")
+            _console.print(_tr("\n[yellow]↺ Respuesta inválida — intentá reformular la pregunta.[/yellow]\n", "\n[yellow]↺ Invalid response — try rephrasing the question.[/yellow]\n"))
         else:
-            print(_c(YEL, "\n↺ Respuesta inválida — intentá reformular la pregunta.\n"))
+            print(_c(YEL, _tr("\n↺ Respuesta inválida — intentá reformular la pregunta.\n", "\n↺ Invalid response — try rephrasing the question.\n")))
     else:
         print(_c(RED, f"\nError: {err_s}\n"))
 
@@ -433,7 +433,7 @@ def _submit_project(blocks: "list[tuple[str,str,str]]") -> "tuple[bool, str, Pat
     files = _project_blocks(blocks)
     sb_idx = next((i for i in range(len(files) - 1, -1, -1) if _looks_like_real_sbatch(files[i][1])), None)
     if sb_idx is None:
-        return (False, "Ningún bloque tiene #SBATCH, no hay nada para someter.", None)
+        return (False, _tr("Ningún bloque tiene #SBATCH, no hay nada para someter.", "No block has #SBATCH, nothing to submit."), None)
     names = _saveall_names(files)
     d = Path.home() / "gonzabot-jobs" / datetime.now().strftime("%Y%m%d-%H%M%S")
     try:
@@ -445,28 +445,28 @@ def _submit_project(blocks: "list[tuple[str,str,str]]") -> "tuple[bool, str, Pat
             (d / n).write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
         r = subprocess.run(["sbatch", names[sb_idx]], capture_output=True, text=True, cwd=str(d))
     except FileNotFoundError:
-        return (False, "sbatch no disponible en este nodo.", d)
+        return (False, _tr("sbatch no disponible en este nodo.", "sbatch is not available on this node."), d)
     except OSError as e:
-        return (False, f"No pude preparar {d}: {e}", d)
+        return (False, _tr(f"No pude preparar {d}: {e}", f"Could not prepare {d}: {e}"), d)
     return (r.returncode == 0, (r.stdout.strip() or r.stderr.strip()), d)
 
 
 def _offer_submit_project(blocks: "list[tuple[str,str,str]]") -> "str | None":
     files = _project_blocks(blocks)
     if not any(_looks_like_real_sbatch(b[1]) for b in files):
-        print(_c(YEL, "  No hay ningún sbatch generado en esta sesión para mandar a la cola."))
+        print(_c(YEL, _tr("  No hay ningún sbatch generado en esta sesión para mandar a la cola.", "  There is no sbatch generated in this session to send to the queue.")))
         return None
     names = _saveall_names(files)
-    print(_c(BOLD, "\n  Voy a guardar estos archivos en ~/gonzabot-jobs/<fecha>/ y someter el sbatch:"))
+    print(_c(BOLD, _tr("\n  Voy a guardar estos archivos en ~/gonzabot-jobs/<fecha>/ y someter el sbatch:", "\n  I will save these files in ~/gonzabot-jobs/<date>/ and submit the sbatch:")))
     for n in names:
         print(f"    • {n}")
-    if not _yn_raw(_c(BOLD, "  ¿Lo mando a la cola? [s/N]: ")):
-        print(_c(DIM, "  Cancelado."))
+    if not _yn_raw(_c(BOLD, _tr("  ¿Lo mando a la cola? [s/N]: ", "  Send it to the queue? [y/N]: "))):
+        print(_c(DIM, _tr("  Cancelado.", "  Cancelled.")))
         return None
     ok, out, d = _submit_project(files)
     print(_c(GRN if ok else RED, "  " + out))
     if ok and d:
-        print(_c(DIM, f"  Archivos y resultados de este envío: {d}  ·  seguimiento: squeue -u $USER"))
+        print(_c(DIM, _tr(f"  Archivos y resultados de este envío: {d}  ·  seguimiento: squeue -u $USER", f"  Files and results of this submission: {d}  ·  follow up with: squeue -u $USER")))
         return f"[gonzabot sometió {', '.join(names)} a la cola: {out}. Carpeta de trabajo: {d}]"
     return None
 
@@ -889,10 +889,10 @@ def _raw_input(prompt: str) -> str:
         _is_sbatch = any("#SBATCH" in l for l in lines)
         # Preview: primeras 3 líneas (solo si no es sbatch)
         if _is_sbatch:
-            sys.stdout.write(f"\r\x1b[2K{prompt}\x1b[2m[sbatch · {n} líneas — s para someter, Enter para analizar]\x1b[0m\r\n")
+            sys.stdout.write(f"\r\x1b[2K{prompt}\x1b[2m" + _tr(f"[sbatch · {n} líneas — s para someter, Enter para analizar]", f"[sbatch · {n} lines — y to submit, Enter to analyze]") + "\x1b[0m\r\n")
         else:
-            sys.stdout.write(f"\r\x1b[2K{prompt}\x1b[2m[pegado: {n} {'línea' if n == 1 else 'líneas'}]\x1b[0m\r\n")
-            sys.stdout.write(f"  \x1b[36m+\x1b[0m \x1b[2m(Enter para enviar, o escribí tu pregunta)\x1b[0m\r\n")
+            sys.stdout.write(f"\r\x1b[2K{prompt}\x1b[2m" + _tr(f"[pegado: {n} {'línea' if n == 1 else 'líneas'}]", f"[pasted: {n} {'line' if n == 1 else 'lines'}]") + "\x1b[0m\r\n")
+            sys.stdout.write("  \x1b[36m+\x1b[0m \x1b[2m" + _tr("(Enter para enviar, o escribí tu pregunta)", "(Enter to send, or type your question)") + "\x1b[0m\r\n")
         sys.stdout.write(f"  \x1b[36m❯\x1b[0m ")
         sys.stdout.flush()
         # Leer línea adicional en raw mode (con manejo de escape sequences y bracketed paste)
@@ -1352,24 +1352,37 @@ _TIPS = [
 ]
 
 
+_TIPS_EN = [
+    "use /load ~/script.sh so the bot reviews your code before submitting",
+    "/diagnose <job_id> sends the job's logs straight to the bot for diagnosis",
+    "/diff ~/script.sh shows in green/red what the bot would change in your file",
+    "paste an sbatch → the bot detects #SBATCH and offers y = submit to the cluster",
+    "/edit applies changes with automatic backup — you can always go back to the .bak",
+    "/load ~/scripts/*.sh loads all the files of a directory at once",
+    "/history shows your latest conversations so you can pick up where you left off",
+    "the bot remembers the last 30 messages (~15 turns) of the current session",
+    "if the service does not respond: squeue -p inference  to see whether it is running",
+    "can't remember a command? type /help and I'll show them all",
+]
+
 def print_welcome(session_id: str, ctx_count: int, new_session: bool):
     import random
-    tip = random.choice(_TIPS)
+    tip = random.choice(_tr(_TIPS, _TIPS_EN))
 
     online = _check_online()
-    hist = (f"con historial ({ctx_count} msgs)" if (not new_session and ctx_count > 0)
-            else "sesión nueva")
+    hist = (_tr(f"con historial ({ctx_count} msgs)", f"with history ({ctx_count} msgs)") if (not new_session and ctx_count > 0)
+            else _tr("sesión nueva", "new session"))
 
     if _console and _RICH_AVAILABLE:
         # ── rich Panel ────────────────────────────────────────────────────────
         svc_body = _RichText()
-        svc_body.append("  Modelo    ", style="dim")
+        svc_body.append(_tr("  Modelo    ", "  Model     "), style="dim")
         svc_body.append(MODEL)
         svc_body.append(f"  ·  {VLLM_BASE.removeprefix('http://').removesuffix('/v1')}\n", style="dim")
-        svc_body.append("  Sesión    ", style="dim")
+        svc_body.append(_tr("  Sesión    ", "  Session   "), style="dim")
         svc_body.append(session_id, style="bold")
         svc_body.append(f"  ·  {hist}\n", style="dim")
-        svc_body.append("  Servicio  ", style="dim")
+        svc_body.append(_tr("  Servicio  ", "  Service   "), style="dim")
         svc_body.append("● " if online else "○ ", style="green" if online else "red")
         svc_body.append("ONLINE" if online else "OFFLINE", style="green" if online else "red")
         svc_body.append("\n\n", style="dim")
@@ -1378,14 +1391,14 @@ def print_welcome(session_id: str, ctx_count: int, new_session: bool):
         svc_body.append("  Ctrl-D", style="dim")
 
         title = _RichText("✦ GONZABOT", style="bold cyan")
-        title.append("  —  Asistente IA del Cluster HPC UNMDP", style="dim")
+        title.append(_tr("  —  Asistente IA del Cluster HPC UNMDP", "  —  AI Assistant for the UNMDP HPC Cluster"), style="dim")
         _console.print(_RichPanel(svc_body, title=title, border_style="dim cyan", padding=(0, 1)))
 
         if not online:
-            _console.print(" [yellow]⚠[/yellow]  [yellow]Servicio no disponible. Escribí tu consulta para iniciarlo.[/yellow]")
+            _console.print(_tr(" [yellow]⚠[/yellow]  [yellow]Servicio no disponible. Escribí tu consulta para iniciarlo.[/yellow]", " [yellow]⚠[/yellow]  [yellow]Service unavailable. Type your query to start it.[/yellow]"))
             _console.print()
         _console.print(f" [dim]» {tip}[/dim]")
-        _console.print(f" [dim]⚠ GONZABOT es IA — verificá las respuestas antes de aplicarlas.[/dim]")
+        _console.print(_tr(f" [dim]⚠ GONZABOT es IA — verificá las respuestas antes de aplicarlas.[/dim]", " [dim]⚠ GONZABOT is AI — verify the answers before applying them.[/dim]"))
         _console.print()
     else:
         # ── fallback ANSI ─────────────────────────────────────────────────────
@@ -1402,12 +1415,12 @@ def print_welcome(session_id: str, ctx_count: int, new_session: bool):
             print(_c(DIM, L + ch * (W - 2) + R))
 
         sep("─", "╭", "╮")
-        row(_c(BOLD + CYAN, "✦ GONZABOT") + _c(DIM, "  —  Asistente IA del Cluster HPC UNMDP"))
+        row(_c(BOLD + CYAN, "✦ GONZABOT") + _c(DIM, _tr("  —  Asistente IA del Cluster HPC UNMDP", "  —  AI Assistant for the UNMDP HPC Cluster")))
         row()
         _vllm_host = VLLM_BASE.removeprefix("http://").removesuffix("/v1")
-        row(_c(DIM, "  Modelo    ") + MODEL + _c(DIM, f"  ·  {_vllm_host}"))
-        row(_c(DIM, "  Sesión    ") + _c(BOLD, session_id) + _c(DIM, f"  ·  {hist}"))
-        row(_c(DIM, "  Servicio  ") + dot + "  " + status)
+        row(_c(DIM, _tr("  Modelo    ", "  Model     ")) + MODEL + _c(DIM, f"  ·  {_vllm_host}"))
+        row(_c(DIM, _tr("  Sesión    ", "  Session   ")) + _c(BOLD, session_id) + _c(DIM, f"  ·  {hist}"))
+        row(_c(DIM, _tr("  Servicio  ", "  Service   ")) + dot + "  " + status)
         row()
         sep()
         row(_c(DIM, "  /load  /save  /diff  /edit  /diagnose  ")
@@ -1415,10 +1428,10 @@ def print_welcome(session_id: str, ctx_count: int, new_session: bool):
         sep("─", "╰", "╯")
         print()
         if not online:
-            print(_c(YEL, " ⚠  Servicio no disponible. Escribí tu consulta para iniciarlo."))
+            print(_c(YEL, _tr(" ⚠  Servicio no disponible. Escribí tu consulta para iniciarlo.", " ⚠  Service unavailable. Type your query to start it.")))
             print()
         print(_c(DIM, f" » {tip}"))
-        print(_c(DIM,  " ⚠ GONZABOT es IA — verificá las respuestas antes de aplicarlas."))
+        print(_c(DIM,  _tr(" ⚠ GONZABOT es IA — verificá las respuestas antes de aplicarlas.", " ⚠ GONZABOT is AI — verify the answers before applying them.")))
         print()
 
 
@@ -1499,9 +1512,9 @@ def search_history(con: sqlite3.Connection, query: str,
             (query,)
         ).fetchall()
         if not rows:
-            print(_c(YEL, f"Sesión {query} no encontrada."))
+            print(_c(YEL, _tr(f"Sesión {query} no encontrada.", f"Session {query} not found.")))
             return
-        print(_c(BOLD, f"\n── Sesión {query} ({len(rows)} mensajes) ──"))
+        print(_c(BOLD, _tr(f"\n── Sesión {query} ({len(rows)} mensajes) ──", f"\n── Session {query} ({len(rows)} messages) ──")))
         parts = [f"=== Historial sesión {query} ==="]
         for ts, role, content in rows:
             label = "USUARIO" if role == "user" else "GONZABOT"
@@ -1513,7 +1526,7 @@ def search_history(con: sqlite3.Connection, query: str,
         if len(full_text) > max_chars:
             full_text = full_text[:max_chars] + "\n[... truncado]"
         extra_context.append(f"[Historial de sesión {query}]\n{full_text}")
-        print(_c(GRN, f"\n✓ Sesión cargada como contexto ({len(full_text):,} chars)"))
+        print(_c(GRN, _tr(f"\n✓ Sesión cargada como contexto ({len(full_text):,} chars)", f"\n✓ Session loaded as context ({len(full_text):,} chars)")))
         return
 
     # Keyword search — AND between all words
@@ -1525,20 +1538,20 @@ def search_history(con: sqlite3.Connection, query: str,
         params
     ).fetchall()
     if not rows:
-        print(_c(YEL, f"No encontré mensajes con: {query}"))
+        print(_c(YEL, _tr(f"No encontré mensajes con: {query}", f"No messages found with: {query}")))
         return
 
     sessions_found: dict[str, list] = {}
     for session, ts, role, content in rows:
         sessions_found.setdefault(session, []).append((ts, role, content))
 
-    print(_c(BOLD, f"\n── Búsqueda \"{query}\" — {len(rows)} msgs en "
-              f"{len(sessions_found)} sesión(es) ──"))
+    print(_c(BOLD, _tr(f"\n── Búsqueda \"{query}\" — {len(rows)} msgs en "
+              f"{len(sessions_found)} sesión(es) ──", f"\n── Search \"{query}\" — {len(rows)} msgs in {len(sessions_found)} session(s) ──")))
     parts = [f"=== Historial: búsqueda \"{query}\" ==="]
     total = len(parts[0])
     truncated = False
     for session, msgs in sessions_found.items():
-        print(_c(BOLD, f"\n  Sesión {session}:"))
+        print(_c(BOLD, _tr(f"\n  Sesión {session}:", f"\n  Session {session}:")))
         hdr = f"\n=== Sesión {session} ==="
         parts.append(hdr); total += len(hdr)
         for ts, role, content in msgs:
@@ -1557,7 +1570,7 @@ def search_history(con: sqlite3.Connection, query: str,
     extra_context.append(f"[Historial relevante: {query}]\n{full_text}")
     print(_c(GRN, f"\n✓ Resultados cargados como contexto ({len(full_text):,} chars)"))
     if len(sessions_found) > 1:
-        print(_c(DIM, "  Tip: /history <session_id> para cargar una sola sesión"))
+        print(_c(DIM, _tr("  Tip: /history <session_id> para cargar una sola sesión", "  Tip: /history <session_id> to load a single session")))
 
 
 # ── Context file ──────────────────────────────────────────────────────────────
@@ -1706,6 +1719,11 @@ def _detect_console_lang() -> str:
 
 
 _LANG = _detect_console_lang()
+
+
+def _tr(es: str, en: str) -> str:
+    """Texto de UI según el idioma activo (/lang). Etapa 1 del i18n: solo los mensajes nuevos."""
+    return en if _LANG == "en" else es
 
 
 _MIRROR_LANG_SENTENCE = (
@@ -2063,9 +2081,9 @@ def load_resource(arg: str) -> str:
                 html = r.stdout.decode("utf-8", errors="replace")
                 return _html_to_text(html) if "<html" in html[:500].lower() else html
             except FileNotFoundError:
-                raise RuntimeError("curl no disponible y urllib no tiene SSL")
+                raise RuntimeError(_tr("curl no disponible y urllib no tiene SSL", "curl not available and urllib has no SSL"))
             except subprocess.TimeoutExpired:
-                raise RuntimeError("Timeout al descargar URL")
+                raise RuntimeError(_tr("Timeout al descargar URL", "Timeout downloading URL"))
     else:
         import glob as _glob
         expanded = str(Path(arg).expanduser())
@@ -2073,13 +2091,13 @@ def load_resource(arg: str) -> str:
         if '*' in expanded or '?' in expanded:
             paths = sorted(_glob.glob(expanded))
             if not paths:
-                raise RuntimeError(f"No hay archivos que coincidan con: {arg}")
+                raise RuntimeError(_tr(f"No hay archivos que coincidan con: {arg}", f"No files match: {arg}"))
         else:
             path = Path(expanded)
             if path.is_dir():
                 paths = sorted(str(p) for p in path.iterdir() if p.is_file())
                 if not paths:
-                    raise RuntimeError(f"Directorio vacío: {path}")
+                    raise RuntimeError(_tr(f"Directorio vacío: {path}", f"Empty directory: {path}"))
             else:
                 paths = [expanded]
 
@@ -3182,6 +3200,16 @@ def _selftest() -> int:
     _t("fit: con resumen sigue dentro del presupuesto", _est_tokens(_fd) <= _PROMPT_BUDGET_TOKENS)
     _small = [{"role": "system", "content": "s"}, {"role": "user", "content": "hola"}]
     _t("fit: prompt chico queda igual", _fit_messages(_small, 6000) is _small)
+    _l0 = _LANG
+    try:
+        globals()["_LANG"] = "es"; _a = _tr("hola", "hello")
+        globals()["_LANG"] = "en"; _b = _tr("hola", "hello")
+    finally:
+        globals()["_LANG"] = _l0
+    _t("_tr: español por defecto, inglés con _LANG='en'", _a == "hola" and _b == "hello")
+    _t("i18n: HELP y TIPS en inglés tienen la misma estructura que en español",
+       len(_TIPS) == len(_TIPS_EN) and HELP_TEXT.count("\n  /") == HELP_TEXT_EN.count("\n  /")
+       and HELP_TEXT_EN != HELP_TEXT)
     _huge_last = [{"role": "system", "content": "s"}, {"role": "user", "content": "y" * 900000}]
     _t("fit: último mensaje enorme se recorta", _est_tokens(_fit_messages(_huge_last, 6000)) <= _MODEL_CTX_TOKENS - 6000)
     _t("sbatch con placeholder no está listo", not _project_ready([("bash", "#!/bin/bash\n#SBATCH -n 1\n./correr /ruta/a/tu_input", "")]))
@@ -4350,17 +4378,17 @@ def _auto_start_service() -> bool:
     if fuera:
         print(_c(YEL, f"\n▶ {fuera}"))
         return False
-    print(_c(YEL, "\n▶ El servicio no está corriendo."))
-    resp = _yn_raw(_c(BOLD, "  ¿Pedirle al sistema que lo inicie? (demora ~2 min) [s/N]: "))
+    print(_c(YEL, _tr("\n▶ El servicio no está corriendo.", "\n▶ The service is not running.")))
+    resp = _yn_raw(_c(BOLD, _tr("  ¿Pedirle al sistema que lo inicie? (demora ~2 min) [s/N]: ", "  Ask the system to start it? (takes ~2 min) [y/N]: ")))
     if not resp:
         return False
     try:
         START_REQUEST.write_text(f"{_USERNAME}\n")
         _log_event("service_request")
     except OSError as e:
-        print(_c(RED, f"  No se pudo crear el pedido: {e}"))
+        print(_c(RED, _tr(f"  No se pudo crear el pedido: {e}", f"  Could not create the request: {e}")))
         return False
-    print(_c(DIM, "  Pedido enviado. Esperando que el servicio levante..."))
+    print(_c(DIM, _tr("  Pedido enviado. Esperando que el servicio levante...", "  Request sent. Waiting for the service to come up...")))
 
     spinner = itertools.cycle(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
     for i in range(30):  # hasta 5 min
@@ -4371,9 +4399,9 @@ def _auto_start_service() -> bool:
         print(f"  {_c(CYAN, next(spinner))} {label}", flush=True)
         if _check_online():
             _touch_heartbeat()
-            print(_c(GRN, f"  ✓ Listo en {label}. Respondiendo..."))
+            print(_c(GRN, _tr(f"  ✓ Listo en {label}. Respondiendo...", f"  ✓ Ready in {label}. Responding...")))
             return True
-    print(_c(RED, "  Timeout esperando el servicio. Intentar más tarde."))
+    print(_c(RED, _tr("  Timeout esperando el servicio. Intentar más tarde.", "  Timed out waiting for the service. Try again later.")))
     return False
 
 
@@ -4514,7 +4542,7 @@ def _fit_messages(messages: "list[dict]", max_tokens: int, ctx_tokens: "int | No
         sys_toks = _est_tokens(msgs[:-1])
         room = max(2000, int((budget - sys_toks) * _CHARS_PER_TOKEN))
         msgs[-1]["content"] = _shrink_text(msgs[-1].get("content") or "", room)
-    _FIT_NOTE[0] = f"historial recortado: {_n_before - len(msgs)} mensajes viejos fuera para entrar en el contexto del modelo"
+    _FIT_NOTE[0] = _tr(f"historial recortado: {_n_before - len(msgs)} mensajes viejos fuera para entrar en el contexto del modelo", f"history trimmed: {_n_before - len(msgs)} old messages dropped to fit the model context")
     return msgs
 
 
@@ -4550,8 +4578,10 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                 continue
             raise RuntimeError(f"vLLM HTTP {e.code}: {body}") from e
         except URLError as e:
-            raise RuntimeError(f"No se puede conectar a {VLLM_BASE}\n"
-                               "  ¿Está corriendo el servicio? Verificar con: squeue | grep vllm") from e
+            raise RuntimeError(_tr(f"No se puede conectar a {VLLM_BASE}\n"
+                                   "  ¿Está corriendo el servicio? Verificar con: squeue | grep vllm",
+                                   f"Cannot connect to {VLLM_BASE}\n"
+                                   "  Is the service running? Check with: squeue | grep vllm")) from e
 
     # Spinner visible durante el TTFT (hasta que llega el primer token)
     first_token = threading.Event()
@@ -4618,7 +4648,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                                 pass
                             if seq_tail.startswith("200"):
                                 # Bracketed paste durante streaming → avisar y drenar
-                                sys.stdout.write("\r\x1b[K  ⚠ Paste recibido — esperá que termine (ESC para cancelar)\r\n")
+                                sys.stdout.write("\r\x1b[K  ⚠ " + _tr("Paste recibido — esperá que termine (ESC para cancelar)", "Paste received — wait for it to finish (ESC to cancel)") + "\r\n")
                                 sys.stdout.flush()
                                 pbuf = ""
                                 try:
@@ -4635,7 +4665,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                     break
                 else:
                     # Tecla normal durante streaming → avisar
-                    sys.stdout.write("\r\x1b[K  ⚠ Esperá que termine — ESC para cancelar\r\n")
+                    sys.stdout.write("\r\x1b[K  ⚠ " + _tr("Esperá que termine — ESC para cancelar", "Wait for it to finish — ESC to cancel") + "\r\n")
                     sys.stdout.flush()
         except Exception:
             pass
@@ -4986,7 +5016,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
             # no cierra gonzabot — sin aviso explícito la gente no lo sabe. Mostrar
             # siempre algo, incluso si full_text está vacío (Ctrl-C apretado muy al
             # principio, antes de que llegue texto).
-            print(_c(YEL, " [cancelado — Ctrl-C de nuevo en el prompt para salir]"))
+            print(_c(YEL, _tr(" [cancelado — Ctrl-C de nuevo en el prompt para salir]", " [cancelled — Ctrl-C again at the prompt to exit]")))
         elif _console is None:
             print()  # newline after streaming (live mode no lo necesita)
     if not user_aborted.is_set():
@@ -5005,9 +5035,9 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
     # causa real. Avisar ACÁ, apenas se detecta, en vez de dejar que /run
     # lo descubra después con un error de sintaxis confuso.
     if not silent and not user_aborted.is_set() and _finish_reason[0] == "length":
-        print(_c(YEL, " ⚠ La respuesta se cortó por límite de longitud -- si hay un "
+        print(_c(YEL, _tr(" ⚠ La respuesta se cortó por límite de longitud -- si hay un "
                        "bloque de código, puede estar incompleto. Pedí \"continuá\" "
-                       "o acotá el pedido antes de /run."))
+                       "o acotá el pedido antes de /run.", " ⚠ The response was cut off by the length limit -- if there is a code block, it may be incomplete. Ask for \"continue\" or narrow the request before /run.")))
 
     # Detectar garbage output: muchos chars repetidos o nulos
     def _is_garbage(t: str) -> bool:
@@ -5149,7 +5179,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                     _console.print(f"  [bold cyan]{_ref_lbl}[/bold cyan] "
                                    f"[yellow]{_fn}[/yellow] [dim]→ {_desc}[/dim]",
                                    markup=True)
-                _console.print(f"  [dim]/saveall <dir> guarda todos con esos nombres[/dim]",
+                _console.print(_tr(f"  [dim]/saveall <dir> guarda todos con esos nombres[/dim]", "  [dim]/saveall <dir> saves all of them with those names[/dim]"),
                                markup=True)
             _console.print()
         except Exception:
@@ -5271,6 +5301,66 @@ Flujo /branch — optimización automatizada en 3 pasos:
 Endpoint: {VLLM_BASE}
 Modelo:   {MODEL}
 """
+HELP_TEXT_EN = f"""{_c(BOLD, "gonzabot")} — Local AI assistant for the UNMDP HPC cluster
+
+Commands:
+  /load <path|url|glob|dir>  Load files as context for this session
+  /save [N] <file>           Save code to a file (N required if there are several #REF blocks)
+  /saveall [dir]             Save ALL #REF blocks with their detected names (default: current dir)
+  /copy [N]                  Copy block #REFN to the clipboard (OSC 52, without border lines)
+  /diff [N] <file>           Show a diff (with N: uses block #REFN; without N: the bot generates the diff)
+  /edit [N] <file>           Edit the file (with N: applies block #REFN; without N: the bot generates the edit)
+                             → /edit and /diff without N call the model with the real file as context
+                             → /edit always makes an automatic backup (.bak)
+
+  When the response has several blocks they are labeled #REF1, #REF2...
+  Example:  /save 2 job.sbatch   /diff job.sbatch   /edit 1 main.c
+  <command>                  System commands run directly (squeue, ls, rm, python3, ...)
+  [paste sbatch]             Paste the script → the bot detects #SBATCH → y = submit to the cluster
+  /run [N]                   Submit the generated sbatch (last block, or #REF N if given)
+  /workflow list             List the saved persistent workflows
+  /workflow status <id>      Real state of a workflow (reconciled against Slurm, not the old record)
+                             (created automatically: ask for something with several steps, e.g. "when X finishes, do Y")
+  /audit                     Analyze all running jobs and suggest improvements
+  /queue [user]              Show the user's queue and analyze it with the bot
+  /diagnose <job_id>         Load the job's logs and ask the bot to diagnose
+  /branch <file>             Generate 3 optimization variants and submit them to the cluster
+  /branch check <job_id>     Read the array results and declare which variant is better
+  /compact                   Summarize the current conversation and free up context
+  /clear                     Clear the session messages (history stays in the DB)
+  /history [N]               Show the last N conversations (default 5)
+  /history <keyword ...>     Search the history and inject results as context
+  /history <session_id>      Load a full session as context (format: YYYYMMDD-HHMMSS)
+  /model                     Show the current model and endpoint
+  /segments [text]           Which context segments would load for that text (or your
+                             last message if you pass nothing) and how much each weighs
+  /raw                       Toggle code blocks without a frame (easier to
+                             copy in basic terminals such as Windows')
+  /help                      Show this help
+  Ctrl-D / /exit             Exit
+
+/branch flow — automated optimization in 3 steps:
+  1. gonzabot /branch my_script.py
+       The bot analyzes the code and generates 3 variants:
+         A) scientific bug fix
+         B) performance optimization
+         C) second alternative optimization
+       Each variant is applied as a diff and syntax/compilation is verified.
+       Those that pass are submitted as an array job to the cluster.
+
+  2. Wait for the jobs to finish (squeue to see the state).
+       Results are left in branches/output_branch_N/ inside the same directory.
+
+  3. gonzabot /branch check <job_id>
+       The bot reads the wall times of each variant, compares them with the
+       baseline and tells you which is best and why.
+
+  If a variant does not apply (wrong diff), the bot reports it and continues
+  with the others. Only those that compile correctly are submitted.
+
+Endpoint: {VLLM_BASE}
+Model:    {MODEL}
+"""
 
 
 def repl(new_session: bool = False):
@@ -5318,7 +5408,7 @@ def repl(new_session: bool = False):
 
         # ── /paste: multi-line input (before command block so it falls through) ──
         if user_input == "/paste":
-            print(_c(DIM, "  Pegá tu código o error. Terminá con . solo en una línea (o Ctrl-D):"))
+            print(_c(DIM, _tr("  Pegá tu código o error. Terminá con . solo en una línea (o Ctrl-D):", "  Paste your code or error. End with a single . on a line (or Ctrl-D):")))
             lines = []
             while True:
                 try:
@@ -5348,12 +5438,12 @@ def repl(new_session: bool = False):
                         _content = _content[:_MAX_LOAD] + f"\n\n[... omitido, {len(_content):,} chars totales]"
                     extra_context.append(f"[Contexto cargado: {_label}]\n{_content}")
                     user_input = (user_input[:_embedded_load.start()] + user_input[_embedded_load.end():]).strip()
-                    print(_c(GRN, f"Cargado: {_label}"))
+                    print(_c(GRN, _tr(f"Cargado: {_label}", f"Loaded: {_label}")))
                     if not user_input:
                         continue
                 except RuntimeError as e:
-                    print(_c(RED, f"Error cargando {_load_arg}: {e}"))
-                    print(_c(YEL, "Repetí el pedido — no tengo el archivo cargado."))
+                    print(_c(RED, _tr(f"Error cargando {_load_arg}: {e}", f"Error loading {_load_arg}: {e}")))
+                    print(_c(YEL, _tr("Repetí el pedido — no tengo el archivo cargado.", "Repeat the request — I don't have the file loaded.")))
                     continue
 
         # ── Commands ──────────────────────────────────────────────────────────
@@ -5383,7 +5473,7 @@ def repl(new_session: bool = False):
                 break
 
             elif cmd == "/help":
-                print(HELP_TEXT)
+                print(_tr(HELP_TEXT, HELP_TEXT_EN))
 
             elif cmd == "/raw":
                 # Bug real 5/9 (reporte de usuario real): en terminales
@@ -5394,16 +5484,16 @@ def repl(new_session: bool = False):
                 global _RAW_MODE
                 _RAW_MODE = not _RAW_MODE
                 if _RAW_MODE:
-                    print(_c(GRN, "Modo raw activado — los bloques de código salen sin "
-                                  "recuadro, más fácil de copiar en terminales básicas."))
+                    print(_c(GRN, _tr("Modo raw activado — los bloques de código salen sin "
+                                  "recuadro, más fácil de copiar en terminales básicas.", "Raw mode on — code blocks are printed without a frame, easier to copy in basic terminals.")))
                 else:
-                    print(_c(GRN, "Modo raw desactivado — vuelven los recuadros con "
-                                  "resaltado de sintaxis."))
+                    print(_c(GRN, _tr("Modo raw desactivado — vuelven los recuadros con "
+                                  "resaltado de sintaxis.", "Raw mode off — framed blocks with syntax highlighting are back.")))
 
             elif cmd == "/model":
                 print(f"  Endpoint: {VLLM_BASE}")
-                print(f"  Modo:     {'dev' if _DEV_MODE else 'prod'}")
-                print(f"  Modelo:   {MODEL}")
+                print(_tr("  Modo:     ", "  Mode:     ") + f"{'dev' if _DEV_MODE else 'prod'}")
+                print(_tr("  Modelo:   ", "  Model:    ") + MODEL)
                 print(f"  Ctx dir:  {CONTEXT_DIR}")
                 for _seg, _ in _SEGMENTS:
                     _dev = CONTEXT_DIR / f"{_seg}-dev.txt"
@@ -5413,7 +5503,7 @@ def repl(new_session: bool = False):
                     elif _pro.exists():
                         print(f"  {_seg:18s}  {_pro.name}  ({len(_pro.read_text(encoding='utf-8', errors='replace')):,} chars)")
                     else:
-                        print(f"  {_seg:18s}  (no encontrado)")
+                        print(_tr(f"  {_seg:18s}  (no encontrado)", f"  {_seg:18s}  (not found)"))
 
             elif cmd == "/segments":
                 # Pedido real de Gonzalo (1/10): ver cuáles segmentos de contexto
@@ -5427,8 +5517,8 @@ def repl(new_session: bool = False):
                     _probe_src = next((m.get("content", "") for m in reversed(context_msgs)
                                         if m.get("role") == "user"), "")
                 if not _probe_src:
-                    print(_c(YEL, "No hay ningún mensaje tuyo todavía en esta sesión -- "
-                                  "pasá un texto: /segments cómo instalo lammps"))
+                    print(_c(YEL, _tr("No hay ningún mensaje tuyo todavía en esta sesión -- "
+                                  "pasá un texto: /segments cómo instalo lammps", "You have no message in this session yet -- pass a text: /segments how do I install lammps")))
                 else:
                     print(_c(DIM, f'  Probando contra: "{_probe_src[:80]}'
                                   f'{"..." if len(_probe_src) > 80 else ""}"'))
@@ -5439,8 +5529,8 @@ def repl(new_session: bool = False):
                             _total += _size
                         print(f"  {_mark} {_name:18s} {_size:>6,} chars"
                               f"{'  (siempre)' if _name == 'core' else ''}")
-                    print(_c(DIM, f"  Total que se mandaría: ~{_total:,} chars "
-                                  f"(~{_total // 4:,} tokens aprox.)"))
+                    print(_c(DIM, _tr(f"  Total que se mandaría: ~{_total:,} chars "
+                                  f"(~{_total // 4:,} tokens aprox.)", f"  Total that would be sent: ~{_total:,} chars (~{_total // 4:,} tokens approx.)")))
 
             elif cmd == "/lang":
                 # i18n fase 1 (8/10) -- cambio en caliente, sin reiniciar la
@@ -5449,11 +5539,11 @@ def repl(new_session: bool = False):
                 global _LANG, _BASE_PROMPT
                 _lang_arg = arg.strip().lower()[:2]
                 if not _lang_arg:
-                    print(_c(DIM, f"Idioma actual: {_LANG} "
-                                  f"(cambiar con /lang es  o  /lang en)"))
+                    print(_c(DIM, _tr(f"Idioma actual: {_LANG} "
+                                  f"(cambiar con /lang es  o  /lang en)", f"Current language: {_LANG} (change with /lang es  or  /lang en)")))
                 elif _lang_arg not in _SUPPORTED_LANGS:
-                    print(_c(YEL, f"'{arg.strip()}' no soportado todavía -- "
-                                  f"por ahora solo: {', '.join(_SUPPORTED_LANGS)}"))
+                    print(_c(YEL, _tr(f"'{arg.strip()}' no soportado todavía -- "
+                                  f"por ahora solo: {', '.join(_SUPPORTED_LANGS)}", f"'{arg.strip()}' not supported yet -- for now only: {', '.join(_SUPPORTED_LANGS)}")))
                 else:
                     _LANG = _lang_arg
                     _BASE_PROMPT = _compute_base_prompt(_LANG)
@@ -5463,9 +5553,9 @@ def repl(new_session: bool = False):
 
             elif cmd == "/compact":
                 if len(context_msgs) < 4:
-                    print(_c(YEL, "Poco historial para compactar."))
+                    print(_c(YEL, _tr("Poco historial para compactar.", "Not enough history to compact.")))
                 else:
-                    print(_c(DIM, "Resumiendo conversación..."))
+                    print(_c(DIM, _tr("Resumiendo conversación...", "Summarizing conversation...")))
                     compact_prompt = (
                         "Hacé un resumen técnico conciso de esta conversación: "
                         "qué problemas se plantearon, qué soluciones se aplicaron, "
@@ -5495,7 +5585,7 @@ def repl(new_session: bool = False):
                         if "__GARBAGE" in str(e):
                             context_msgs = []
                             _CURRENT_CTX_CHARS = 0
-                            print(_c(YEL, "Contexto demasiado largo para resumir — historial limpiado. Podés continuar."))
+                            print(_c(YEL, _tr("Contexto demasiado largo para resumir — historial limpiado. Podés continuar.", "Context too long to summarize — history cleared. You can continue.")))
                         else:
                             print(_c(RED, f"Error: {e}"))
 
@@ -5503,7 +5593,7 @@ def repl(new_session: bool = False):
                 context_msgs = []
                 extra_context = []
                 _CURRENT_CTX_CHARS = 0
-                print(_c(GRN, "Sesión limpiada."))
+                print(_c(GRN, _tr("Sesión limpiada.", "Session cleared.")))
 
             elif cmd == "/history":
                 if arg and not arg.isdigit():
@@ -5515,10 +5605,10 @@ def repl(new_session: bool = False):
             elif cmd == "/save":
                 if not arg:
                     _ref_hint = f"  Ejemplo: /save 1 script.sh  /save 2 main.c" if _LAST_CODE_BLOCKS else ""
-                    print(_c(YEL, f"Uso: /save [N] <archivo>{_ref_hint}"))
+                    print(_c(YEL, _tr(f"Uso: /save [N] <archivo>{_ref_hint}", f"Usage: /save [N] <file>{_ref_hint}")))
                     continue
                 if not last_reply and not _LAST_CODE_BLOCKS:
-                    print(_c(YEL, "No hay respuesta para guardar todavía."))
+                    print(_c(YEL, _tr("No hay respuesta para guardar todavía.", "There is no response to save yet.")))
                     continue
                 # Detectar /save N archivo  vs  /save archivo
                 _sv_parts = arg.split(None, 1)
@@ -5528,18 +5618,18 @@ def repl(new_session: bool = False):
                     _sv_ref = int(_sv_parts[0])
                     _sv_file = _sv_parts[1] if len(_sv_parts) > 1 else ""
                 if not _sv_file:
-                    print(_c(YEL, "Falta el nombre del archivo."))
+                    print(_c(YEL, _tr("Falta el nombre del archivo.", "File name is missing.")))
                     continue
                 if _sv_ref is None and len(_LAST_CODE_BLOCKS) > 1:
                     _refs = "  ".join(f"#REF{i+1}" for i in range(len(_LAST_CODE_BLOCKS)))
-                    print(_c(YEL, f"Hay {len(_LAST_CODE_BLOCKS)} bloques ({_refs}). Especificá cuál: /save N <archivo>"))
+                    print(_c(YEL, _tr(f"Hay {len(_LAST_CODE_BLOCKS)} bloques ({_refs}). Especificá cuál: /save N <archivo>", f"There are {len(_LAST_CODE_BLOCKS)} blocks ({_refs}). Specify which: /save N <file>")))
                     continue
                 if _sv_ref is not None:
                     if not _LAST_CODE_BLOCKS:
-                        print(_c(YEL, "No hay bloques #REF disponibles."))
+                        print(_c(YEL, _tr("No hay bloques #REF disponibles.", "No #REF blocks available.")))
                         continue
                     if _sv_ref < 1 or _sv_ref > len(_LAST_CODE_BLOCKS):
-                        print(_c(YEL, f"#REF{_sv_ref} no existe — hay {len(_LAST_CODE_BLOCKS)} bloque(s)."))
+                        print(_c(YEL, _tr(f"#REF{_sv_ref} no existe — hay {len(_LAST_CODE_BLOCKS)} bloque(s).", f"#REF{_sv_ref} does not exist — there are {len(_LAST_CODE_BLOCKS)} block(s).")))
                         continue
                     content_to_save = _LAST_CODE_BLOCKS[_sv_ref - 1][1]
                 else:
@@ -5548,39 +5638,39 @@ def repl(new_session: bool = False):
                     dest = Path(_sv_file).expanduser()
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     if dest.exists():
-                        print(_c(YEL, f"El archivo ya existe: {dest}"))
-                        print(_c(YEL, f"Se va a hacer un backup en {dest}.bak antes de sobreescribir."))
+                        print(_c(YEL, _tr(f"El archivo ya existe: {dest}", f"The file already exists: {dest}")))
+                        print(_c(YEL, _tr(f"Se va a hacer un backup en {dest}.bak antes de sobreescribir.", f"A backup will be made at {dest}.bak before overwriting.")))
                         _sv_lbl = f"#REF{_sv_ref}" if _sv_ref else "el bloque"
-                        if not _yn_line(_c(BOLD, f"¿Sobreescribir con {_sv_lbl} ({len(content_to_save)} chars)? (s + Enter): ")):
-                            print(_c(DIM, "Cancelado. El archivo original no fue modificado."))
+                        if not _yn_line(_c(BOLD, _tr(f"¿Sobreescribir con {_sv_lbl} ({len(content_to_save)} chars)? (s + Enter): ", f"Overwrite with {_sv_lbl} ({len(content_to_save)} chars)? (y + Enter): "))):
+                            print(_c(DIM, _tr("Cancelado. El archivo original no fue modificado.", "Cancelled. The original file was not modified.")))
                             continue
                         import shutil as _shutil
                         _shutil.copy2(dest, str(dest) + ".bak")
-                        print(_c(DIM, f"Backup guardado en {dest}.bak"))
+                        print(_c(DIM, _tr(f"Backup guardado en {dest}.bak", f"Backup saved at {dest}.bak")))
                     dest.write_text(content_to_save, encoding="utf-8")
                     _ref_tag = f"#REF{_sv_ref} " if _sv_ref else ""
-                    print(_c(GRN, f"Guardado {_ref_tag}en {dest}  ({len(content_to_save)} chars)"))
+                    print(_c(GRN, _tr(f"Guardado {_ref_tag}en {dest}  ({len(content_to_save)} chars)", f"Saved {_ref_tag}to {dest}  ({len(content_to_save)} chars)")))
                 except OSError as e:
-                    print(_c(RED, f"Error al guardar: {e}"))
+                    print(_c(RED, _tr(f"Error al guardar: {e}", f"Error saving: {e}")))
 
             elif cmd == "/saveall":
                 if not _LAST_CODE_BLOCKS:
-                    print(_c(YEL, "No hay bloques #REF disponibles."))
+                    print(_c(YEL, _tr("No hay bloques #REF disponibles.", "No #REF blocks available.")))
                     continue
                 _sa_dir = Path(arg.strip() if arg.strip() else ".").expanduser()
                 try:
                     _sa_dir.mkdir(parents=True, exist_ok=True)
                 except OSError as e:
-                    print(_c(RED, f"No pude crear el directorio: {e}"))
+                    print(_c(RED, _tr(f"No pude crear el directorio: {e}", f"Could not create the directory: {e}")))
                     continue
                 _sa_names = _saveall_names(_LAST_CODE_BLOCKS)
                 _sa_exist = [n for n in _sa_names if (_sa_dir / n).exists()]
-                print(_c(BOLD, f"Guardando {len(_sa_names)} bloque(s) en {_sa_dir}/:"))
+                print(_c(BOLD, _tr(f"Guardando {len(_sa_names)} bloque(s) en {_sa_dir}/:", f"Saving {len(_sa_names)} block(s) to {_sa_dir}/:")))
                 for _i, _n in enumerate(_sa_names):
                     _mark = "  (sobreescribe)" if _n in _sa_exist else ""
                     print(f"  #REF{_i+1} → {_n}{_mark}")
                 if _sa_exist and not _yn_line(
-                        _c(BOLD, f"{len(_sa_exist)} archivo(s) ya existen. ¿Sobreescribir? (s + Enter): ")):
+                        _c(BOLD, _tr(f"{len(_sa_exist)} archivo(s) ya existen. ¿Sobreescribir? (s + Enter): ", f"{len(_sa_exist)} file(s) already exist. Overwrite? (y + Enter): "))):
                     print(_c(DIM, "Cancelado."))
                     continue
                 for _i, _n in enumerate(_sa_names):
@@ -5589,7 +5679,7 @@ def repl(new_session: bool = False):
                         import shutil as _sh_sa
                         _sh_sa.copy2(_dest, str(_dest) + ".bak")
                     _dest.write_text(_LAST_CODE_BLOCKS[_i][1], encoding="utf-8")
-                print(_c(GRN, f"Guardados {len(_sa_names)} archivo(s) en {_sa_dir}/"))
+                print(_c(GRN, _tr(f"Guardados {len(_sa_names)} archivo(s) en {_sa_dir}/", f"Saved {len(_sa_names)} file(s) to {_sa_dir}/")))
 
             elif cmd == "/run":
                 # Pedido real de Gonzalo (28/9): que /run someta el sbatch generado por
@@ -5598,12 +5688,12 @@ def repl(new_session: bool = False):
                 # comando...") pero NUNCA tuvo handler real en el código -- no reemplaza
                 # nada existente, se define de cero.
                 if not _LAST_CODE_BLOCKS:
-                    print(_c(YEL, "No hay ningún sbatch generado todavía en esta sesión."))
+                    print(_c(YEL, _tr("No hay ningún sbatch generado todavía en esta sesión.", "No sbatch generated yet in this session.")))
                     continue
                 _rn_ref = int(arg.strip()) if arg.strip().isdigit() else None
                 if _rn_ref is not None:
                     if _rn_ref < 1 or _rn_ref > len(_LAST_CODE_BLOCKS):
-                        print(_c(YEL, f"#REF{_rn_ref} no existe — hay {len(_LAST_CODE_BLOCKS)} bloque(s)."))
+                        print(_c(YEL, _tr(f"#REF{_rn_ref} no existe — hay {len(_LAST_CODE_BLOCKS)} bloque(s).", f"#REF{_rn_ref} does not exist — there are {len(_LAST_CODE_BLOCKS)} block(s).")))
                         continue
                     _rn_block = _LAST_CODE_BLOCKS[_rn_ref - 1]
                 else:
@@ -5624,22 +5714,22 @@ def repl(new_session: bool = False):
                         _LAST_CODE_BLOCKS[-1])
                 _rn_lang, _rn_code, _rn_title = _rn_block
                 if "#SBATCH" not in _rn_code:
-                    print(_c(YEL, f"El bloque elegido ({_rn_title or _rn_lang}) no tiene "
+                    print(_c(YEL, _tr(f"El bloque elegido ({_rn_title or _rn_lang}) no tiene "
                                   f"directivas #SBATCH — /run solo somete sbatch, no "
-                                  f"corre código suelto."))
+                                  f"corre código suelto.", f"The chosen block ({_rn_title or _rn_lang}) has no #SBATCH directives — /run only submits sbatch, it does not run loose code.")))
                     continue
-                print(_c(DIM, f"Sometiendo {_rn_title or 'el sbatch'}..."))
+                print(_c(DIM, _tr(f"Sometiendo {_rn_title or 'el sbatch'}...", f"Submitting {_rn_title or 'the sbatch'}...")))
                 _rn_ok, _rn_out = _submit_sbatch_text(_rn_code)
                 print(_c(GRN if _rn_ok else RED, _rn_out))
 
             elif cmd == "/copy":
                 if not last_reply and not _LAST_CODE_BLOCKS:
-                    print(_c(YEL, "No hay bloques #REF disponibles."))
+                    print(_c(YEL, _tr("No hay bloques #REF disponibles.", "No #REF blocks available.")))
                     continue
                 _cp_ref = int(arg.strip()) if arg.strip().isdigit() else 1
                 if _LAST_CODE_BLOCKS:
                     if _cp_ref < 1 or _cp_ref > len(_LAST_CODE_BLOCKS):
-                        print(_c(YEL, f"#REF{_cp_ref} no existe — hay {len(_LAST_CODE_BLOCKS)} bloque(s)."))
+                        print(_c(YEL, _tr(f"#REF{_cp_ref} no existe — hay {len(_LAST_CODE_BLOCKS)} bloque(s).", f"#REF{_cp_ref} does not exist — there are {len(_LAST_CODE_BLOCKS)} block(s).")))
                         continue
                     _cp_content = _LAST_CODE_BLOCKS[_cp_ref - 1][1]
                 else:
@@ -5658,10 +5748,10 @@ def repl(new_session: bool = False):
 
             elif cmd == "/diff":
                 if not arg:
-                    print(_c(YEL, "Uso: /diff [N] <archivo>"))
+                    print(_c(YEL, _tr("Uso: /diff [N] <archivo>", "Usage: /diff [N] <file>")))
                     continue
                 if not last_reply and not _LAST_CODE_BLOCKS:
-                    print(_c(YEL, "No hay respuesta para comparar todavía."))
+                    print(_c(YEL, _tr("No hay respuesta para comparar todavía.", "There is no response to compare yet.")))
                     continue
                 import re as _re, difflib as _diff
                 _df_parts = arg.split(None, 1)
@@ -5669,10 +5759,10 @@ def repl(new_session: bool = False):
                 if _df_parts and _df_parts[0].isdigit():
                     _df_ref = int(_df_parts[0]); _df_file = _df_parts[1] if len(_df_parts) > 1 else ""
                 if not _df_file:
-                    print(_c(YEL, "Falta el nombre del archivo.")); continue
+                    print(_c(YEL, _tr("Falta el nombre del archivo.", "File name is missing."))); continue
                 if _df_ref is not None and _LAST_CODE_BLOCKS:
                     if _df_ref < 1 or _df_ref > len(_LAST_CODE_BLOCKS):
-                        print(_c(YEL, f"#REF{_df_ref} no existe.")); continue
+                        print(_c(YEL, _tr(f"#REF{_df_ref} no existe.", f"#REF{_df_ref} does not exist."))); continue
                     nuevo = _LAST_CODE_BLOCKS[_df_ref - 1][1]
                 else:
                     blocks = _re.findall(r"```(?:\w+)?\n(.*?)```", last_reply, _re.DOTALL)
@@ -5683,7 +5773,7 @@ def repl(new_session: bool = False):
                     )
                 dest = Path(_df_file).expanduser()
                 if not dest.exists():
-                    print(_c(YEL, f"Archivo no existe aún: {dest} (usá /save para crearlo)"))
+                    print(_c(YEL, _tr(f"Archivo no existe aún: {dest} (usá /save para crearlo)", f"File does not exist yet: {dest} (use /save to create it)")))
                     continue
                 original = dest.read_text(encoding="utf-8", errors="replace")
                 delta = list(_diff.unified_diff(
@@ -5693,7 +5783,7 @@ def repl(new_session: bool = False):
                     tofile=f"gonzabot/{dest.name}",
                 ))
                 if not delta:
-                    print(_c(GRN, "Sin diferencias — el archivo ya coincide con la sugerencia."))
+                    print(_c(GRN, _tr("Sin diferencias — el archivo ya coincide con la sugerencia.", "No differences — the file already matches the suggestion.")))
                 else:
                     for line in delta:
                         if line.startswith("+") and not line.startswith("+++"):
@@ -5705,10 +5795,10 @@ def repl(new_session: bool = False):
 
             elif cmd == "/edit":
                 if not arg:
-                    print(_c(YEL, "Uso: /edit [N] <archivo>"))
+                    print(_c(YEL, _tr("Uso: /edit [N] <archivo>", "Usage: /edit [N] <file>")))
                     continue
                 if not last_reply and not _LAST_CODE_BLOCKS:
-                    print(_c(YEL, "No hay respuesta para aplicar todavía."))
+                    print(_c(YEL, _tr("No hay respuesta para aplicar todavía.", "There is no response to apply yet.")))
                     continue
                 import re as _re, difflib as _diff, shutil as _shutil
                 _ed_parts = arg.split(None, 1)
@@ -5716,10 +5806,10 @@ def repl(new_session: bool = False):
                 if _ed_parts and _ed_parts[0].isdigit():
                     _ed_ref = int(_ed_parts[0]); _ed_file = _ed_parts[1] if len(_ed_parts) > 1 else ""
                 if not _ed_file:
-                    print(_c(YEL, "Falta el nombre del archivo.")); continue
+                    print(_c(YEL, _tr("Falta el nombre del archivo.", "File name is missing."))); continue
                 if _ed_ref is not None and _LAST_CODE_BLOCKS:
                     if _ed_ref < 1 or _ed_ref > len(_LAST_CODE_BLOCKS):
-                        print(_c(YEL, f"#REF{_ed_ref} no existe.")); continue
+                        print(_c(YEL, _tr(f"#REF{_ed_ref} no existe.", f"#REF{_ed_ref} does not exist."))); continue
                     nuevo = _LAST_CODE_BLOCKS[_ed_ref - 1][1]
                 else:
                     # Sin REF: usar el bloque de la última respuesta del bot.
@@ -5732,8 +5822,8 @@ def repl(new_session: bool = False):
                         # chico, /edit lo escribe como si fuera todo el archivo
                         # y borra el resto. No adivinar: pedir el REF explícito.
                         print(_c(YEL,
-                            f"La última respuesta tiene {len(blocks)} bloques de código — "
-                            f"especificá cuál con /edit N {_ed_file} (ej. /edit 1 {_ed_file})."))
+                            _tr(f"La última respuesta tiene {len(blocks)} bloques de código — "
+                            f"especificá cuál con /edit N {_ed_file} (ej. /edit 1 {_ed_file}).", f"The last response has {len(blocks)} code blocks — specify which with /edit N {_ed_file} (e.g. /edit 1 {_ed_file}).")))
                         continue
                     _raw = blocks[0] if blocks else last_reply
                     nuevo = "".join(
@@ -5751,7 +5841,7 @@ def repl(new_session: bool = False):
                         tofile=f"gonzabot/{dest.name}",
                     ))
                     if not delta:
-                        print(_c(GRN, "Sin diferencias — nada que editar."))
+                        print(_c(GRN, _tr("Sin diferencias — nada que editar.", "No differences — nothing to edit.")))
                         continue
                     for line in delta:
                         if line.startswith("+") and not line.startswith("+++"):
@@ -5760,17 +5850,17 @@ def repl(new_session: bool = False):
                             print(_c(RED, line), end="")
                         else:
                             print(_c(DIM, line), end="")
-                    if not _yn_raw(_c(BOLD, "\n¿Aplicar estos cambios? [s/N]: ")):
+                    if not _yn_raw(_c(BOLD, _tr("\n¿Aplicar estos cambios? [s/N]: ", "\nApply these changes? [y/N]: "))):
                         print(_c(DIM, "Cancelado."))
                         continue
                     _shutil.copy2(dest, str(dest) + ".bak")
-                    print(_c(DIM, f"Backup en {dest}.bak"))
+                    print(_c(DIM, _tr(f"Backup en {dest}.bak", f"Backup at {dest}.bak")))
                 dest.write_text(nuevo, encoding="utf-8")
                 print(_c(GRN, f"Editado: {dest}  ({len(nuevo)} chars)"))
 
             elif cmd == "/audit":
                 import subprocess as _sp2
-                print(_c(DIM, "Recolectando jobs en ejecución..."))
+                print(_c(DIM, _tr("Recolectando jobs en ejecución...", "Collecting running jobs...")))
                 try:
                     sq = _sp2.run(
                         ["squeue", "--state=RUNNING", "--noheader",
@@ -5778,10 +5868,10 @@ def repl(new_session: bool = False):
                         capture_output=True, text=True
                     )
                 except Exception as e:
-                    print(_c(RED, f"Error al leer squeue: {e}")); continue
+                    print(_c(RED, _tr(f"Error al leer squeue: {e}", f"Error reading squeue: {e}"))); continue
 
                 if not sq.stdout.strip():
-                    print(_c(YEL, "No hay jobs en ejecución.")); continue
+                    print(_c(YEL, _tr("No hay jobs en ejecución.", "No running jobs."))); continue
 
                 scripts_vistos: dict[str, str] = {}  # (user,name) -> script content
                 jobs_info = []
@@ -5848,7 +5938,7 @@ def repl(new_session: bool = False):
                 if len(resumen) > 12000:
                     resumen = resumen[:12000] + "\n[... truncado]"
 
-                print(_c(DIM, f"Analizando {len(grupos)} grupos de jobs..."))
+                print(_c(DIM, _tr(f"Analizando {len(grupos)} grupos de jobs...", f"Analyzing {len(grupos)} job groups...")))
                 messages_audit = [system_msg, {"role": "user", "content": resumen}]
                 save_message(con, session_id, "user", resumen)
                 try:
@@ -5874,39 +5964,39 @@ def repl(new_session: bool = False):
                 if _wf_arg in ("", "list"):
                     rows = _wf_list()
                     if not rows:
-                        print(_c(DIM, "No hay workflows todavía. Se crean solos "
+                        print(_c(DIM, _tr("No hay workflows todavía. Se crean solos "
                                       "cuando un pedido suena a varios pasos "
-                                      "encadenados (ej. \"cuando termine X, hacé Y\")."))
+                                      "encadenados (ej. \"cuando termine X, hacé Y\").", "No workflows yet. They are created automatically when a request sounds like several chained steps (e.g. \"when X finishes, do Y\").")))
                     else:
                         for wf_id, goal, status, created in rows:
                             print(f"  #{wf_id}  [{status}]  {goal}  ({created})")
                 elif _wf_arg.split()[0] == "status" and len(_wf_arg.split()) > 1:
                     _wf_id_arg = _wf_arg.split()[1]
                     if not _wf_id_arg.isdigit():
-                        print(_c(YEL, "Uso: /workflow status <id>"))
+                        print(_c(YEL, _tr("Uso: /workflow status <id>", "Usage: /workflow status <id>")))
                         continue
                     _wf_id = int(_wf_id_arg)
-                    print(_c(DIM, "Reconciliando contra el estado real de Slurm..."))
+                    print(_c(DIM, _tr("Reconciliando contra el estado real de Slurm...", "Reconciling against the real Slurm state...")))
                     cambios = _wf_reconcile(_wf_id)
                     for name, job_id, nuevo in cambios:
-                        print(_c(YEL, f"  (job {job_id} de '{name}' ya no estaba "
-                                      f"en cola -- actualizado a {nuevo})"))
+                        print(_c(YEL, _tr(f"  (job {job_id} de '{name}' ya no estaba "
+                                      f"en cola -- actualizado a {nuevo})", f"  (job {job_id} of '{name}' was no longer in the queue -- updated to {nuevo})")))
                     steps = _wf_step_status(_wf_id)
                     if not steps:
-                        print(_c(YEL, f"Workflow #{_wf_id} no existe o no tiene steps."))
+                        print(_c(YEL, _tr(f"Workflow #{_wf_id} no existe o no tiene steps.", f"Workflow #{_wf_id} does not exist or has no steps.")))
                     else:
                         for step_id, name, status, job_id, result in steps:
                             print(f"  [{status}] {name} (job {job_id}) — "
                                   f"{(result or '')[:100]}")
                 else:
-                    print(_c(YEL, "Uso: /workflow list  |  /workflow status <id>"))
+                    print(_c(YEL, _tr("Uso: /workflow list  |  /workflow status <id>", "Usage: /workflow list  |  /workflow status <id>")))
                 print()
                 continue
 
             elif cmd == "/queue":
                 import subprocess as _spq
                 target = arg.strip() if arg.strip() else _USERNAME
-                print(_c(DIM, f"Consultando cola de {target}..."))
+                print(_c(DIM, _tr(f"Consultando cola de {target}...", f"Querying queue of {target}...")))
                 try:
                     sq = _spq.run(
                         ["squeue", "-u", target,
@@ -5922,13 +6012,13 @@ def repl(new_session: bool = False):
                         capture_output=True, text=True
                     )
                 except Exception as e:
-                    print(_c(RED, f"Error al consultar squeue: {e}")); continue
+                    print(_c(RED, _tr(f"Error al consultar squeue: {e}", f"Error querying squeue: {e}"))); continue
 
                 jobs_raw = sq.stdout.strip()
                 n_jobs = len(sq_all.stdout.strip().splitlines()) if sq_all.stdout.strip() else 0
 
                 if not jobs_raw:
-                    print(_c(YEL, f"No hay jobs en cola para {target}."))
+                    print(_c(YEL, _tr(f"No hay jobs en cola para {target}.", f"No jobs in the queue for {target}.")))
                     continue
 
                 resumen_queue = (
@@ -5970,7 +6060,7 @@ def repl(new_session: bool = False):
 
             elif cmd == "/diagnose":
                 if not arg:
-                    print(_c(YEL, "Uso: /diagnose <job_id>"))
+                    print(_c(YEL, _tr("Uso: /diagnose <job_id>", "Usage: /diagnose <job_id>")))
                     continue
                 import subprocess as _spdiag
                 import re as _re_diag2
@@ -6087,8 +6177,8 @@ def repl(new_session: bool = False):
                             break
 
                 if not logs:
-                    print(_c(YEL, f"No encontré logs del job {job_id}"))
-                    print(_c(DIM, f"  (buscado en scontrol, sacct, y /mnt/cpu-data /mnt/gpu-data $HOME)"))
+                    print(_c(YEL, _tr(f"No encontré logs del job {job_id}", f"No logs found for job {job_id}")))
+                    print(_c(DIM, _tr(f"  (buscado en scontrol, sacct, y /mnt/cpu-data /mnt/gpu-data $HOME)", "  (searched in scontrol, sacct, and /mnt/cpu-data /mnt/gpu-data $HOME)")))
                     continue
 
                 # 5. Leer script sbatch original
@@ -6101,7 +6191,7 @@ def repl(new_session: bool = False):
                 log_content = "\n\n".join(logs)
                 script_section = (f"\n\nScript sbatch original:\n```bash\n{original_script}\n```"
                                   if original_script else "")
-                print(_c(DIM, f"Cargados {len(logs)} log(s) del job {job_id} — consultando al bot..."))
+                print(_c(DIM, _tr(f"Cargados {len(logs)} log(s) del job {job_id} — consultando al bot...", f"Loaded {len(logs)} log(s) of job {job_id} — asking the bot...")))
                 _fail_warning = ""
                 if _diag_fail_flags:
                     _fail_warning = (
@@ -6495,7 +6585,7 @@ def repl(new_session: bool = False):
                 }
 
                 if not arg:
-                    print(_c(YEL, "Uso: /branch <archivo>  |  /branch check <job_id>"))
+                    print(_c(YEL, _tr("Uso: /branch <archivo>  |  /branch check <job_id>", "Usage: /branch <file>  |  /branch check <job_id>")))
                     print(_c(DIM, f"  Lenguajes soportados: {', '.join(_LANG.keys())}"))
                     continue
 
@@ -6503,7 +6593,7 @@ def repl(new_session: bool = False):
                 if arg.startswith("check"):
                     check_parts = arg.split(None, 1)
                     if len(check_parts) < 2:
-                        print(_c(YEL, "Uso: /branch check <job_id>"))
+                        print(_c(YEL, _tr("Uso: /branch check <job_id>", "Usage: /branch check <job_id>")))
                         continue
                     check_jid = check_parts[1].strip()
                     home = Path.home()
@@ -6517,7 +6607,7 @@ def repl(new_session: bool = False):
                             except OSError:
                                 pass
                     if not branch_logs:
-                        print(_c(YEL, f"No encontré logs de branches para el job {check_jid} en {home}"))
+                        print(_c(YEL, _tr(f"No encontré logs de branches para el job {check_jid} en {home}", f"No branch logs found for job {check_jid} in {home}")))
                         continue
                     all_logs = "\n\n".join(branch_logs)
                     check_prompt = (
@@ -6526,7 +6616,7 @@ def repl(new_session: bool = False):
                         f"Analizá cada branch comparando tiempos y resultados. "
                         f"¿Cuál es la mejor? Describí exactamente qué cambios aplicar al código original."
                     )
-                    print(_c(DIM, f"Analizando {len(branch_logs)} branch(es) del job {check_jid}..."))
+                    print(_c(DIM, _tr(f"Analizando {len(branch_logs)} branch(es) del job {check_jid}...", f"Analyzing {len(branch_logs)} branch(es) of job {check_jid}...")))
                     messages_chk = [system_msg] + context_msgs + [{"role": "user", "content": check_prompt}]
                     save_message(con, session_id, "user", check_prompt)
                     try:
@@ -6552,11 +6642,11 @@ def repl(new_session: bool = False):
                 # reporte de usuario real: "genera rutas que no sirven").
                 src_path = Path(arg).expanduser().resolve()
                 if not src_path.exists():
-                    print(_c(RED, f"Archivo no encontrado: {src_path}"))
+                    print(_c(RED, _tr(f"Archivo no encontrado: {src_path}", f"File not found: {src_path}")))
                     continue
                 lang_cfg = _LANG.get(src_path.suffix)
                 if lang_cfg is None:
-                    print(_c(YEL, f"Extensión '{src_path.suffix}' no soportada."))
+                    print(_c(YEL, _tr(f"Extensión '{src_path.suffix}' no soportada.", f"Extension '{src_path.suffix}' not supported.")))
                     print(_c(DIM, f"  Soportados: {', '.join(_LANG.keys())}"))
                     continue
 
@@ -6573,10 +6663,10 @@ def repl(new_session: bool = False):
                     branch_prompt = lang_cfg["diff_branch_prompt"].format(
                         code=src_code, filename=src_path.name, n_lines=n_lines
                     )
-                    print(_c(DIM, f"Generando diffs para {src_path.name} ({n_lines} líneas, modo patch)..."))
+                    print(_c(DIM, _tr(f"Generando diffs para {src_path.name} ({n_lines} líneas, modo patch)...", f"Generating diffs for {src_path.name} ({n_lines} lines, patch mode)...")))
                 else:
                     branch_prompt = lang_cfg["branch_prompt"].format(code=src_code)
-                    print(_c(DIM, f"Generando branches de test para {src_path.name} ({lang_cfg['name']})..."))
+                    print(_c(DIM, _tr(f"Generando branches de test para {src_path.name} ({lang_cfg['name']})...", f"Generating test branches for {src_path.name} ({lang_cfg['name']})...")))
 
                 # System mínimo: el completo (core+HPC+Python ≈ 19K tokens) satura al modelo
                 # Solo _BASE_PROMPT (~200 tokens): suficiente para que sepa el rol
@@ -6615,14 +6705,14 @@ def repl(new_session: bool = False):
                     # que pidió 3. Con \Z, el último bloque sin cerrar se toma hasta el final.
                     diff_blocks = _re.findall(r"```diff\n(.*?)(?:```|\Z)", reply_br, _re.DOTALL)
                     if not diff_blocks:
-                        print(_c(YEL, "\nNo encontré bloques ```diff``` en la respuesta."))
-                        print(_c(DIM, "El modelo no generó diffs. Intentá de nuevo."))
+                        print(_c(YEL, _tr("\nNo encontré bloques ```diff``` en la respuesta.", "\nNo ```diff``` blocks found in the response.")))
+                        print(_c(DIM, _tr("El modelo no generó diffs. Intentá de nuevo.", "The model did not generate diffs. Try again.")))
                         continue
                     _n_branch_headers = len(_re.findall(r"(?im)^#{0,3}\s*branch\s+\d", reply_br))
                     if _n_branch_headers > len(diff_blocks):
-                        print(_c(YEL, f"\n⚠ El modelo anunció {_n_branch_headers} branches pero "
+                        print(_c(YEL, _tr(f"\n⚠ El modelo anunció {_n_branch_headers} branches pero "
                                       f"solo se pudieron extraer {len(diff_blocks)} diffs válidos "
-                                      f"(bloque mal formado o incompleto) — revisá antes de someter."))
+                                      f"(bloque mal formado o incompleto) — revisá antes de someter.", f"\n⚠ The model announced {_n_branch_headers} branches but only {len(diff_blocks)} valid diffs could be extracted (malformed or incomplete block) — check before submitting.")))
                     for idx, diff_text in enumerate(diff_blocks, 1):
                         bname = f"branch_{idx}{lang_cfg['ext']}"
                         bpath = branch_dir / bname
@@ -6649,7 +6739,7 @@ def repl(new_session: bool = False):
                                 bpath.write_text(patched, encoding="utf-8")
                                 r = type('_R', (), {'returncode': 0, 'stdout': '', 'stderr': ''})()
                                 _via_contexto = True
-                                print(_c(YEL, f"  {bname} → patch via contexto (líneas @@ corregidas)"))
+                                print(_c(YEL, _tr(f"  {bname} → patch via contexto (líneas @@ corregidas)", f"  {bname} → patch via context (@@ lines fixed)")))
                         saved.append(bpath)
                         if r.returncode == 0:
                             if not _via_contexto:
@@ -6662,7 +6752,7 @@ def repl(new_session: bool = False):
                                     print(_c(GRN, f"  {bname} → compilado OK"))
                                     ready.append((idx, binpath, bpath))
                                 else:
-                                    print(_c(RED, f"  {bname} → ERROR de compilación:"))
+                                    print(_c(RED, _tr(f"  {bname} → ERROR de compilación:", f"  {bname} → compilation ERROR:")))
                                     print(_c(DIM, rc.stderr[:400]))
                             else:
                                 if lang_cfg["ext"] == ".py":
@@ -6684,18 +6774,18 @@ def repl(new_session: bool = False):
                                                 capture_output=True, text=True
                                             )
                                             if rc2.returncode == 0:
-                                                print(_c(GRN, f"  {bname} → sintaxis OK (indentación corregida)"))
+                                                print(_c(GRN, _tr(f"  {bname} → sintaxis OK (indentación corregida)", f"  {bname} → syntax OK (indentation fixed)")))
                                                 ready.append((idx, bpath, bpath))
                                             else:
-                                                print(_c(RED, f"  {bname} → ERROR de sintaxis:"))
+                                                print(_c(RED, _tr(f"  {bname} → ERROR de sintaxis:", f"  {bname} → syntax ERROR:")))
                                                 print(_c(DIM, rc2.stderr[:400]))
                                         else:
-                                            print(_c(RED, f"  {bname} → ERROR de sintaxis:"))
+                                            print(_c(RED, _tr(f"  {bname} → ERROR de sintaxis:", f"  {bname} → syntax ERROR:")))
                                             print(_c(DIM, rc.stderr[:400]))
                                 else:
                                     ready.append((idx, bpath, bpath))
                         else:
-                            print(_c(RED, f"  {bname} → ERROR de patch:"))
+                            print(_c(RED, _tr(f"  {bname} → ERROR de patch:", f"  {bname} → patch ERROR:")))
                             print(_c(DIM, (r.stdout + r.stderr)[:400]))
                 else:
                     # Modo script completo (archivos cortos)
@@ -6704,8 +6794,8 @@ def repl(new_session: bool = False):
                         rf"```(?:{fence})?\n(.*?)```", reply_br, _re.DOTALL
                     )
                     if not code_blocks:
-                        print(_c(YEL, f"\nNo encontré bloques ```{fence}``` en la respuesta."))
-                        print(_c(DIM, f"Pedile al bot que regenere con formato ```{fence}```"))
+                        print(_c(YEL, _tr(f"\nNo encontré bloques ```{fence}``` en la respuesta.", f"\nNo ```{fence}``` blocks found in the response.")))
+                        print(_c(DIM, _tr(f"Pedile al bot que regenere con formato ```{fence}```", f"Ask the bot to regenerate with ```{fence}``` format")))
                         continue
                     for idx, code in enumerate(code_blocks, 1):
                         bname = f"branch_{idx}{lang_cfg['ext']}"
@@ -6722,7 +6812,7 @@ def repl(new_session: bool = False):
                                 print(_c(GRN, f"  {bname} → compilado OK"))
                                 ready.append((idx, binpath, bpath))
                             else:
-                                print(_c(RED, f"  {bname} → ERROR de compilación:"))
+                                print(_c(RED, _tr(f"  {bname} → ERROR de compilación:", f"  {bname} → compilation ERROR:")))
                                 print(_c(DIM, r.stderr[:400]))
                         else:
                             if lang_cfg["ext"] == ".py":
@@ -6734,15 +6824,15 @@ def repl(new_session: bool = False):
                                     print(_c(GRN, f"  {bname} → sintaxis OK"))
                                     ready.append((idx, bpath, bpath))
                                 else:
-                                    print(_c(RED, f"  {bname} → ERROR de sintaxis:"))
+                                    print(_c(RED, _tr(f"  {bname} → ERROR de sintaxis:", f"  {bname} → syntax ERROR:")))
                                     print(_c(DIM, r.stderr[:400]))
                             else:
                                 print(_c(GRN, f"  {bname} → guardado"))
                                 ready.append((idx, bpath, bpath))
 
                 if not ready:
-                    print(_c(YEL, "\nNinguna branch lista. Revisá los errores arriba."))
-                    print(_c(DIM, f"Fuentes guardadas en {branch_dir}/"))
+                    print(_c(YEL, _tr("\nNinguna branch lista. Revisá los errores arriba.", "\nNo branch ready. Check the errors above.")))
+                    print(_c(DIM, _tr(f"Fuentes guardadas en {branch_dir}/", f"Sources saved in {branch_dir}/")))
                     continue
 
                 # Generar sbatch de comparación
@@ -6788,7 +6878,7 @@ def repl(new_session: bool = False):
                 sbatch_path.write_text("\n".join(sbatch_lines) + "\n")
                 print(_c(DIM, f"\nSbatch generado: {sbatch_path}"))
 
-                if _yn_raw(_c(BOLD, f"¿Someter {len(ready)} branch(es) al cluster? [s/N]: ")):
+                if _yn_raw(_c(BOLD, _tr(f"¿Someter {len(ready)} branch(es) al cluster? [s/N]: ", f"Submit {len(ready)} branch(es) to the cluster? [y/N]: "))):
                     r2 = _sp3.run(["sbatch", str(sbatch_path)], capture_output=True, text=True)
                     if r2.returncode == 0:
                         print(_c(GRN, r2.stdout.strip()))
@@ -6796,13 +6886,13 @@ def repl(new_session: bool = False):
                     else:
                         print(_c(RED, f"Error: {r2.stderr.strip()}"))
                 else:
-                    print(_c(DIM, f"Podés someter manualmente: sbatch {sbatch_path}"))
+                    print(_c(DIM, _tr(f"Podés someter manualmente: sbatch {sbatch_path}", f"You can submit manually: sbatch {sbatch_path}")))
                 print()
                 continue
 
             elif cmd == "/load":
                 if not arg:
-                    print(_c(YEL, "Uso: /load <path|url>"))
+                    print(_c(YEL, _tr("Uso: /load <path|url>", "Usage: /load <path|url>")))
                     continue
                 try:
                     content = load_resource(arg)
@@ -6813,17 +6903,17 @@ def repl(new_session: bool = False):
                         _trunc_note = f"\n\n[... {len(content) - _MAX_LOAD:,} caracteres adicionales omitidos — el documento completo tiene {len(content):,} chars]"
                         content_stored = content[:_MAX_LOAD] + _trunc_note
                         if n_files > 1:
-                            resumen = f"{n_files} archivos, {len(content):,} caracteres (truncado a {_MAX_LOAD:,})"
+                            resumen = _tr(f"{n_files} archivos, {len(content):,} caracteres (truncado a {_MAX_LOAD:,})", f"{n_files} files, {len(content):,} characters (truncated to {_MAX_LOAD:,})")
                         else:
-                            resumen = f"{len(content):,} caracteres (truncado a {_MAX_LOAD:,})"
+                            resumen = _tr(f"{len(content):,} caracteres (truncado a {_MAX_LOAD:,})", f"{len(content):,} characters (truncated to {_MAX_LOAD:,})")
                     else:
                         content_stored = content
                         if n_files > 1:
-                            resumen = f"{n_files} archivos, {len(content):,} caracteres"
+                            resumen = _tr(f"{n_files} archivos, {len(content):,} caracteres", f"{n_files} files, {len(content):,} characters")
                         else:
-                            resumen = f"{len(content):,} caracteres"
+                            resumen = _tr(f"{len(content):,} caracteres", f"{len(content):,} characters")
                     extra_context.append(f"[Contexto cargado: {label}]\n{content_stored}")
-                    print(_c(GRN, f"Cargado: {label} ({resumen})"))
+                    print(_c(GRN, _tr(f"Cargado: {label} ({resumen})", f"Loaded: {label} ({resumen})")))
                     # Lint determinístico inmediato para scripts bash/sbatch -- bug real
                     # 28/9 (usuario real, dos jobs LAMMPS de Alejandro Alés que no
                     # generaban resultados): al recibir un /load + una pregunta genérica,
@@ -6842,7 +6932,7 @@ def repl(new_session: bool = False):
                         _load_lint_out = _fix_sbatch(f"```bash\n{_load_body}\n```")
                         _load_warns = [l for l in _load_lint_out.splitlines() if l.startswith("⚠ ")]
                         if _load_warns:
-                            print(_c(YEL, "\nDetección automática (sin esperar al modelo):"))
+                            print(_c(YEL, _tr("\nDetección automática (sin esperar al modelo):", "\nAutomatic detection (without waiting for the model):")))
                             for w in dict.fromkeys(_load_warns):
                                 print(_c(YEL, f"  {w}"))
                 except RuntimeError as e:
@@ -6936,7 +7026,7 @@ def repl(new_session: bool = False):
         if "\n" not in user_input and not _INJECT.search(user_input) and not _INJECT_PIPE.search(user_input) and _first_word in _AUTO_RUN_CMDS:
             _is_dangerous = _first_word in _DANGEROUS_CMDS or any(p in user_input for p in _DANGEROUS_PATTERNS)
             if _is_dangerous:
-                if not _yn_raw(_c(YEL, f"  ⚠ Operación destructiva: `{user_input[:60]}` — ¿continuar? [s/N] ")):
+                if not _yn_raw(_c(YEL, _tr(f"  ⚠ Operación destructiva: `{user_input[:60]}` — ¿continuar? [s/N] ", f"  ⚠ Destructive operation: `{user_input[:60]}` — continue? [y/N] "))):
                     print(_c(DIM, "Cancelado."))
                     continue
             # Bug real 8/10 (confirmado en vivo, scroll crudo de la shell): un
@@ -6957,14 +7047,17 @@ def repl(new_session: bool = False):
             elif _looks_like_pasted_prose(user_input):
                 _cleaned_cmd = _strip_pasted_prose(user_input)
                 if _cleaned_cmd and _cleaned_cmd != user_input.strip():
-                    print(_c(YEL, "  ⚠ Se coló texto en español después de este comando -- "
-                                  "corriendo solo la parte real:"))
+                    print(_c(YEL, _tr("  ⚠ Se coló texto en español después de este comando -- "
+                                  "corriendo solo la parte real:", "  ⚠ Spanish text slipped in after this command -- running only the real part:")))
                     print(_c(DIM, f"    {_cleaned_cmd}"))
                     user_input = _cleaned_cmd
-                elif not _yn_raw(_c(YEL, "  ⚠ Este comando tiene texto en español pegado fuera de "
+                elif not _yn_raw(_c(YEL, _tr("  ⚠ Este comando tiene texto en español pegado fuera de "
                                        "comillas (¿se coló una explicación junto con el comando?) "
-                                       "— ¿correrlo tal cual? [s/N] ")):
-                    print(_c(DIM, "Cancelado."))
+                                       "— ¿correrlo tal cual? [s/N] ",
+                                       "  ⚠ This command has prose pasted outside quotes "
+                                       "(did an explanation slip in with the command?) "
+                                       "— run it as is? [y/N] "))):
+                    print(_c(DIM, _tr("Cancelado.", "Cancelled.")))
                     continue
             print(_c(DIM + CYAN, f"  $ {user_input}"))
             try:
@@ -7078,8 +7171,8 @@ def repl(new_session: bool = False):
         # Detectar comando con metacaracteres peligrosos (hard block) — advertir sin alucinar
         # Pipes simples (|) NO se bloquean aquí: pasan al LLM para análisis.
         if "\n" not in user_input and _first_word in _AUTO_RUN_CMDS and _INJECT.search(user_input):
-            print(_c(YEL, f"  ⚠ Metacaracteres detectados — comando no ejecutado por seguridad."))
-            print(_c(YEL, f"    Separá los comandos en entradas distintas para ejecutarlos."))
+            print(_c(YEL, _tr(f"  ⚠ Metacaracteres detectados — comando no ejecutado por seguridad.", "  ⚠ Metacharacters detected — command not executed for safety.")))
+            print(_c(YEL, _tr(f"    Separá los comandos en entradas distintas para ejecutarlos.", "    Split the commands into separate entries to run them.")))
             print()
             continue
 
@@ -7126,7 +7219,7 @@ def repl(new_session: bool = False):
         _error_words = any(w in user_input.lower() for w in ("falló", "fallo", "failed", "error", "killed", "oom", "abort", "crashed", "no corre", "no anda"))
         if _job_ids and _error_words:
             _jid = _job_ids[-1]
-            print(_c(DIM, f"  💡 Tip: /diagnose {_jid} — cargo los logs del job automáticamente"))
+            print(_c(DIM, _tr(f"  💡 Tip: /diagnose {_jid} — cargo los logs del job automáticamente", f"  💡 Tip: /diagnose {_jid} — loads the job's logs automatically")))
 
         # Build messages for this turn
         # Prepend any /load context as a synthetic user message (once per session)
@@ -7177,7 +7270,7 @@ def repl(new_session: bool = False):
 
         if not _check_online():
             if not _auto_start_service():
-                print(_c(RED, "\nEl servicio de IA no está disponible. Contactá a Gonzalo: garroyo@ifimar-conicet.gob.ar\n"))
+                print(_c(RED, _tr("\nEl servicio de IA no está disponible. Contactá a Gonzalo: garroyo@ifimar-conicet.gob.ar\n", "\nThe AI service is not available. Contact Gonzalo: garroyo@ifimar-conicet.gob.ar\n")))
                 continue
 
         _pj_before = [tuple(b) for b in _LAST_JOB_PROJECT]
@@ -7196,7 +7289,7 @@ def repl(new_session: bool = False):
                 else:
                     sys.stdout.write("\r\x1b[2K")  # borrar solo la línea actual (▶ sin contenido)
                     sys.stdout.flush()
-                print(_c(YEL, "↺ Contexto muy largo — limpiando historial y reintentando..."))
+                print(_c(YEL, _tr("↺ Contexto muy largo — limpiando historial y reintentando...", "↺ Context too long — clearing history and retrying...")))
                 context_msgs = []
                 messages_to_send = [_query_system_msg]
                 if extra_context:
@@ -7228,9 +7321,9 @@ def repl(new_session: bool = False):
                     else:
                         sys.stdout.write("\r\x1b[2K")
                         sys.stdout.flush()
-                        print(_c(RED, f"Error tras reintento: {err2}\n"))
+                        print(_c(RED, _tr(f"Error tras reintento: {err2}\n", f"Error after retry: {err2}\n")))
                         continue
-            elif "No se puede conectar" in err or "Connection refused" in err:
+            elif "No se puede conectar" in err or "Cannot connect to" in err or "Connection refused" in err:
                 if _auto_start_service():
                     try:
                         reply = stream_response(messages_to_send)
@@ -7245,7 +7338,7 @@ def repl(new_session: bool = False):
 
         import re as _re_gs
         if _re_gs.search(r'0{20,}|O{20,}', reply):
-            print(_c(YEL, "⚠ Respuesta con contenido repetitivo — no guardada en historial."))
+            print(_c(YEL, _tr("⚠ Respuesta con contenido repetitivo — no guardada en historial.", "⚠ Response with repetitive content — not saved in history.")))
         else:
             save_message(con, session_id, "assistant", reply)
         last_reply = reply
@@ -7261,8 +7354,8 @@ def repl(new_session: bool = False):
         # nada de una respuesta que ya se sospecha que es puro razonamiento
         # filtrado, no texto real -- se salta todo el auto-exec en ese caso.
         if MODEL in _REASONING_MODELS and _looks_like_reasoning_leak(reply):
-            print(_c(DIM, "\n  (auto-ejecución de comandos salteada: esta respuesta "
-                          "tiene pinta de fuga de razonamiento, no de texto real)"))
+            print(_c(DIM, _tr("\n  (auto-ejecución de comandos salteada: esta respuesta "
+                          "tiene pinta de fuga de razonamiento, no de texto real)", "\n  (automatic command execution skipped: this response looks like a reasoning leak, not real text)")))
         else:
             # Consultas de solo lectura: correrlas de verdad, no solo sugerirlas
             # (ver _is_readonly_query/_run_readonly_query más arriba -- bug real
@@ -7282,8 +7375,8 @@ def repl(new_session: bool = False):
                 if not _is_shell_block(_ro_lang):
                     continue
                 if _is_readonly_query(_ro_code):
-                    print(_c(DIM, f"\n  ▶ Ejecutando de verdad ({_ro_title or 'consulta'}, "
-                                  f"solo lectura, sin pedir confirmación)..."))
+                    print(_c(DIM, _tr(f"\n  ▶ Ejecutando de verdad ({_ro_title or 'consulta'}, "
+                                  f"solo lectura, sin pedir confirmación)...", f"\n  ▶ Actually running ({_ro_title or 'query'}, read-only, no confirmation needed)...")))
                     _ro_out = _run_readonly_query(_ro_code)
                     print(_c(DIM, "  " + "\n  ".join(_ro_out.splitlines()[:40])))
 
@@ -7291,8 +7384,8 @@ def repl(new_session: bool = False):
             # texto suelto, sin bloque ```bash -- esto cubre ese caso además
             # del de arriba (ver _extract_bare_commands).
             for _bare_cmd in _extract_bare_commands(reply):
-                print(_c(DIM, f"\n  ▶ Ejecutando de verdad ({_bare_cmd}, "
-                              f"solo lectura, sin pedir confirmación)..."))
+                print(_c(DIM, _tr(f"\n  ▶ Ejecutando de verdad ({_bare_cmd}, "
+                              f"solo lectura, sin pedir confirmación)...", f"\n  ▶ Actually running ({_bare_cmd}, read-only, no confirmation needed)...")))
                 _bare_out = _run_readonly_query(_bare_cmd)
                 print(_c(DIM, "  " + "\n  ".join(_bare_out.splitlines()[:40])))
 
@@ -7314,9 +7407,12 @@ def repl(new_session: bool = False):
         # nunca automático. Reusa el último bloque #SBATCH generado en ESTA
         # respuesta (mismo patrón que /run) como paso 1.
         if _RE_WORKFLOW_INTENT.search(user_input) and _LAST_CODE_BLOCKS:
-            if _yn_raw(_c(BOLD, "\n  Esto suena a un workflow de varios pasos que "
+            if _yn_raw(_c(BOLD, _tr("\n  Esto suena a un workflow de varios pasos que "
                                 "puede sobrevivir si cerrás la sesión. "
-                                "¿Lo guardo como workflow persistente? [s/N]: ")):
+                                "¿Lo guardo como workflow persistente? [s/N]: ",
+                                "\n  This sounds like a multi-step workflow that "
+                                "can survive closing the session. "
+                                "Save it as a persistent workflow? [y/N]: "))):
                 # bug real encontrado en vivo (1/10): tomar literal el ÚLTIMO
                 # bloque de la respuesta (como hace /run por default) falla acá
                 # porque gonzabot suele generar un segundo bloque CHICO después
@@ -7336,16 +7432,16 @@ def repl(new_session: bool = False):
                         _wf_jobid = _wf_jobid_m.group(1) if _wf_jobid_m else ""
                         _wf_id = _wf_create(user_input[:200])
                         _wf_add_step(_wf_id, _wf_title or "paso 1", _wf_jobid)
-                        print(_c(GRN, f"  Workflow #{_wf_id} creado, job "
+                        print(_c(GRN, _tr(f"  Workflow #{_wf_id} creado, job "
                                       f"{_wf_jobid} sometido. Usá "
                                       f"'/workflow status {_wf_id}' para seguirlo, "
-                                      f"incluso en otra sesión."))
+                                      f"incluso en otra sesión.", f"  Workflow #{_wf_id} created, job {_wf_jobid} submitted. Use '/workflow status {_wf_id}' to follow it, even from another session.")))
                     else:
-                        print(_c(RED, f"  No se pudo someter el paso 1: {_wf_out}"))
+                        print(_c(RED, _tr(f"  No se pudo someter el paso 1: {_wf_out}", f"  Could not submit step 1: {_wf_out}")))
                 else:
-                    print(_c(YEL, "  Ningún bloque de esta respuesta tiene "
+                    print(_c(YEL, _tr("  Ningún bloque de esta respuesta tiene "
                                   "#SBATCH, no hay nada para someter como "
-                                  "paso 1 todavía."))
+                                  "paso 1 todavía.", "  No block in this response has #SBATCH, nothing to submit as step 1 yet.")))
 
         # Add to context window
         context_msgs.append({"role": "user",      "content": user_input})
@@ -7358,7 +7454,7 @@ def repl(new_session: bool = False):
         # Avisar cada 10 turnos que la sesión lleva tiempo
         _repl_turn += 1
         if _repl_turn % 10 == 0:
-            print(_c(DIM, f"  ℹ  {_repl_turn} turnos en esta sesión. Escribí /compact para liberar contexto."))
+            print(_c(DIM, _tr(f"  ℹ  {_repl_turn} turnos en esta sesión. Escribí /compact para liberar contexto.", f"  ℹ  {_repl_turn} turns in this session. Type /compact to free up context.")))
 
         print()
 

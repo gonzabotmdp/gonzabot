@@ -6,6 +6,19 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.7.3] - 2026-10-15
+
+### Added
+- Terminal interface in English. With `/lang en`, `GONZABOT_LANG=en` or an
+  English console locale, the welcome panel, `/help`, tips, confirmation prompts
+  (`[y/N]`), submission flow, service start-up messages and load/paste notices
+  are shown in English. Spanish output is unchanged. Model-facing prompts, lint
+  messages and the context files are intentionally left as they were.
+
+### Changed
+- `--selftest` grows from 258 to 260 checks. Internal evaluation set
+  (30 requests x 5 repetitions): 147/150.
+
 ## [1.7.2] - 2026-10-15
 
 ### Fixed
