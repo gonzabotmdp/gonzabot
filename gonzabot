@@ -3158,6 +3158,27 @@ def _selftest() -> int:
     _t("'corrélo en el cluster' pide someter", bool(_RE_SUBMIT_NOW.match("corrélo en el cluster")))
     _t("pedido nuevo no es 'someter'", not _RE_SUBMIT_NOW.match("corré un benchmark de dgemm"))
     _t("sbatch completo está listo", _project_ready([("bash", "#!/bin/bash\n#SBATCH -n 1\nsrun hostname", "")]))
+    _big = [{"role": "system", "content": "S" * 3000}] + [
+        {"role": ("user" if i % 2 == 0 else "assistant"), "content": "x" * 40000} for i in range(40)
+    ] + [{"role": "user", "content": "pregunta final"}]
+    _fit = _fit_messages(_big, 6000)
+    _t("fit: entra en la ventana", _est_tokens(_fit) <= _MODEL_CTX_TOKENS - 6000)
+    _t("fit: conserva system y pregunta final", _fit[0]["content"].startswith("SSS") and _fit[-1]["content"] == "pregunta final")
+    _t("fit: no muta la entrada", len(_big) == 42 and len(_big[1]["content"]) == 40000)
+    _t("fit: roles siguen alternando tras system", _fit[1]["role"] != "assistant")
+    _ctxm = [{"role": "system", "content": "S"}, {"role": "user", "content": "Contexto adicional para esta sesión:\n\nDATOS"},
+             {"role": "assistant", "content": "Entendido, tendré en cuenta ese contexto."}] + [
+        {"role": ("user" if i % 2 == 0 else "assistant"), "content": "z" * 30000} for i in range(30)
+    ] + [{"role": "user", "content": "q"}]
+    _fc = _fit_messages(_ctxm, 6000)
+    _t("fit: protege el contexto cargado con /load", any(m["content"].startswith("Contexto adicional") for m in _fc))
+    _t("fit: respeta el presupuesto de latencia", _est_tokens(_fc) <= _PROMPT_BUDGET_TOKENS)
+    _t("nota de sistema inventada por el modelo se elimina",
+       _strip_fake_system_notes("hola\n[gonzabot sometió a.sbatch a la cola: Submitted batch job 9. Carpeta de trabajo: /x]\nchau") == "hola\nchau")
+    _small = [{"role": "system", "content": "s"}, {"role": "user", "content": "hola"}]
+    _t("fit: prompt chico queda igual", _fit_messages(_small, 6000) is _small)
+    _huge_last = [{"role": "system", "content": "s"}, {"role": "user", "content": "y" * 900000}]
+    _t("fit: último mensaje enorme se recorta", _est_tokens(_fit_messages(_huge_last, 6000)) <= _MODEL_CTX_TOKENS - 6000)
     _t("sbatch con placeholder no está listo", not _project_ready([("bash", "#!/bin/bash\n#SBATCH -n 1\n./correr /ruta/a/tu_input", "")]))
 
     B = "```bash\n#!/bin/bash\n#SBATCH --partition=cpu\n{}\n```"
@@ -4415,6 +4436,70 @@ def _refence_bare_script(t: str) -> str:
     out = (head + "\n\n" if head else "") + "```bash\n" + body + "\n```"
     return out + ("\n\n" + tail if tail else "") + "\n"
 
+_MODEL_CTX_TOKENS = int(os.environ.get("GONZABOT_MAX_CTX_TOKENS", "131072"))
+_PROMPT_BUDGET_TOKENS = int(os.environ.get("GONZABOT_PROMPT_BUDGET", "72000"))  # latencia/KV con varios usuarios
+_CHARS_PER_TOKEN = 3.0   # estimación conservadora (código/logs ~2.5, prosa ES ~3.8)
+
+
+_RE_FAKE_SYS_NOTE = re.compile(r"^[ \t]*\[gonzabot sometió[^\n]*\][ \t]*\n?", re.M)
+
+
+def _strip_fake_system_notes(t: str) -> str:
+    """El modelo imita la nota '[gonzabot sometió ...]' que el código agrega al historial e
+    inventa un job id; las notas reales las agrega solo el código, después de la respuesta."""
+    return _RE_FAKE_SYS_NOTE.sub("", t)
+
+
+_FIT_NOTE = [""]
+
+
+def _est_tokens(messages: "list[dict]") -> int:
+    return int(sum(len(m.get("content") or "") + 16 for m in messages) / _CHARS_PER_TOKEN) + 8
+
+
+def _shrink_text(t: str, keep_chars: int) -> str:
+    """Conserva cabeza y cola (donde suelen estar la pregunta y el error real)."""
+    if len(t) <= keep_chars:
+        return t
+    h = int(keep_chars * 0.6)
+    tail = keep_chars - h
+    return (t[:h] + f"\n\n[... {len(t) - keep_chars} caracteres omitidos por tamaño ...]\n\n" + t[-tail:])
+
+
+def _fit_messages(messages: "list[dict]", max_tokens: int, ctx_tokens: "int | None" = None) -> "list[dict]":
+    """Garantiza que el prompt entre en la ventana del modelo. No muta la lista original.
+    Orden: (1) recortar mensajes individuales enormes, (2) tirar los turnos más viejos,
+    (3) recortar el último mensaje de usuario como último recurso."""
+    budget = min((ctx_tokens or _MODEL_CTX_TOKENS) - max_tokens - 1500, _PROMPT_BUDGET_TOKENS)
+    if _est_tokens(messages) <= budget:
+        return messages
+    _n_before = len(messages)
+    msgs = [dict(m) for m in messages]
+    single_cap = int(budget * _CHARS_PER_TOKEN * 0.25)
+    for i, m in enumerate(msgs):
+        if m["role"] != "system" and i != len(msgs) - 1:
+            m["content"] = _shrink_text(m.get("content") or "", single_cap)
+    def _protected(i):
+        m = msgs[i]
+        c = m.get("content") or ""
+        return (c.startswith("Contexto adicional") and m["role"] == "user") or \
+               (i > 0 and m["role"] == "assistant" and (msgs[i - 1].get("content") or "").startswith("Contexto adicional"))
+    while _est_tokens(msgs) > budget:
+        idx = next((i for i, m in enumerate(msgs[:-1]) if m["role"] != "system" and not _protected(i)), None)
+        if idx is None:
+            break
+        del msgs[idx]
+    k = 1 if msgs and msgs[0]["role"] == "system" else 0
+    while len(msgs) > k + 1 and msgs[k]["role"] == "assistant":
+        del msgs[k]
+    if _est_tokens(msgs) > budget:
+        sys_toks = _est_tokens(msgs[:-1])
+        room = max(2000, int((budget - sys_toks) * _CHARS_PER_TOKEN))
+        msgs[-1]["content"] = _shrink_text(msgs[-1].get("content") or "", room)
+    _FIT_NOTE[0] = f"historial recortado: {_n_before - len(msgs)} mensajes viejos fuera para entrar en el contexto del modelo"
+    return msgs
+
+
 def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool = False,
                     check_garbage: bool = True) -> str:
     """Stream chat completion; print tokens as they arrive; return full text.
@@ -4427,15 +4512,28 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
     # para que /save N siga funcionando (bug reparado 13 jul 2026)
     _touch_heartbeat()
     chars_in = sum(len(m.get("content","")) for m in messages if m["role"]=="user")
-    req = _build_request(messages, max_tokens=max_tokens)
-    try:
-        resp: HTTPResponse = urlopen(req, timeout=120)
-    except HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"vLLM HTTP {e.code}: {body}") from e
-    except URLError as e:
-        raise RuntimeError(f"No se puede conectar a {VLLM_BASE}\n"
-                           "  ¿Está corriendo el servicio? Verificar con: squeue | grep vllm") from e
+    _FIT_NOTE[0] = ""
+    messages = _fit_messages(messages, max_tokens)
+    if _FIT_NOTE[0] and not silent:
+        print(_c(DIM, "  ↺ " + _FIT_NOTE[0]))
+    resp = None
+    for _attempt in range(4):
+        req = _build_request(messages, max_tokens=max_tokens)
+        try:
+            resp = urlopen(req, timeout=300)
+            break
+        except HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            if e.code == 400 and re.search(r"context length|maximum.*tokens|too long", body, re.I) and _attempt < 3:
+                messages = _fit_messages(messages, max_tokens, int(_MODEL_CTX_TOKENS * (0.8 ** (_attempt + 1))))
+                continue
+            if e.code in (429, 502, 503) and _attempt < 3:
+                time.sleep(2 * (_attempt + 1))
+                continue
+            raise RuntimeError(f"vLLM HTTP {e.code}: {body}") from e
+        except URLError as e:
+            raise RuntimeError(f"No se puede conectar a {VLLM_BASE}\n"
+                               "  ¿Está corriendo el servicio? Verificar con: squeue | grep vllm") from e
 
     # Spinner visible durante el TTFT (hasta que llega el primer token)
     first_token = threading.Event()
@@ -4969,6 +5067,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
         text = _fix_sbatch(text)
     except Exception:
         pass
+    text = _strip_fake_system_notes(text)
     if _new_blocks:
         _LAST_CODE_BLOCKS = _new_blocks
         if any(_looks_like_real_sbatch(_b[1]) for _b in _new_blocks):
@@ -4988,7 +5087,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                 "cpp": "cpp", "c++": "cpp", "c": "c",
                 "diff": "diff", "text": "text", "": "text",
             }
-            raw_text = "".join(_raw_buf)
+            raw_text = _strip_fake_system_notes("".join(_raw_buf))
             parts = _re_md.split(r'(```[\s\S]*?```)', raw_text)
             code_idx = 0
             _n_blocks = len(_rich_blocks)

@@ -6,6 +6,24 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.7.1] - 2026-10-15
+
+### Fixed
+- Prompts larger than the model window (many `/load`ed files, very long chats,
+  huge pasted logs) used to end in an unrecoverable HTTP 400. Requests are now
+  fitted to a 72k-token budget: oversized messages are shortened (head+tail),
+  oldest turns are dropped, `/load` context is protected, and a context-length
+  400 is retried with a smaller window. HTTP 429/502/503 are retried with
+  backoff and the request timeout is 300 s, so queueing under many simultaneous
+  users is no longer mistaken for "service down".
+- The model sometimes imitated the `[gonzabot sometió ...]` note that the code
+  adds after a real submission and invented a job ID; such lines are now
+  stripped from replies and history.
+
+### Changed
+- `--selftest` grows from 246 to 255 checks. Load test (24 simultaneous users,
+  8 users with giant histories) passes against vLLM without server changes.
+
 ## [1.7.0] - 2026-10-09
 
 ### Added
