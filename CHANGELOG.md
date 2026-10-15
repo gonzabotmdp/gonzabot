@@ -6,6 +6,24 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.7.2] - 2026-10-15
+
+### Fixed
+- `r-ggplot2` has two builds in the store (3.5.2 and 4.0.3); the ambiguous
+  `spack load r-ggplot2` is now rewritten to a fixed hash even when
+  `preferred-hashes.conf` does not list it.
+- Context added with `/load` is now placed after the conversation history,
+  right before the latest message, so the model weighs it as recent instead of
+  forgetting it in long chats.
+- When old turns are dropped to fit the model window, a short mechanical digest
+  of the omitted turns (their first lines) is left in place instead of a silent gap.
+- Requests for PyTorch on GPU now open by saying that the cluster's `py-torch`
+  is CPU-only (context rule in `python.txt`).
+
+### Changed
+- `--selftest` grows from 255 to 258 checks. Internal evaluation set
+  (30 requests x 5 repetitions): 148/150.
+
 ## [1.7.1] - 2026-10-15
 
 ### Fixed

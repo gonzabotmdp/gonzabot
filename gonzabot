@@ -2935,8 +2935,8 @@ def _fix_sbatch(text: str) -> str:
     def _fix_spack_load_aliases(block: str) -> str:
         """En sbatch no existe el wrapper de preferred-hashes.conf: 'spack load
         lammps-cpu' (alias) o 'lammps' (2 builds) falla. Se reescribe a /hash."""
+        prefs = {'r-ggplot2': 'ofunba5'}   # 2 builds en el store (3.5.2 / 4.0.3): el nombre pelado es ambiguo
         try:
-            prefs = {}
             for ln in open(os.environ.get('GONZABOT_PREFERRED_HASHES') or _PREF_CONF):
                 ln = ln.strip()
                 if ln and not ln.startswith('#'):
@@ -2944,7 +2944,7 @@ def _fix_sbatch(text: str) -> str:
                     if len(parts) == 2 and len(parts[1]) >= 7:
                         prefs[parts[0]] = parts[1][:7]
         except OSError:
-            return block
+            pass
         in_batch = '#SBATCH' in block
 
         def _sub(m):
@@ -3173,8 +3173,13 @@ def _selftest() -> int:
     _fc = _fit_messages(_ctxm, 6000)
     _t("fit: protege el contexto cargado con /load", any(m["content"].startswith("Contexto adicional") for m in _fc))
     _t("fit: respeta el presupuesto de latencia", _est_tokens(_fc) <= _PROMPT_BUDGET_TOKENS)
+    _t("r-ggplot2 pelado (2 builds) se reescribe al hash",
+       "load --sh /3xnipqp /ofunba5 r-dplyr" in _fix_sbatch("```bash\n#!/bin/bash\n#SBATCH -n 1\neval $(spack load --sh /3xnipqp r-ggplot2 r-dplyr)\n```"))
     _t("nota de sistema inventada por el modelo se elimina",
        _strip_fake_system_notes("hola\n[gonzabot sometió a.sbatch a la cola: Submitted batch job 9. Carpeta de trabajo: /x]\nchau") == "hola\nchau")
+    _fd = _fit_messages(_big, 6000)
+    _t("fit: deja resumen de lo omitido", _fd[1]["content"].startswith("Resumen automático") and "- usuario: xxx" in _fd[1]["content"])
+    _t("fit: con resumen sigue dentro del presupuesto", _est_tokens(_fd) <= _PROMPT_BUDGET_TOKENS)
     _small = [{"role": "system", "content": "s"}, {"role": "user", "content": "hola"}]
     _t("fit: prompt chico queda igual", _fit_messages(_small, 6000) is _small)
     _huge_last = [{"role": "system", "content": "s"}, {"role": "user", "content": "y" * 900000}]
@@ -4484,14 +4489,27 @@ def _fit_messages(messages: "list[dict]", max_tokens: int, ctx_tokens: "int | No
         c = m.get("content") or ""
         return (c.startswith("Contexto adicional") and m["role"] == "user") or \
                (i > 0 and m["role"] == "assistant" and (msgs[i - 1].get("content") or "").startswith("Contexto adicional"))
-    while _est_tokens(msgs) > budget:
+    dropped = []
+    while _est_tokens(msgs) > budget - 1000:
         idx = next((i for i, m in enumerate(msgs[:-1]) if m["role"] != "system" and not _protected(i)), None)
         if idx is None:
             break
-        del msgs[idx]
+        dropped.append(msgs.pop(idx))
     k = 1 if msgs and msgs[0]["role"] == "system" else 0
     while len(msgs) > k + 1 and msgs[k]["role"] == "assistant":
-        del msgs[k]
+        dropped.append(msgs.pop(k))
+    if dropped:
+        # Resumen mecánico (sin llamar al modelo, no hay recursión ni latencia): una línea por
+        # turno omitido, para no perder el hilo de la charla.
+        lines = []
+        for m in dropped[-24:]:
+            first = " ".join((m.get("content") or "").split())[:150]
+            lines.append(f"- {'usuario' if m['role'] == 'user' else 'asistente'}: {first}")
+        msgs[k:k] = [
+            {"role": "user", "content": "Resumen automático de turnos anteriores omitidos por tamaño "
+                                        "(solo el comienzo de cada uno):\n" + "\n".join(lines)[:3500]},
+            {"role": "assistant", "content": "Entendido."},
+        ]
     if _est_tokens(msgs) > budget:
         sys_toks = _est_tokens(msgs[:-1])
         room = max(2000, int((budget - sys_toks) * _CHARS_PER_TOKEN))
@@ -7118,7 +7136,12 @@ def repl(new_session: bool = False):
                              "content": _system_prompt_for(_user_content, _recent_hist)}
         messages_to_send: list[dict] = [_query_system_msg]
 
+        messages_to_send.extend(context_msgs)
+
         if extra_context:
+            # Después del historial (no antes): si el usuario dice "arreglá este script", lo
+            # recién cargado con /load tiene que ser lo más reciente y no quedar tapado por
+            # un sbatch anterior de la charla.
             combined = "\n\n---\n\n".join(extra_context)
             messages_to_send.append({
                 "role": "user",
@@ -7128,8 +7151,6 @@ def repl(new_session: bool = False):
                 "role": "assistant",
                 "content": "Entendido, tendré en cuenta ese contexto."
             })
-
-        messages_to_send.extend(context_msgs)
         messages_to_send.append({"role": "user", "content": _user_content})
 
         _CURRENT_CTX_CHARS = sum(len(m.get("content", "")) for m in messages_to_send)
