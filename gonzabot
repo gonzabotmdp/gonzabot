@@ -660,6 +660,29 @@ def _submit_project(blocks: "list[tuple[str,str,str]]", confirm=None) -> "tuple[
     return (r.returncode == 0, (r.stdout.strip() or r.stderr.strip()), d)
 
 
+_RE_INPUT_FILE = re.compile(
+    r"(?<![\w./$~-])((?:in\.[\w.-]+)|(?:[A-Za-z][\w-]*\.(?:txt|dat|csv|lammps|data|npy|h5|json|inp|pdb|xyz|fasta|fastq|gro|mdp|top)))\b")
+
+
+def _missing_inputs(files: "list[tuple[str,str,str]]", names: "list[str]", cwd: "Path | None" = None) -> "list[str]":
+    """Archivos de entrada que el sbatch usa por nombre relativo y que no existen ni se generan."""
+    cwd = cwd or Path.cwd()
+    own = {Path(n).name for n in names}
+    found: "list[str]" = []
+    for b in files:
+        if not _looks_like_real_sbatch(b[1]):
+            continue
+        body = b[1]
+        for m in _RE_INPUT_FILE.finditer(body):
+            f = m.group(1)
+            if f in found or f in own or (cwd / f).exists():
+                continue
+            if re.search(r"(?:>>?|tee|-o|--output|--error)\s*\S*" + re.escape(f), body):
+                continue
+            found.append(f)
+    return found
+
+
 def _offer_submit_project(blocks: "list[tuple[str,str,str]]") -> "str | None":
     files = _project_blocks(blocks)
     if not any(_looks_like_real_sbatch(b[1]) for b in files):
@@ -669,6 +692,12 @@ def _offer_submit_project(blocks: "list[tuple[str,str,str]]") -> "str | None":
     print(_c(BOLD, _tr("\n  Voy a guardar estos archivos en ~/gonzabot-jobs/<fecha>/ y someter el sbatch:", "\n  I will save these files in ~/gonzabot-jobs/<date>/ and submit the sbatch:")))
     for n in names:
         print(f"    • {n}")
+    _miss = _missing_inputs(files, names)
+    if _miss:
+        print(_c(YEL, _tr(f"  ⚠ El sbatch usa archivos que no encuentro en esta carpeta: {', '.join(_miss)}. "
+                          "Si no los ponés junto al script, el job va a fallar.",
+                          f"  ⚠ The sbatch uses files I cannot find in this folder: {', '.join(_miss)}. "
+                          "If you do not place them next to the script, the job will fail.")))
     if not _yn_raw(_c(BOLD, _tr("  ¿Lo mando a la cola? [s/N]: ", "  Send it to the queue? [y/N]: "))):
         print(_c(DIM, _tr("  Cancelado.", "  Cancelled.")))
         return None
@@ -2216,9 +2245,12 @@ def _sources_report(probe: str, reply: str) -> "tuple[list[tuple[str, int]], dic
     segs = [(n, sz) for n, m, sz in _segments_match_report(probe) if m]
     hashes: dict = {}
     for h in _RE_REPLY_HASH.findall(reply):
-        if h in hashes or not any(c.isdigit() for c in h) or not any(c.isalpha() for c in h):
+        if h in hashes:
             continue
-        hashes[h] = [n for n, txt in _CTX.items() if f"/{h}" in txt]
+        found = [n for n, txt in _CTX.items() if f"/{h}" in txt]
+        if not found and not (any(c.isdigit() for c in h) and any(c.isalpha() for c in h)):
+            continue
+        hashes[h] = found
     return segs, hashes
 
 
@@ -3029,7 +3061,7 @@ def _fix_sbatch(text: str) -> str:
         return '\n'.join(out)
 
     _RE_NEEDS_NUMPY_ENV = _re.compile(
-        r'^\s*(?:import|from)\s+(?:numpy|pandas|scipy|matplotlib)\b', _re.M)
+        r'(?:^|[\s"\';])(?:import|from)\s+(?:numpy|pandas|scipy|matplotlib)\b', _re.M)
     # [ \t]* y no \s*: \s incluye \n, así que con re.M matcheaba desde el
     # renglón VACÍO anterior (bug encontrado en el propio selftest 8/10) y
     # la línea insertada terminaba después del salto en blanco, no antes
@@ -3037,8 +3069,8 @@ def _fix_sbatch(text: str) -> str:
     _RE_PYTHON_INVOKE = _re.compile(r'^([ \t]*)python3?\b', _re.M)
     _RE_HAS_PY_ENV_SETUP = _re.compile(
         r'^\s*source\s+\S*/envs/\S+\.env\b|'
-        r'^\s*spack\s+load\b.*(?:python|numpy|scipy|matplotlib|pandas)|'
-        r'^\s*\$SPACK\b|^\s*SPACK=|'
+        r'\bspack\s+load\b.*(?:numpy|scipy|matplotlib|pandas)|'
+        r'\$\{?SPACK\}?\s+load\b.*(?:numpy|scipy|matplotlib|pandas)|'
         r'conda\s+activate|source\s+\S*/bin/activate', _re.M | _re.I)
 
     def _fix_missing_python_env(block: str) -> str:
@@ -3644,6 +3676,15 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format(
         "source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\n"
         "python3 << EOF\nimport numpy as np\nEOF"))
+    r = _fix_sbatch(B.format("SPACK=/x/spack\neval $(spack load --sh python@3.14.5)\npython3 -c \"\nimport numpy as np\nprint(1)\""))
+    _t("python3 -c con numpy tras spack load python solo: inyecta numpy.env (bug 17/10, job 18819)",
+       "source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\npython3 -c" in r)
+    r = _fix_sbatch(B.format("python3 -c \"import numpy as np; print(1)\""))
+    _t("one-liner 'import numpy' en -c también inyecta numpy.env", "numpy.env" in r)
+    _t("_missing_inputs: in.lammps y numeros.txt inexistentes se detectan",
+       _missing_inputs([("bash", "#!/bin/bash\n#SBATCH -n 1\nlmp -in in.lammps\npython3 -c \"open('numeros.txt')\"", "")], ["x.sbatch"], Path("/nonexistent")) == ["in.lammps", "numeros.txt"])
+    _t("_missing_inputs: archivo generado por el propio script no se reporta",
+       _missing_inputs([("bash", "#!/bin/bash\n#SBATCH -n 1\ncat > in.lammps << EOF\nx\nEOF\nlmp -in in.lammps", "")], ["x.sbatch"], Path("/nonexistent")) == [])
     _t("si YA está sourceado numpy.env, no se duplica la línea",
        r.count("source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env") == 1)
     r = _fix_sbatch(B.format("python3 script_sin_numpy.py"))
@@ -6595,6 +6636,18 @@ def repl(new_session: bool = False):
                         "normal. Tu respuesta TIENE que mencionar esto explícitamente y explicar "
                         "la causa probable (ej. --mem insuficiente para OOM) — NUNCA digas 'el job "
                         "terminó bien' cuando aparece esta detección.")
+                # Bug real 17/10 (job 18819): "No module named 'numpy'" -- /diagnose proponía
+                # cambiar python3 por python; la causa real es no cargar el env file.
+                _m_mod = _re_diag2.search(
+                    r"No module named ['\"](numpy|scipy|pandas|matplotlib)\b", log_content)
+                if _m_mod:
+                    _fail_warning += (
+                        f"\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene \"No module named '{_m_mod.group(1)}'\". "
+                        "La causa es que el script NO activó el entorno de Python científico del "
+                        "cluster (el python de `spack load python` pelado no trae numpy/scipy/"
+                        "pandas/matplotlib). La corrección es agregar, antes de llamar a python3, "
+                        "la línea `source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env`. "
+                        "NO propongas cambiar python3 por python ni instalar con pip.")
                 # Bug real 5/9: "CANCELLED ... DUE TO SIGNAL" en el log es Slurm matando
                 # el job desde AFUERA (casi siempre preempción real de scavenger, o un
                 # scancel manual) — NO tiene relación con warnings benignos del programa

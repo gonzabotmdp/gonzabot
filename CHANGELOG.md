@@ -6,6 +6,21 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-10-17
+
+### Fixed
+- Python sbatch scripts that import numpy/scipy/pandas/matplotlib now always get
+  `source .../envs/numpy.env`, also when the script defines `SPACK=`, only runs
+  `spack load python`, or uses a one-line `python3 -c "import numpy ..."`.
+- `/diagnose` on a `No module named 'numpy'` failure now points to the missing
+  env file instead of suggesting `python` instead of `python3`.
+- `/sources` no longer drops Spack hashes made only of letters.
+
+### Added
+- Before submitting, a warning lists input files the sbatch uses by relative
+  name (e.g. `in.lammps`, `numeros.txt`) that do not exist and are not created
+  by the script. Never blocks; the default answer stays "No".
+
 ## [1.8.0] - 2026-10-16
 
 ### Added
