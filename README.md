@@ -231,6 +231,13 @@ Inside a session: `/load <file>` to hand it an existing script, `/edit`
 for a specific revision request, `/diagnose` to have it read a failed
 job's log and explain the cause, `/audit` to review all of a user's
 active jobs, `/save` / `/saveall` to persist the suggested `sbatch`.
+`/sources` shows which context files the last answer came from (and where each
+Spack hash it cites appears); `/good` and `/bad [comment]` save the last
+exchange to `~/.gonzabot/feedback.jsonl` (local, private, only when you type
+them). Before submitting, gonzabot runs `sbatch --test-only`, shows the queue
+per partition, and warns if the requested memory/time is far above what your
+earlier jobs of the same name used. The interface is available in English
+with `/lang en`.
 
 ## Configuration
 

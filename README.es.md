@@ -155,6 +155,13 @@ Dentro de una sesión: `/load <archivo>` para pasarle un script existente,
 `/edit` para pedir una revisión puntual, `/diagnose` para que lea el log de
 un job fallido y explique la causa, `/audit` para revisar todos los jobs
 activos del usuario, `/save` / `/saveall` para persistir el `sbatch` sugerido.
+`/sources` muestra de qué archivos de contexto salió la última respuesta (y
+dónde aparece cada hash de Spack que cita); `/good` y `/bad [comentario]`
+guardan el último intercambio en `~/.gonzabot/feedback.jsonl` (local, privado,
+solo cuando los escribís). Antes de someter, gonzabot corre `sbatch --test-only`,
+muestra la cola por partición y avisa si la memoria/tiempo pedidos superan
+mucho lo que usaron tus jobs anteriores con el mismo nombre. La interfaz está
+disponible en inglés con `/lang en`.
 
 ## Configuración
 

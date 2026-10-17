@@ -54,6 +54,7 @@ import json
 import sqlite3
 import textwrap
 import subprocess
+import time
 import readline  # noqa: F401 — enables arrow keys / history in input()
 import termios
 import tty
@@ -312,6 +313,7 @@ _SLASH_CMDS = {
     "/load", "/save", "/saveall", "/copy", "/diff", "/edit", "/diagnose",
     "/audit", "/queue", "/branch", "/history", "/clear", "/paste", "/model",
     "/raw", "/compact", "/help", "/run", "/workflow", "/segments", "/lang",
+    "/sources", "/good", "/bad",
 }
 
 
@@ -427,7 +429,198 @@ def _inject_sibling_copies(sb_text: str, sibling_names: "list[str]") -> str:
     return sb_text[:m.end()] + "\n" + "\n".join(cps) + sb_text[m.end():]
 
 
-def _submit_project(blocks: "list[tuple[str,str,str]]") -> "tuple[bool, str, Path | None]":
+def _slurm_run(argv: "list[str]", timeout: float = 4, cwd: "str | None" = None) -> "tuple[int, str, str] | None":
+    """Consulta Slurm de solo lectura; None si el comando no existe o se cuelga."""
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+        return (r.returncode, r.stdout, r.stderr)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+_BAD_JOB_STATES = {"FAILED", "OUT_OF_MEMORY", "TIMEOUT", "NODE_FAIL"}
+_RE_JOBID = re.compile(r"^\d+(?:_\d+)?$")
+
+
+def _parse_bad_jobs(text: str) -> "list[tuple[str, str, str]]":
+    rows = []
+    for ln in text.splitlines():
+        f = ln.split("|")
+        if len(f) < 3 or not f[2].split():
+            continue
+        jid, name, st = f[0].strip(), f[1].strip(), f[2].split()[0].upper()
+        if st in _BAD_JOB_STATES and _RE_JOBID.match(jid):
+            rows.append((jid, name, st))
+    return rows
+
+
+def _recent_failed_jobs(limit: int = 3) -> "list[tuple[str, str, str]]":
+    """Jobs del usuario que fallaron en las últimas 24 h. sacct si anda (hoy solo responde en
+    ql-head: AccountingStorageHost=localhost); si no, squeue -t all (MinJobAge=24 h)."""
+    r = _slurm_run(["sacct", "-u", _USERNAME, "-S", "now-1days", "-X", "-n", "-P", "-o", "JobID,JobName,State"], 2)
+    if r and r[0] == 0:
+        rows = _parse_bad_jobs(r[1])
+    else:
+        r = _slurm_run(["squeue", "-u", _USERNAME, "-t", "all", "-h", "-o", "%i|%j|%T"], 3)
+        rows = _parse_bad_jobs(r[1]) if r and r[0] == 0 else []
+    rows.sort(key=lambda x: int(x[0].split("_")[0]))
+    return rows[-limit:]
+
+
+def _failed_jobs_notice() -> str:
+    rows = _recent_failed_jobs()
+    if not rows:
+        return ""
+    items = ", ".join(f"{j} ({n[:20]}, {st})" for j, n, st in rows)
+    return _tr(f"⚠ Jobs tuyos con problemas en las últimas 24 h: {items} · probá /diagnose <job_id>",
+               f"⚠ Your jobs with problems in the last 24 h: {items} · try /diagnose <job_id>")
+
+
+def _parse_slurm_time(t: str) -> "int | None":
+    """[D-]HH:MM:SS, MM:SS, MM, D-HH, D-HH:MM -> segundos."""
+    t = t.strip()
+    if not t or t.upper() in ("UNLIMITED", "INFINITE", "PARTITION_LIMIT"):
+        return None
+    try:
+        days = 0
+        if "-" in t:
+            d, t = t.split("-", 1)
+            days = int(d)
+            parts = [int(x) for x in t.split(":")]
+            parts += [0] * (3 - len(parts))
+            return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+        parts = [int(float(x)) for x in t.split(":")]
+        if len(parts) == 1:
+            return parts[0] * 60
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    except (ValueError, IndexError):
+        return None
+
+
+def _parse_mem_mb(t: str) -> "float | None":
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?)B?\s*$", t, re.I)
+    if not m:
+        return None
+    return float(m.group(1)) * {"": 1, "K": 1 / 1024, "M": 1, "G": 1024, "T": 1024 * 1024}[m.group(2).upper()]
+
+
+def _parse_sbatch_request(text: str) -> dict:
+    """Recursos pedidos por las directivas #SBATCH: name, mem_mb, time_s, cpus."""
+    req: dict = {}
+    for ln in text.splitlines():
+        m = re.match(r"^\s*#SBATCH\s+(?:--([\w-]+)[=\s]+|-([JtcN])\s*)(\S+)", ln)
+        if not m:
+            continue
+        k = {"J": "job-name", "t": "time", "c": "cpus-per-task"}.get(m.group(2) or "", m.group(1))
+        v = m.group(3).strip("\"'")
+        if k == "job-name":
+            req["name"] = v
+        elif k == "mem":
+            req["mem_mb"] = _parse_mem_mb(v)
+        elif k == "time":
+            req["time_s"] = _parse_slurm_time(v)
+        elif k == "cpus-per-task" and v.isdigit():
+            req["cpus"] = int(v)
+    return {k: v for k, v in req.items() if v is not None}
+
+
+def _parse_usage(text: str, name: str) -> "list[tuple[int, float]]":
+    """Líneas JobID|JobName|State|Elapsed|MaxRSS de sacct (con pasos) -> [(elapsed_s, maxrss_mb)]
+    de los jobs COMPLETED con ese nombre."""
+    jobs: dict = {}
+    for ln in text.splitlines():
+        f = ln.split("|")
+        if len(f) < 5:
+            continue
+        jid = f[0].strip().split(".")[0]
+        j = jobs.setdefault(jid, {"name": "", "st": "", "el": None, "rss": 0.0})
+        if "." not in f[0]:
+            j["name"], j["st"], j["el"] = f[1].strip(), f[2].split()[0].upper() if f[2].split() else "", _parse_slurm_time(f[3])
+        rss = _parse_mem_mb(f[4]) if f[4].strip() else None
+        if rss:
+            j["rss"] = max(j["rss"], rss)
+    return [(j["el"], j["rss"]) for j in jobs.values()
+            if j["name"] == name and j["st"] == "COMPLETED" and j["el"]]
+
+
+def _resource_tip(req: dict, hist: "list[tuple[int, float]]") -> str:
+    """Aviso de una línea si lo pedido supera >3x lo observado en jobs parecidos; '' si no."""
+    if len(hist) < 1:
+        return ""
+    msgs = []
+    rss = max((h[1] for h in hist), default=0)
+    if req.get("mem_mb") and rss > 0 and req["mem_mb"] > 3 * rss:
+        msgs.append(_tr(f"pedís {req['mem_mb']/1024:.0f} GB de memoria y usaron como máximo {rss/1024:.1f} GB",
+                        f"you request {req['mem_mb']/1024:.0f} GB of memory and they used at most {rss/1024:.1f} GB"))
+    el = max(h[0] for h in hist)
+    if req.get("time_s") and el > 0 and req["time_s"] > 3 * el:
+        msgs.append(_tr(f"pedís {req['time_s']/3600:.1f} h y duraron como máximo {el/3600:.1f} h",
+                        f"you request {req['time_s']/3600:.1f} h and they lasted at most {el/3600:.1f} h"))
+    if not msgs:
+        return ""
+    return _tr(f"💡 Según {len(hist)} job(s) tuyos parecidos: ", f"💡 Based on {len(hist)} similar job(s) of yours: ") + "; ".join(msgs)
+
+
+def _resource_estimate_tip(sb_text: str, fallback_name: str = "") -> str:
+    req = _parse_sbatch_request(sb_text)
+    name = req.get("name") or fallback_name
+    if not name or not (req.get("mem_mb") or req.get("time_s")):
+        return ""
+    r = _slurm_run(["sacct", "-u", _USERNAME, "-S", "now-30days", "-n", "-P", "-o", "JobID,JobName,State,Elapsed,MaxRSS"], 3)
+    if not r or r[0] != 0:
+        return ""
+    return _resource_tip(req, _parse_usage(r[1], name))
+
+
+_QUEUE_CACHE: "tuple[float, str]" = (0.0, "")
+
+
+def _parse_queue(text: str) -> "dict[str, list[int]]":
+    """Líneas partición|estado -> {partición: [corriendo, en_cola]}."""
+    out: dict = {}
+    for ln in text.splitlines():
+        f = ln.strip().split("|")
+        if len(f) < 2:
+            continue
+        c = out.setdefault(f[0].strip().rstrip("*"), [0, 0])
+        st = f[1].strip().upper()
+        if st == "RUNNING":
+            c[0] += 1
+        elif st == "PENDING":
+            c[1] += 1
+    return out
+
+
+def _queue_hint() -> str:
+    """Resumen por partición de la cola (cacheado 60 s); '' si squeue falla."""
+    global _QUEUE_CACHE
+    now = time.time()
+    if now - _QUEUE_CACHE[0] < 60 and _QUEUE_CACHE[1]:
+        return _QUEUE_CACHE[1]
+    r = _slurm_run(["squeue", "-h", "-o", "%P|%T"], 3)
+    if not r or r[0] != 0:
+        return ""
+    q = _parse_queue(r[1])
+    if not q:
+        return ""
+    body = " · ".join(_tr(f"{p}: {v[0]} corriendo, {v[1]} esperando", f"{p}: {v[0]} running, {v[1]} waiting")
+                      for p, v in sorted(q.items()))
+    _QUEUE_CACHE = (now, _tr("Cola ahora → ", "Queue now → ") + body)
+    return _QUEUE_CACHE[1]
+
+
+def _sbatch_test_only(name: str, cwd: str) -> "tuple[bool, str] | None":
+    """sbatch --test-only: valida partición/QOS/cuenta/gres sin encolar. None si no se pudo correr."""
+    r = _slurm_run(["sbatch", "--test-only", name], 15, cwd)
+    if r is None:
+        return None
+    msg = (r[2].strip() or r[1].strip()).splitlines()
+    return (r[0] == 0, msg[-1] if msg else "")
+
+
+def _submit_project(blocks: "list[tuple[str,str,str]]", confirm=None) -> "tuple[bool, str, Path | None]":
     """Guarda TODOS los archivos de la respuesta en ~/gonzabot-jobs/<fecha>/ y
     somete el sbatch desde ahí (así $SLURM_SUBMIT_DIR contiene el input)."""
     files = _project_blocks(blocks)
@@ -443,6 +636,22 @@ def _submit_project(blocks: "list[tuple[str,str,str]]") -> "tuple[bool, str, Pat
             if i == sb_idx:
                 body = _inject_sibling_copies(body, _sibs)
             (d / n).write_text(body if body.endswith("\n") else body + "\n", encoding="utf-8")
+        try:
+            _tip = _resource_estimate_tip(files[sb_idx][1], Path(names[sb_idx]).stem)
+            if _tip:
+                print(_c(DIM, "  " + _tip))
+            _qh = _queue_hint()
+            if _qh:
+                print(_c(DIM, "  " + _qh))
+            _to = _sbatch_test_only(names[sb_idx], str(d))
+            if _to is not None and not _to[0]:
+                print(_c(YEL, _tr(f"  ⚠ sbatch --test-only rechaza el script: {_to[1]}", f"  ⚠ sbatch --test-only rejects the script: {_to[1]}")))
+                if confirm is not None and not confirm():
+                    return (False, _tr(f"No se sometió (revisá los archivos en {d}).", f"Not submitted (check the files in {d})."), d)
+            elif _to is not None:
+                print(_c(DIM, "  ✓ " + _tr("validado con sbatch --test-only: ", "validated with sbatch --test-only: ") + _to[1]))
+        except Exception:
+            pass
         r = subprocess.run(["sbatch", names[sb_idx]], capture_output=True, text=True, cwd=str(d))
     except FileNotFoundError:
         return (False, _tr("sbatch no disponible en este nodo.", "sbatch is not available on this node."), d)
@@ -463,7 +672,7 @@ def _offer_submit_project(blocks: "list[tuple[str,str,str]]") -> "str | None":
     if not _yn_raw(_c(BOLD, _tr("  ¿Lo mando a la cola? [s/N]: ", "  Send it to the queue? [y/N]: "))):
         print(_c(DIM, _tr("  Cancelado.", "  Cancelled.")))
         return None
-    ok, out, d = _submit_project(files)
+    ok, out, d = _submit_project(files, confirm=lambda: _yn_raw(_c(BOLD, _tr("  ¿Lo mando igual? [s/N]: ", "  Submit anyway? [y/N]: "))))
     print(_c(GRN if ok else RED, "  " + out))
     if ok and d:
         print(_c(DIM, _tr(f"  Archivos y resultados de este envío: {d}  ·  seguimiento: squeue -u $USER", f"  Files and results of this submission: {d}  ·  follow up with: squeue -u $USER")))
@@ -1998,6 +2207,39 @@ def _segments_match_report(probe: str) -> "list[tuple[str, bool, int]]":
     return out
 
 
+_RE_REPLY_HASH = re.compile(r"(?<![\w./-])/([a-z0-9]{7})\b")
+
+
+def _sources_report(probe: str, reply: str) -> "tuple[list[tuple[str, int]], dict[str, list[str]]]":
+    """Segmentos de contexto que matchean el pedido [(nombre, chars)] y, para cada hash /xxxxxxx
+    de la respuesta, los segmentos donde aparece (lista vacía = no está en el contexto)."""
+    segs = [(n, sz) for n, m, sz in _segments_match_report(probe) if m]
+    hashes: dict = {}
+    for h in _RE_REPLY_HASH.findall(reply):
+        if h in hashes or not any(c.isdigit() for c in h) or not any(c.isalpha() for c in h):
+            continue
+        hashes[h] = [n for n, txt in _CTX.items() if f"/{h}" in txt]
+    return segs, hashes
+
+
+FEEDBACK_PATH = DB_DIR / "feedback.jsonl"
+
+
+def _save_feedback(verdict: str, prompt: str, reply: str, comment: str = "") -> Path:
+    """Agrega una línea a ~/.gonzabot/feedback.jsonl (chmod 600). Solo local y solo por pedido
+    explícito del usuario con /good o /bad."""
+    DB_DIR.mkdir(parents=True, exist_ok=True)
+    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "verdict": verdict,
+           "comment": comment, "prompt": prompt, "reply": reply}
+    with open(FEEDBACK_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    try:
+        os.chmod(FEEDBACK_PATH, 0o600)
+    except OSError:
+        pass
+    return FEEDBACK_PATH
+
+
 def _system_prompt_for(user_message: str = "", history: str = "") -> str:
     """Construye el system prompt cargando solo los segmentos relevantes.
 
@@ -2179,7 +2421,7 @@ _KNOWN_HASH_PREFIXES_CACHE = None
 _KNOWN_SLASH_COMMANDS = {"diagnose", "branch", "load", "save", "saveall",
                          "edit", "diff", "help", "audit", "queue",
                          "compact", "history", "new", "model", "run",
-                         "workflow", "segments", "lang"}
+                         "workflow", "segments", "lang", "sources", "good", "bad"}
 
 def _known_hash_prefixes() -> set:
     """Hashes de spack documentados en context/*.txt (siempre escritos como '/xxxxxxx',
@@ -3167,6 +3409,8 @@ def _selftest() -> int:
     def _t(name: str, cond: bool):
         results.append((name, bool(cond)))
 
+    globals()["_EXACT_TOKENS_ON"] = False   # el selftest nunca toca la red
+
     _rf = _refence_bare_script("#!/bin/bash\n#SBATCH -n 1\n\noctave x.m\n\nEste script resuelve el sistema con Octave hoy.")
     _t("script sin valla se re-cerca", _rf.startswith("```bash\n#!/bin/bash") and "octave x.m\n```" in _rf and _rf.rstrip().endswith("hoy."))
     _t("respuesta con valla intacta", _refence_bare_script("a\n```bash\n#!/bin/bash\n```") == "a\n```bash\n#!/bin/bash\n```")
@@ -3200,6 +3444,78 @@ def _selftest() -> int:
     _t("fit: con resumen sigue dentro del presupuesto", _est_tokens(_fd) <= _PROMPT_BUDGET_TOKENS)
     _small = [{"role": "system", "content": "s"}, {"role": "user", "content": "hola"}]
     _t("fit: prompt chico queda igual", _fit_messages(_small, 6000) is _small)
+    _sr_real = globals()["_slurm_run"]
+    try:
+        _sa = "100|ok|COMPLETED\n101|a|FAILED\n102_3|arr|OUT_OF_MEMORY\n103.batch|x|FAILED\n104|b|TIMEOUT\n105|c|NODE_FAIL\n106|d|CANCELLED by 0\n"
+        globals()["_slurm_run"] = lambda argv, timeout=4, cwd=None: (0, _sa, "") if argv[0] == "sacct" else (1, "", "")
+        _fj = _recent_failed_jobs()
+        _t("jobs fallidos: sacct filtra estados, ignora .batch y toma los 3 más nuevos",
+           [j[0] for j in _fj] == ["102_3", "104", "105"])
+        globals()["_slurm_run"] = lambda argv, timeout=4, cwd=None: (1, "", "refused") if argv[0] == "sacct" else (0, "7|x|FAILED\n8|y|COMPLETED\n", "")
+        _t("jobs fallidos: sacct caído cae a squeue -t all", _recent_failed_jobs() == [("7", "x", "FAILED")])
+        _t("jobs fallidos: el aviso sugiere /diagnose", "/diagnose" in _failed_jobs_notice() and "7 (x, FAILED)" in _failed_jobs_notice())
+        globals()["_slurm_run"] = lambda argv, timeout=4, cwd=None: None
+        _t("jobs fallidos: sin Slurm no avisa ni falla", _failed_jobs_notice() == "")
+    finally:
+        globals()["_slurm_run"] = _sr_real
+    _rq = _parse_sbatch_request("#!/bin/bash\n#SBATCH -J sim\n#SBATCH --mem=64G\n#SBATCH --time=2-00:00:00\n#SBATCH -c 8\n")
+    _t("recursos: parsea nombre, memoria, tiempo y cpus", _rq == {"name": "sim", "mem_mb": 65536.0, "time_s": 172800, "cpus": 8})
+    _t("recursos: tiempos Slurm", _parse_slurm_time("01:30:00") == 5400 and _parse_slurm_time("90") == 5400 and _parse_slurm_time("UNLIMITED") is None)
+    _us = "10|sim|COMPLETED|01:00:00|\n10.batch|batch|COMPLETED|01:00:00|2097152K\n11|sim|FAILED|00:10:00|\n12|otro|COMPLETED|05:00:00|\n"
+    _t("recursos: uso observado solo de COMPLETED con ese nombre", _parse_usage(_us, "sim") == [(3600, 2048.0)])
+    _t("recursos: pedido >3x avisa", "64 GB" in _resource_tip(_rq, [(3600, 2048.0)]) and "48.0 h" in _resource_tip(_rq, [(3600, 2048.0)]))
+    _t("recursos: pedido razonable no avisa", _resource_tip({"mem_mb": 4096.0, "time_s": 7200}, [(3600, 2048.0)]) == "")
+    _t("recursos: sin historial no avisa", _resource_tip(_rq, []) == "")
+    _pq = _parse_queue("cpu*|RUNNING\ncpu*|PENDING\ngpu|RUNNING\n")
+    _t("cola: cuenta corriendo y esperando por partición", _pq == {"cpu": [1, 1], "gpu": [1, 0]})
+    _qc = globals()["_QUEUE_CACHE"]
+    try:
+        globals()["_QUEUE_CACHE"] = (0.0, "")
+        globals()["_slurm_run"] = lambda argv, timeout=4, cwd=None: (0, "cpu|RUNNING\ncpu|PENDING\n", "")
+        _t("cola: resumen legible", "cpu: 1" in _queue_hint())
+        globals()["_slurm_run"] = lambda argv, timeout=4, cwd=None: None
+        _t("cola: cacheada 60 s aunque squeue falle después", "cpu: 1" in _queue_hint())
+        globals()["_QUEUE_CACHE"] = (0.0, "")
+        _t("cola: sin squeue queda en silencio", _queue_hint() == "")
+        globals()["_slurm_run"] = lambda argv, timeout=4, cwd=None: (1, "", "sbatch: error: invalid partition specified: xx")
+        _t("test-only: devuelve el error de Slurm", _sbatch_test_only("a.sh", "/tmp") == (False, "sbatch: error: invalid partition specified: xx"))
+        globals()["_slurm_run"] = lambda argv, timeout=4, cwd=None: None
+        _t("test-only: sin sbatch se omite", _sbatch_test_only("a.sh", "/tmp") is None)
+    finally:
+        globals()["_slurm_run"] = _sr_real
+        globals()["_QUEUE_CACHE"] = _qc
+    _t("/sources /good /bad registrados", all(c in _SLASH_CMDS for c in ("/sources", "/good", "/bad")) and {"sources", "good", "bad"} <= _KNOWN_SLASH_COMMANDS)
+    _cx = globals()["_CTX"]
+    try:
+        globals()["_CTX"] = {"core": "regla /abc1234 ok", "otro": "nada"}
+        _, _sh = _sources_report("hola", "usá spack load /abc1234 y /zzz9999 y /usr/bin y /abcdefg")
+        _t("sources: hash conocido apunta a su segmento", _sh.get("abc1234") == ["core"])
+        _t("sources: hash inventado queda sin segmento", _sh.get("zzz9999") == [] and "usr" not in str(_sh) and "abcdefg" not in _sh)
+    finally:
+        globals()["_CTX"] = _cx
+    import tempfile as _tfm
+    _fbp_real = globals()["FEEDBACK_PATH"]; _dbd_real = globals()["DB_DIR"]
+    try:
+        with _tfm.TemporaryDirectory() as _fbd:
+            globals()["DB_DIR"] = Path(_fbd); globals()["FEEDBACK_PATH"] = Path(_fbd) / "feedback.jsonl"
+            _save_feedback("bad", "pedido", "respuesta", "faltó gres")
+            _fr = json.loads(Path(_fbd, "feedback.jsonl").read_text().splitlines()[0])
+            _t("feedback: guarda veredicto, comentario, pedido y respuesta",
+               (_fr["verdict"], _fr["comment"], _fr["prompt"], _fr["reply"]) == ("bad", "faltó gres", "pedido", "respuesta"))
+            _t("feedback: archivo privado (600)", oct(os.stat(Path(_fbd, "feedback.jsonl")).st_mode & 0o777) == "0o600")
+    finally:
+        globals()["FEEDBACK_PATH"] = _fbp_real; globals()["DB_DIR"] = _dbd_real
+    _tk_real = globals()["_exact_tokens"]
+    _mid = [{"role": "system", "content": "s"}, {"role": "user", "content": "y" * 30000}]
+    try:
+        globals()["_exact_tokens"] = lambda m: 7000
+        _t("tokens exactos: si la cuenta real entra, no se recorta", _fit_messages(_mid, 1000, 11500) is _mid)
+        globals()["_exact_tokens"] = lambda m: None
+        _t("tokens exactos: sin /tokenize cae a chars/3 y recorta", _fit_messages(_mid, 1000, 11500) is not _mid)
+        globals()["_exact_tokens"] = lambda m: 1 / 0
+    finally:
+        globals()["_exact_tokens"] = _tk_real
+    _t("tokens exactos: desactivado devuelve None sin red", _exact_tokens(_mid) is None)
     _l0 = _LANG
     try:
         globals()["_LANG"] = "es"; _a = _tr("hola", "hello")
@@ -4486,8 +4802,26 @@ def _strip_fake_system_notes(t: str) -> str:
 _FIT_NOTE = [""]
 
 
-def _est_tokens(messages: "list[dict]") -> int:
-    return int(sum(len(m.get("content") or "") + 16 for m in messages) / _CHARS_PER_TOKEN) + 8
+def _est_tokens(messages: "list[dict]", cpt: "float | None" = None) -> int:
+    return int(sum(len(m.get("content") or "") + 16 for m in messages) / (cpt or _CHARS_PER_TOKEN)) + 8
+
+
+_EXACT_TOKENS_ON = True
+
+
+def _exact_tokens(messages: "list[dict]") -> "int | None":
+    """Cuenta real de tokens vía POST /tokenize de vLLM (timeout corto). None ante cualquier error."""
+    if not _EXACT_TOKENS_ON:
+        return None
+    try:
+        root = VLLM_BASE.rsplit("/v1", 1)[0]
+        body = json.dumps({"model": MODEL, "messages": messages, "add_generation_prompt": True}).encode()
+        req = Request(root + "/tokenize", data=body, headers={"Content-Type": "application/json"})
+        with urlopen(req, timeout=3) as r:
+            n = int(json.loads(r.read().decode()).get("count"))
+        return n if n > 0 else None
+    except Exception:
+        return None
 
 
 def _shrink_text(t: str, keep_chars: int) -> str:
@@ -4504,11 +4838,19 @@ def _fit_messages(messages: "list[dict]", max_tokens: int, ctx_tokens: "int | No
     Orden: (1) recortar mensajes individuales enormes, (2) tirar los turnos más viejos,
     (3) recortar el último mensaje de usuario como último recurso."""
     budget = min((ctx_tokens or _MODEL_CTX_TOKENS) - max_tokens - 1500, _PROMPT_BUDGET_TOKENS)
-    if _est_tokens(messages) <= budget:
+    cpt = _CHARS_PER_TOKEN
+    _est = _est_tokens(messages)
+    if 0.7 * budget <= _est <= 1.3 * budget:
+        _ex = _exact_tokens(messages)
+        if _ex:
+            _chars = sum(len(m.get("content") or "") + 16 for m in messages)
+            cpt = max(1.5, min(6.0, _chars / _ex * 0.93))
+            _est = _est_tokens(messages, cpt)
+    if _est <= budget:
         return messages
     _n_before = len(messages)
     msgs = [dict(m) for m in messages]
-    single_cap = int(budget * _CHARS_PER_TOKEN * 0.25)
+    single_cap = int(budget * cpt * 0.25)
     for i, m in enumerate(msgs):
         if m["role"] != "system" and i != len(msgs) - 1:
             m["content"] = _shrink_text(m.get("content") or "", single_cap)
@@ -4518,7 +4860,7 @@ def _fit_messages(messages: "list[dict]", max_tokens: int, ctx_tokens: "int | No
         return (c.startswith("Contexto adicional") and m["role"] == "user") or \
                (i > 0 and m["role"] == "assistant" and (msgs[i - 1].get("content") or "").startswith("Contexto adicional"))
     dropped = []
-    while _est_tokens(msgs) > budget - 1000:
+    while _est_tokens(msgs, cpt) > budget - 1000:
         idx = next((i for i, m in enumerate(msgs[:-1]) if m["role"] != "system" and not _protected(i)), None)
         if idx is None:
             break
@@ -4538,9 +4880,9 @@ def _fit_messages(messages: "list[dict]", max_tokens: int, ctx_tokens: "int | No
                                         "(solo el comienzo de cada uno):\n" + "\n".join(lines)[:3500]},
             {"role": "assistant", "content": "Entendido."},
         ]
-    if _est_tokens(msgs) > budget:
-        sys_toks = _est_tokens(msgs[:-1])
-        room = max(2000, int((budget - sys_toks) * _CHARS_PER_TOKEN))
+    if _est_tokens(msgs, cpt) > budget:
+        sys_toks = _est_tokens(msgs[:-1], cpt)
+        room = max(2000, int((budget - sys_toks) * cpt))
         msgs[-1]["content"] = _shrink_text(msgs[-1].get("content") or "", room)
     _FIT_NOTE[0] = _tr(f"historial recortado: {_n_before - len(msgs)} mensajes viejos fuera para entrar en el contexto del modelo", f"history trimmed: {_n_before - len(msgs)} old messages dropped to fit the model context")
     return msgs
@@ -5274,6 +5616,10 @@ Comandos:
   /model                     Muestra el modelo y endpoint actual
   /segments [texto]          Qué segmentos de contexto cargarían para ese texto (o tu
                              último mensaje si no pasás nada) y cuánto pesa cada uno
+  /sources                   De dónde salió la última respuesta: segmentos de contexto
+                             cargados y en cuál aparece cada hash de Spack citado
+  /good  /bad [comentario]   Guardá (solo local, en ~/.gonzabot/feedback.jsonl) tu
+                             opinión sobre la última respuesta; nunca se envía solo
   /raw                       Activa/desactiva bloques de código sin recuadro (más
                              fácil de copiar en terminales básicas como la de Windows)
   /help                      Muestra esta ayuda
@@ -5334,6 +5680,10 @@ Commands:
   /model                     Show the current model and endpoint
   /segments [text]           Which context segments would load for that text (or your
                              last message if you pass nothing) and how much each weighs
+  /sources                   Where the last reply came from: loaded context segments
+                             and which one contains each Spack hash it cites
+  /good  /bad [comment]      Save (local only, ~/.gonzabot/feedback.jsonl) your opinion
+                             on the last reply; never sent anywhere automatically
   /raw                       Toggle code blocks without a frame (easier to
                              copy in basic terminals such as Windows')
   /help                      Show this help
@@ -5393,6 +5743,12 @@ def repl(new_session: bool = False):
     else:
         print()
     print_welcome(session_id, len(context_msgs), new_session)
+    try:
+        _fj = _failed_jobs_notice()
+        if _fj:
+            print(_c(DIM, "  " + _fj))
+    except Exception:
+        pass
 
     while True:
         try:
@@ -5459,7 +5815,7 @@ def repl(new_session: bool = False):
             "/exit", "/quit", "/q", "/help", "/queue", "/save", "/saveall", "/copy",
             "/edit", "/diff", "/audit", "/diagnose", "/history", "/compact",
             "/clear", "/paste", "/load", "/branch", "/model", "/raw", "/run",
-            "/workflow", "/segments", "/lang",
+            "/workflow", "/segments", "/lang", "/sources", "/good", "/bad",
         }
         _first_slash_word = user_input.split(None, 1)[0].lower() if user_input.startswith("/") else ""
         if _first_slash_word in _KNOWN_CMDS:
@@ -5531,6 +5887,37 @@ def repl(new_session: bool = False):
                               f"{'  (siempre)' if _name == 'core' else ''}")
                     print(_c(DIM, _tr(f"  Total que se mandaría: ~{_total:,} chars "
                                   f"(~{_total // 4:,} tokens aprox.)", f"  Total that would be sent: ~{_total:,} chars (~{_total // 4:,} tokens approx.)")))
+
+            elif cmd == "/sources":
+                _so_prompt = next((m.get("content", "") for m in reversed(context_msgs)
+                                   if m.get("role") == "user"), "")
+                if not _so_prompt or not last_reply:
+                    print(_c(YEL, _tr("Todavía no hay una respuesta en esta sesión.", "There is no reply in this session yet.")))
+                else:
+                    _so_segs, _so_h = _sources_report(_so_prompt, last_reply)
+                    print(_c(DIM, _tr("  Contexto cargado para tu último pedido:", "  Context loaded for your last request:")))
+                    print("  " + ", ".join(f"{n} ({sz:,})" for n, sz in _so_segs))
+                    if _so_h:
+                        print(_c(DIM, _tr("  Hashes de Spack citados en la respuesta:", "  Spack hashes cited in the reply:")))
+                        for _h, _where in _so_h.items():
+                            if _where:
+                                print(f"  {_c(GRN, '✓')} /{_h}  → {', '.join(_where)}")
+                            else:
+                                print(f"  {_c(YEL, '?')} /{_h}  → " + _tr("no está en el contexto: verificalo con spack find -L", "not in the context: check it with spack find -L"))
+                    print(_c(DIM, _tr("  (para ver el criterio de carga: /segments)", "  (for the loading criteria: /segments)")))
+
+            elif cmd in ("/good", "/bad"):
+                _fb_prompt = next((m.get("content", "") for m in reversed(context_msgs)
+                                   if m.get("role") == "user"), "")
+                if not _fb_prompt or not last_reply:
+                    print(_c(YEL, _tr("Todavía no hay una respuesta para valorar.", "There is no reply to rate yet.")))
+                else:
+                    try:
+                        _fb_path = _save_feedback("good" if cmd == "/good" else "bad", _fb_prompt, last_reply, arg.strip())
+                        print(_c(GRN, _tr(f"  Guardado en {_fb_path}", f"  Saved to {_fb_path}")))
+                        print(_c(DIM, _tr("  Queda solo en tu cuenta; no se envía a ningún lado.", "  It stays in your account only; it is not sent anywhere.")))
+                    except OSError as e:
+                        print(_c(RED, _tr(f"  No pude guardar el feedback: {e}", f"  Could not save the feedback: {e}")))
 
             elif cmd == "/lang":
                 # i18n fase 1 (8/10) -- cambio en caliente, sin reiniciar la
@@ -5719,6 +6106,12 @@ def repl(new_session: bool = False):
                                   f"corre código suelto.", f"The chosen block ({_rn_title or _rn_lang}) has no #SBATCH directives — /run only submits sbatch, it does not run loose code.")))
                     continue
                 print(_c(DIM, _tr(f"Sometiendo {_rn_title or 'el sbatch'}...", f"Submitting {_rn_title or 'the sbatch'}...")))
+                try:
+                    for _rn_h in (_resource_estimate_tip(_rn_code, ""), _queue_hint()):
+                        if _rn_h:
+                            print(_c(DIM, "  " + _rn_h))
+                except Exception:
+                    pass
                 _rn_ok, _rn_out = _submit_sbatch_text(_rn_code)
                 print(_c(GRN if _rn_ok else RED, _rn_out))
 

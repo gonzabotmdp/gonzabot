@@ -6,6 +6,26 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-16
+
+### Added
+- `/sources`: shows which context segments the last answer was built from and
+  where each cited Spack hash appears. No model call.
+- `/good` and `/bad [comment]`: save the last exchange to
+  `~/.gonzabot/feedback.jsonl` (chmod 600), only when typed.
+- Before submitting a job: `sbatch --test-only` (errors are shown and the user
+  is asked), a per-partition queue summary, and a one-line hint when the
+  requested `--mem`/`--time` is more than 3x what earlier jobs of the same
+  name used (needs `sacct`; silent otherwise). Never blocks.
+- At session start, a dim notice of up to 3 jobs that failed in the last 24 h
+  (`sacct`, falling back to `squeue -t all`), pointing to `/diagnose`.
+
+### Changed
+- Prompt fitting calibrates chars/token with vLLM's `/tokenize` when the
+  estimate is near the budget; falls back silently to the previous estimate.
+- `--selftest` grows from 260 to 284 checks. Internal evaluation set
+  (30 requests x 5 repetitions): 149/150.
+
 ## [1.7.3] - 2026-10-15
 
 ### Added
