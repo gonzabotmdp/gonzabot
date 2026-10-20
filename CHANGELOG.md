@@ -6,6 +6,37 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-20
+
+### Added
+- `/email [address]` and a per-user saved email: gonzabot asks once (when you
+  submit a job whose `#SBATCH --mail-user` is still the placeholder), keeps the
+  answer in `~/.gonzabot/config.json` (chmod 600) and uses it in every later
+  session, in the script and in the explanation text.
+- When a submitted `sbatch` uses files that exist in the folder gonzabot was
+  started from (a `.py` script, `-in in.lj`, `$SLURM_SUBMIT_DIR/...`), they are
+  copied next to the script in the submission folder and copied into the job's
+  working directory.
+- A script such as `python3 x.py` is read: if it imports numpy/scipy/pandas/
+  matplotlib the matching env file is sourced, even when the `sbatch` itself
+  never mentions numpy. A guessed path to the script becomes its plain name.
+
+### Fixed
+- `units real` LAMMPS inputs with a picosecond-sized `timestep` (0.002, 0.005)
+  are corrected to femtoseconds; a warning explains `slope()` needs a
+  `fix ... vector`.
+- The "input file not found" warning no longer flags files LAMMPS writes
+  (`fix ... file msd.dat`, `dump`, `log`, `write_*`).
+- `SPACK_USER_CACHE_PATH` pointing into `/tmp` is removed (it made every job
+  re-clone the Spack repository into the RAM-backed `/tmp`), and a redundant
+  `spack load --sh python` is dropped when an env file is already sourced.
+- A wrong `cp` source for a file gonzabot saved is rewritten to
+  `$SLURM_SUBMIT_DIR`.
+
+### Context
+- `md-sim`: short rule for simple Lennard-Jones liquids (fcc lattice for liquid
+  density, energies in kcal/mol with `units real`, femtosecond timestep).
+
 ## [1.8.1] - 2026-10-17
 
 ### Fixed

@@ -161,7 +161,10 @@ guardan el último intercambio en `~/.gonzabot/feedback.jsonl` (local, privado,
 solo cuando los escribís). Antes de someter, gonzabot corre `sbatch --test-only`,
 muestra la cola por partición y avisa si la memoria/tiempo pedidos superan
 mucho lo que usaron tus jobs anteriores con el mismo nombre. La interfaz está
-disponible en inglés con `/lang en`.
+disponible en inglés con `/lang en`. `/email` muestra o cambia el mail de los
+avisos de Slurm (se pregunta una vez y queda guardado por usuario), y los
+archivos que usa el script y están en la carpeta donde iniciaste gonzabot se
+copian junto con el envío.
 
 ## Configuración
 

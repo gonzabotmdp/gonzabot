@@ -237,7 +237,9 @@ exchange to `~/.gonzabot/feedback.jsonl` (local, private, only when you type
 them). Before submitting, gonzabot runs `sbatch --test-only`, shows the queue
 per partition, and warns if the requested memory/time is far above what your
 earlier jobs of the same name used. The interface is available in English
-with `/lang en`.
+with `/lang en`. `/email` shows or sets the address used for Slurm notices (it
+is asked once and remembered per user), and files the script uses that sit in
+the folder where you started gonzabot are copied along with the submission.
 
 ## Configuration
 

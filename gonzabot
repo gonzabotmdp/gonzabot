@@ -313,7 +313,7 @@ _SLASH_CMDS = {
     "/load", "/save", "/saveall", "/copy", "/diff", "/edit", "/diagnose",
     "/audit", "/queue", "/branch", "/history", "/clear", "/paste", "/model",
     "/raw", "/compact", "/help", "/run", "/workflow", "/segments", "/lang",
-    "/sources", "/good", "/bad",
+    "/sources", "/good", "/bad", "/email",
 }
 
 
@@ -414,6 +414,10 @@ def _inject_sibling_copies(sb_text: str, sibling_names: "list[str]") -> str:
     """Si el sbatch hace 'cd $WORKDIR' y usa archivos hermanos (input, .py) que
     no crea ni copia él mismo, agrega 'cp $SLURM_SUBMIT_DIR/<archivo> .' justo
     después del cd (gonzabot los guardó en la carpeta del envío)."""
+    for n in sibling_names:
+        sb_text = re.sub(
+            r'(?m)^([ \t]*cp[ \t]+)(?:-[\w-]+[ \t]+)*"?(?!\$\{?SLURM_SUBMIT_DIR)[^\s"]*' + re.escape(n) + r'"?([ \t]+[^\n]*)$',
+            lambda mm, n=n: f'{mm.group(1)}"$SLURM_SUBMIT_DIR"/{n}{mm.group(2)}', sb_text)
     m = _RE_CD_WORKDIR.search(sb_text)
     if not m:
         return sb_text
@@ -620,6 +624,95 @@ def _sbatch_test_only(name: str, cwd: str) -> "tuple[bool, str] | None":
     return (r[0] == 0, msg[-1] if msg else "")
 
 
+_EMAIL_PLACEHOLDER = "mimail@ifimar-conicet.gob.ar"
+_USER_CFG = DB_DIR / "config.json"
+_RE_EMAIL = re.compile(r"^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$")
+
+
+def _user_email() -> str:
+    try:
+        return json.loads(_USER_CFG.read_text(encoding="utf-8")).get("email", "") or ""
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _set_user_email(addr: str) -> bool:
+    addr = addr.strip()
+    if not _RE_EMAIL.match(addr):
+        return False
+    try:
+        DB_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            cfg = json.loads(_USER_CFG.read_text(encoding="utf-8"))
+            if not isinstance(cfg, dict):
+                cfg = {}
+        except (OSError, ValueError):
+            cfg = {}
+        cfg["email"] = addr
+        _USER_CFG.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        _USER_CFG.chmod(0o600)
+        return True
+    except OSError:
+        return False
+
+
+def _apply_user_email(text: str) -> str:
+    """Reemplaza el mail de relleno por el guardado del usuario y borra la frase 'cambiá esto por tu mail'."""
+    em = _user_email()
+    if not em or _EMAIL_PLACEHOLDER not in text:
+        return text
+    text = text.replace(_EMAIL_PLACEHOLDER, em)
+    return re.sub(r"[^.\n]*\b(?:[Cc]ambi|[Rr]eemplaz|[Cc]hange|[Rr]eplace)\w*[^.\n]*" + re.escape(em) + r"[^.\n]*\.?[ \t]*", "", text)
+
+
+def _ensure_user_email(blocks: "list[tuple[str,str,str]]") -> None:
+    """Si el sbatch trae el mail de relleno: usa el guardado, o lo pregunta UNA vez y lo guarda."""
+    if not any(_EMAIL_PLACEHOLDER in b[1] for b in blocks):
+        return
+    if not _user_email():
+        try:
+            ans = input(_c(BOLD, _tr("  ¿A qué mail querés los avisos de Slurm? (se guarda para tus próximas sesiones; Enter = sin mail): ",
+                                     "  Which email should Slurm notify? (saved for your future sessions; Enter = no mail): "))).strip()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if ans and _set_user_email(ans):
+            print(_c(DIM, _tr(f"  Guardado en {_USER_CFG}. Para cambiarlo: /email nuevo@dominio", f"  Saved in {_USER_CFG}. To change it: /email new@domain")))
+        elif ans:
+            print(_c(YEL, _tr("  Ese mail no parece válido; el job va sin avisos por mail.", "  That email does not look valid; the job goes without mail notices.")))
+    if _user_email():
+        blocks[:] = [(l, _apply_user_email(b), t) for l, b, t in blocks]
+    else:
+        blocks[:] = [(l, re.sub(r"^#SBATCH\s+--mail-(?:user|type)=.*\n", "", b, flags=re.M), t) for l, b, t in blocks]
+
+
+_RE_INPUT_FILE = re.compile(
+    r"(?<![\w./$~-])((?:in\.[\w.-]+)|(?:[A-Za-z][\w-]*\.(?:txt|dat|csv|lammps|data|npy|h5|json|inp|pdb|xyz|fasta|fastq|gro|mdp|top)))\b")
+
+
+_RE_PYARG = re.compile(r"^[ \t]*(?:python3?|\$\{?PYTHON\}?)[ \t]+(?:-[\w-]+[ \t]+)*(\S+\.py)\b", re.M)
+_RE_DASH_IN = re.compile(r"(?<![\w-])-in[ \t]+(\S+)")
+
+
+def _cwd_input_names(body: str, cwd: "Path | None" = None) -> "list[str]":
+    """Archivos que el sbatch usa por nombre y que existen en la carpeta desde la que se lanzó gonzabot."""
+    cwd = cwd or Path.cwd()
+    cands = [Path(m.group(1)).name for m in _RE_PYARG.finditer(body)]
+    cands += [Path(m.group(1)).name for m in _RE_DASH_IN.finditer(body)]
+    cands += [m.group(1) for m in _RE_INPUT_FILE.finditer(body)]
+    cands += re.findall(r'\$\{?SLURM_SUBMIT_DIR\}?"?/([\w.\-]+)', body)
+    out: "list[str]" = []
+    for n in cands:
+        if n in out or n.startswith(".") or "/" in n:
+            continue
+        f = cwd / n
+        try:
+            if f.is_file() and f.stat().st_size < 200_000_000:
+                out.append(n)
+        except OSError:
+            pass
+    return out
+
+
 def _submit_project(blocks: "list[tuple[str,str,str]]", confirm=None) -> "tuple[bool, str, Path | None]":
     """Guarda TODOS los archivos de la respuesta en ~/gonzabot-jobs/<fecha>/ y
     somete el sbatch desde ahí (así $SLURM_SUBMIT_DIR contiene el input)."""
@@ -632,6 +725,10 @@ def _submit_project(blocks: "list[tuple[str,str,str]]", confirm=None) -> "tuple[
     try:
         d.mkdir(parents=True, exist_ok=True)
         _sibs = [n for i, n in enumerate(names) if i != sb_idx]
+        _cwd_names = [n for n in _cwd_input_names(files[sb_idx][1]) if n not in names]
+        for n in _cwd_names:
+            shutil.copy2(Path.cwd() / n, d / n)
+        _sibs += _cwd_names
         for i, ((_l, body, _t2), n) in enumerate(zip(files, names)):
             if i == sb_idx:
                 body = _inject_sibling_copies(body, _sibs)
@@ -660,10 +757,6 @@ def _submit_project(blocks: "list[tuple[str,str,str]]", confirm=None) -> "tuple[
     return (r.returncode == 0, (r.stdout.strip() or r.stderr.strip()), d)
 
 
-_RE_INPUT_FILE = re.compile(
-    r"(?<![\w./$~-])((?:in\.[\w.-]+)|(?:[A-Za-z][\w-]*\.(?:txt|dat|csv|lammps|data|npy|h5|json|inp|pdb|xyz|fasta|fastq|gro|mdp|top)))\b")
-
-
 def _missing_inputs(files: "list[tuple[str,str,str]]", names: "list[str]", cwd: "Path | None" = None) -> "list[str]":
     """Archivos de entrada que el sbatch usa por nombre relativo y que no existen ni se generan."""
     cwd = cwd or Path.cwd()
@@ -679,11 +772,14 @@ def _missing_inputs(files: "list[tuple[str,str,str]]", names: "list[str]", cwd: 
                 continue
             if re.search(r"(?:>>?|tee|-o|--output|--error)\s*\S*" + re.escape(f), body):
                 continue
+            if re.search(r"\b(?:file|dump|log|write_\w+|restart|-log)\b[^\n]*?" + re.escape(f), body):
+                continue
             found.append(f)
     return found
 
 
 def _offer_submit_project(blocks: "list[tuple[str,str,str]]") -> "str | None":
+    _ensure_user_email(blocks)
     files = _project_blocks(blocks)
     if not any(_looks_like_real_sbatch(b[1]) for b in files):
         print(_c(YEL, _tr("  No hay ningún sbatch generado en esta sesión para mandar a la cola.", "  There is no sbatch generated in this session to send to the queue.")))
@@ -692,6 +788,9 @@ def _offer_submit_project(blocks: "list[tuple[str,str,str]]") -> "str | None":
     print(_c(BOLD, _tr("\n  Voy a guardar estos archivos en ~/gonzabot-jobs/<fecha>/ y someter el sbatch:", "\n  I will save these files in ~/gonzabot-jobs/<date>/ and submit the sbatch:")))
     for n in names:
         print(f"    • {n}")
+    _cw = [n for n in _cwd_input_names(next(b[1] for b in files if _looks_like_real_sbatch(b[1]))) if n not in names]
+    if _cw:
+        print(_c(DIM, _tr(f"    + copio de esta carpeta: {', '.join(_cw)}", f"    + copied from this folder: {', '.join(_cw)}")))
     _miss = _missing_inputs(files, names)
     if _miss:
         print(_c(YEL, _tr(f"  ⚠ El sbatch usa archivos que no encuentro en esta carpeta: {', '.join(_miss)}. "
@@ -2453,7 +2552,7 @@ _KNOWN_HASH_PREFIXES_CACHE = None
 _KNOWN_SLASH_COMMANDS = {"diagnose", "branch", "load", "save", "saveall",
                          "edit", "diff", "help", "audit", "queue",
                          "compact", "history", "new", "model", "run",
-                         "workflow", "segments", "lang", "sources", "good", "bad"}
+                         "workflow", "segments", "lang", "sources", "good", "bad", "email"}
 
 def _known_hash_prefixes() -> set:
     """Hashes de spack documentados en context/*.txt (siempre escritos como '/xxxxxxx',
@@ -2928,6 +3027,9 @@ def _fix_sbatch(text: str) -> str:
             warns.append("'create_box' sin 'create_atoms' después — la caja queda vacía, "
                          "velocity/run fallan (o corren sobre 0 átomos) — agregar "
                          "'create_atoms N box' o 'read_data <archivo>'")
+        if _re.search(r'\bslope\(', block) and not _re.search(r'^\s*fix\s+\w+\s+\w+\s+vector\b', block, _re.M):
+            warns.append("slope() solo funciona sobre un 'fix ID all vector N c_msd[4]' (f_ID), no sobre un "
+                         "fix ave/time — definir ese fix vector para obtener la pendiente del MSD")
         # thermo/thermo_style después del último run → nunca se ejecuta
         _blines = block.split('\n')
         _runs = [i for i, l in enumerate(_blines) if _re.match(r'\s*run\s+\d', l)]
@@ -3066,7 +3168,44 @@ def _fix_sbatch(text: str) -> str:
     # renglón VACÍO anterior (bug encontrado en el propio selftest 8/10) y
     # la línea insertada terminaba después del salto en blanco, no antes
     # de "python3" como se buscaba.
-    _RE_PYTHON_INVOKE = _re.compile(r'^([ \t]*)python3?\b', _re.M)
+    _RE_PYTHON_INVOKE = _re.compile(r'^([ \t]*)(?:python3?\b|\$\{?PYTHON\}?(?=\s))', _re.M)
+    _RE_PY_SCRIPT_ARG = _re.compile(r'^[ \t]*(?:python3?|\$\{?PYTHON\}?)[ \t]+(?:-[\w-]+[ \t]+)*(\S+\.py)\b', _re.M)
+
+    def _resolve_py_script(tok: str):
+        t = os.path.expandvars(tok.replace('$USER', os.environ.get('USER', '')).replace('${USER}', os.environ.get('USER', '')))
+        for c in (Path(t), Path.cwd() / Path(t).name):
+            try:
+                if c.is_file():
+                    return c
+            except OSError:
+                pass
+        return None
+
+    def _script_needs_env(block: str) -> bool:
+        for m in _RE_PY_SCRIPT_ARG.finditer(block):
+            sp = _resolve_py_script(m.group(1))
+            if sp is None:
+                continue
+            try:
+                if _RE_NEEDS_NUMPY_ENV.search(sp.read_text(encoding='utf-8', errors='ignore')[:50000]):
+                    return True
+            except OSError:
+                pass
+        return False
+
+    def _fix_py_script_paths(block: str) -> str:
+        """El modelo adivina dónde está el .py (ej. /data/home/$USER/x.py): si no existe ahí pero sí en la carpeta de trabajo, usa el nombre simple (el envío lo copia junto al sbatch; la ruta absoluta de la carpeta puede no verse desde el nodo)."""
+        def _sub(m):
+            tok = m.group(1)
+            t = os.path.expandvars(tok.replace('$USER', os.environ.get('USER', '')).replace('${USER}', os.environ.get('USER', '')))
+            try:
+                if Path(t).is_file():
+                    return m.group(0)
+            except OSError:
+                return m.group(0)
+            sp = _resolve_py_script(tok)
+            return m.group(0).replace(tok, sp.name) if sp else m.group(0)
+        return _RE_PY_SCRIPT_ARG.sub(_sub, block)
     _RE_HAS_PY_ENV_SETUP = _re.compile(
         r'^\s*source\s+\S*/envs/\S+\.env\b|'
         r'\bspack\s+load\b.*(?:numpy|scipy|matplotlib|pandas)|'
@@ -3083,7 +3222,7 @@ def _fix_sbatch(text: str) -> str:
         del mismo pedido: una la incluyó, la otra no) -- atraparlo
         determinísticamente en vez de confiar en que el prompt alcance
         siempre, mismo criterio que el resto de este postprocesador."""
-        if not _RE_NEEDS_NUMPY_ENV.search(block):
+        if not (_RE_NEEDS_NUMPY_ENV.search(block) or _script_needs_env(block)):
             return block
         if _RE_HAS_PY_ENV_SETUP.search(block):
             return block
@@ -3095,6 +3234,27 @@ def _fix_sbatch(text: str) -> str:
         return (block[:insert_at]
                 + f"{indent}source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\n"
                 + block[insert_at:])
+
+    def _fix_lammps_real_timestep(block: str) -> str:
+        """units real: timestep en femtosegundos. 0.002/0.005 (valores de ps) = 1000x
+        demasiado chico (caso real 20/10, argón líquido): se pasa a fs."""
+        if not _re.search(r'^\s*units\s+real\b', block, _re.M):
+            return block
+
+        def _sub(m):
+            v = float(m.group(2))
+            return f"{m.group(1)}{v * 1000:g}" if 0 < v < 0.05 else m.group(0)
+        return _re.sub(r'^([ \t]*timestep[ \t]+)(\d*\.\d+)(?=\s|$)', _sub, block, flags=_re.M)
+
+    def _fix_spack_cache_and_redundant_load(block: str) -> str:
+        """SPACK_USER_CACHE_PATH en /tmp (tmpfs de 1 GB en RAM) hace que spack re-clone todo su repo en cada job
+        (caso real 20/10, job 19025: 11 KB de 'git clone' en el .err). Si ya se carga un envs/*.env, el
+        'spack load --sh python' sobra (y da lock)."""
+        block = _re.sub(r'(?m)^[ \t]*export[ \t]+SPACK_USER_CACHE_PATH=\S*/tmp/\S*[ \t]*\n', '', block)
+        block = _re.sub(r'(?m)^[ \t]*mkdir[ \t]+-p[ \t]+"?\$\{?SPACK_USER_CACHE_PATH\}?"?[ \t]*\n', '', block)
+        if _re.search(r'(?m)^[ \t]*source[ \t]+\S*/envs/\S+\.env\b', block):
+            block = _re.sub(r'(?m)^[ \t]*eval[ \t]+\$\(spack[ \t]+load[ \t]+--sh[ \t]+python\S*[ \t]*\)[ \t]*\n', '', block)
+        return block
 
     _RE_GMX_INVOKE = _re.compile(r'^([ \t]*)(?:mpirun[^\n]*?\s|srun[^\n]*?\s)?gmx(?:_mpi)?\s+\w', _re.M)
     _RE_GMX_ENV = _re.compile(
@@ -3288,12 +3448,15 @@ def _fix_sbatch(text: str) -> str:
             body = _fix_dollar_escapes(body)
             body = _fix_module_load(body)
             body = _fix_missing_python_env(body)
+            body = _fix_py_script_paths(body)
+            body = _fix_spack_cache_and_redundant_load(body)
             body = _fix_bare_spack_load_sh(body)
             body = _fix_spack_load_aliases(body)
             body = _fix_undefined_spack_var(body)
             body = _fix_missing_gromacs_env(body)
             body = _fix_missing_openmpi_env(body)
             body = _fix_missing_gres(body)
+            body = _fix_lammps_real_timestep(body)
             body = _fix_gmx_input_copy(body)
             body = _fix_latex_heredoc(body)
         elif not is_lmp and '--sh' in body:
@@ -3308,7 +3471,7 @@ def _fix_sbatch(text: str) -> str:
                 tail = "\n" + "\n".join(f"⚠ {w}" for w in dict.fromkeys(warns))
         return f"{fence}\n{body}\n```{tail}"
 
-    return _re.sub(r'(```\w*)\n(.*?)```', _replace, text, flags=_re.DOTALL)
+    return _apply_user_email(_re.sub(r'(```\w*)\n(.*?)```', _replace, text, flags=_re.DOTALL))
 
 
 def _lint_ntasks(blocks: "list[tuple[str, str, str]]") -> list[str]:
@@ -3685,9 +3848,67 @@ def _selftest() -> int:
        _missing_inputs([("bash", "#!/bin/bash\n#SBATCH -n 1\nlmp -in in.lammps\npython3 -c \"open('numeros.txt')\"", "")], ["x.sbatch"], Path("/nonexistent")) == ["in.lammps", "numeros.txt"])
     _t("_missing_inputs: archivo generado por el propio script no se reporta",
        _missing_inputs([("bash", "#!/bin/bash\n#SBATCH -n 1\ncat > in.lammps << EOF\nx\nEOF\nlmp -in in.lammps", "")], ["x.sbatch"], Path("/nonexistent")) == [])
+    _t("_missing_inputs: msd.dat que LAMMPS escribe (fix ave/time file) no se reporta",
+       _missing_inputs([("bash", "#!/bin/bash\n#SBATCH -n 1\ncat > in.x << EOF\nfix a all ave/time 100 1 100 c_m[4] file msd.dat mode vector\nEOF\nlmp -in in.x", "")], ["x.sbatch"], Path("/nonexistent")) == [])
+    _t("_missing_inputs: read_data de un archivo inexistente sí se reporta",
+       _missing_inputs([("bash", "#!/bin/bash\n#SBATCH -n 1\ncat > in.x << EOF\nread_data sistema.data\nEOF\nlmp -in in.x", "")], ["x.sbatch"], Path("/nonexistent")) == ["sistema.data"])
+    _t("/email registrado", "/email" in _SLASH_CMDS and "email" in _KNOWN_SLASH_COMMANDS)
+    _t("_RE_EMAIL acepta una dirección real y rechaza basura", bool(_RE_EMAIL.match("garroyo@ifimar-conicet.gob.ar")) and not _RE_EMAIL.match("mimail@"))
+    _old_cfg = globals()["_USER_CFG"]
+    import tempfile as _tf21
+    with _tf21.TemporaryDirectory() as _td21:
+        globals()["_USER_CFG"] = Path(_td21) / "config.json"
+        _t("sin mail guardado, _apply_user_email no toca el texto", _apply_user_email("x mimail@ifimar-conicet.gob.ar") == "x mimail@ifimar-conicet.gob.ar")
+        _t("_set_user_email rechaza un mail inválido", not _set_user_email("no-es-mail"))
+        _t("_set_user_email guarda y _user_email lo devuelve", _set_user_email("a@b.co") and _user_email() == "a@b.co")
+        _r21 = _apply_user_email("#SBATCH --mail-user=mimail@ifimar-conicet.gob.ar\nCambiá mimail@ifimar-conicet.gob.ar por tu mail real.\nFin")
+        _t("_apply_user_email reemplaza el relleno y borra la frase 'cambiá por tu mail'",
+           "--mail-user=a@b.co" in _r21 and "Cambi" not in _r21 and "Fin" in _r21)
+    globals()["_USER_CFG"] = _old_cfg
+    import tempfile as _tf22
+    _cwd22 = os.getcwd()
+    with _tf22.TemporaryDirectory() as _td22:
+        (Path(_td22) / "osc.py").write_text("import numpy as np\nfrom scipy.integrate import odeint\n")
+        (Path(_td22) / "solo.py").write_text("print('hola')\n")
+        os.chdir(_td22)
+        try:
+            _r22 = _fix_sbatch(B.format('PYTHON=/x/bin/python3\n$PYTHON /data/home/$USER/osc.py'))
+            _t("script .py que importa numpy/scipy: se inyecta numpy.env antes del $PYTHON (demo 20/10)",
+               "source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\n$PYTHON" in _r22)
+            _t("la ruta adivinada del .py pasa a nombre simple (se copia con el envío, no se apunta a una ruta de la carpeta)", "$PYTHON osc.py" in _r22 and "/data/home" not in _r22)
+            _r22 = _fix_sbatch(B.format('python3 solo.py'))
+            _t(".py sin librerías científicas: no se agrega numpy.env", "numpy.env" not in _r22)
+        finally:
+            os.chdir(_cwd22)
+    import tempfile as _tf23
+    with _tf23.TemporaryDirectory() as _td23:
+        (Path(_td23) / "oscilador.py").write_text("import numpy\n")
+        (Path(_td23) / "in.lj").write_text("units lj\n")
+        _sb23 = "#!/bin/bash\n#SBATCH -n 1\ncp $SLURM_SUBMIT_DIR/oscilador.py .\nlmp -in in.lj\n$PYTHON oscilador.py\n"
+        _t("_cwd_input_names: encuentra .py, in.lj y SLURM_SUBMIT_DIR de la carpeta de trabajo",
+           sorted(_cwd_input_names(_sb23, Path(_td23))) == ["in.lj", "oscilador.py"])
+        _t("_cwd_input_names: no inventa archivos que no existen", _cwd_input_names("python3 otro.py", Path(_td23)) == [])
+    _t("cp de un archivo de la carpeta del envío con ruta inventada se corrige a $SLURM_SUBMIT_DIR (demo 20/10)",
+       _inject_sibling_copies('cd $WORKDIR\ncp "$(pwd)/../oscilador.py" "$WORKDIR/" || exit 1\n$PYTHON oscilador.py', ["oscilador.py"])
+       == 'cd $WORKDIR\ncp "$SLURM_SUBMIT_DIR"/oscilador.py "$WORKDIR/" || exit 1\n$PYTHON oscilador.py')
+    _t("cp correcto con $SLURM_SUBMIT_DIR no se toca ni se duplica",
+       _inject_sibling_copies('cd $WORKDIR\ncp $SLURM_SUBMIT_DIR/oscilador.py .\npython3 oscilador.py', ["oscilador.py"]).count("cp ") == 1)
+    _r25 = _fix_sbatch(B.format("export SPACK_USER_CACHE_PATH=/tmp/spack-${USER}-${SLURM_JOB_ID}\nmkdir -p $SPACK_USER_CACHE_PATH\n"
+                             "source /x/setup-env.sh\neval $(spack load --sh python@3.14.5)\nsource /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env\npython3 a.py"))
+    _t("SPACK_USER_CACHE_PATH en /tmp se elimina (tmpfs en RAM + re-clone, job 19025)", "SPACK_USER_CACHE_PATH" not in _r25)
+    _t("con numpy.env cargado, el 'spack load --sh python' redundante se elimina; setup-env y numpy.env quedan",
+       "spack load --sh python" not in _r25 and "numpy.env" in _r25 and "setup-env.sh" in _r25)
+    _r25 = _fix_sbatch(B.format("eval $(spack load --sh python@3.14.5)\npython3 -c 'print(1)'"))
+    _t("sin env file, el spack load de python se respeta", "spack load --sh python" in _r25)
     _t("si YA está sourceado numpy.env, no se duplica la línea",
        r.count("source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env") == 1)
     r = _fix_sbatch(B.format("python3 script_sin_numpy.py"))
+    r = _fix_sbatch(B.format("cat > in.x << EOF\nunits real\ntimestep 0.002\nEOF\nlmp -in in.x"))
+    _t("units real: timestep 0.002 (valor de ps) se corrige a 2 fs (caso real 20/10)", "timestep 2\n" in r and "0.002" not in r)
+    r = _fix_sbatch(B.format("cat > in.x << EOF\nunits real\ntimestep 1.0\nEOF\nlmp -in in.x"))
+    _t("units real: timestep 1.0 legítimo no se toca", "timestep 1.0" in r)
+    r = _fix_sbatch(B.format("cat > in.x << EOF\nunits metal\ntimestep 0.002\nEOF\nlmp -in in.x"))
+    _t("units metal: timestep 0.002 es correcto, no se toca", "timestep 0.002" in r)
     _t("sin ningún import numpy/pandas/scipy/matplotlib, no se toca nada",
        "numpy.env" not in r)
     r = _fix_sbatch(B.format("SPACK=/apps/local/spack/spack-2026b/spack/bin/spack\nmodule load octave\noctave s.m"))
@@ -5518,7 +5739,7 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
                 "cpp": "cpp", "c++": "cpp", "c": "c",
                 "diff": "diff", "text": "text", "": "text",
             }
-            raw_text = _strip_fake_system_notes("".join(_raw_buf))
+            raw_text = _apply_user_email(_strip_fake_system_notes("".join(_raw_buf)))
             parts = _re_md.split(r'(```[\s\S]*?```)', raw_text)
             code_idx = 0
             _n_blocks = len(_rich_blocks)
@@ -5661,6 +5882,8 @@ Comandos:
                              cargados y en cuál aparece cada hash de Spack citado
   /good  /bad [comentario]   Guardá (solo local, en ~/.gonzabot/feedback.jsonl) tu
                              opinión sobre la última respuesta; nunca se envía solo
+  /email [dirección]         Mail para los avisos de Slurm: sin argumento muestra el
+                             guardado; con una dirección lo guarda para tus próximas sesiones
   /raw                       Activa/desactiva bloques de código sin recuadro (más
                              fácil de copiar en terminales básicas como la de Windows)
   /help                      Muestra esta ayuda
@@ -5725,6 +5948,8 @@ Commands:
                              and which one contains each Spack hash it cites
   /good  /bad [comment]      Save (local only, ~/.gonzabot/feedback.jsonl) your opinion
                              on the last reply; never sent anywhere automatically
+  /email [address]           Email for Slurm notices: no argument shows the saved one;
+                             with an address it is saved for your future sessions
   /raw                       Toggle code blocks without a frame (easier to
                              copy in basic terminals such as Windows')
   /help                      Show this help
@@ -5856,7 +6081,7 @@ def repl(new_session: bool = False):
             "/exit", "/quit", "/q", "/help", "/queue", "/save", "/saveall", "/copy",
             "/edit", "/diff", "/audit", "/diagnose", "/history", "/compact",
             "/clear", "/paste", "/load", "/branch", "/model", "/raw", "/run",
-            "/workflow", "/segments", "/lang", "/sources", "/good", "/bad",
+            "/workflow", "/segments", "/lang", "/sources", "/good", "/bad", "/email",
         }
         _first_slash_word = user_input.split(None, 1)[0].lower() if user_input.startswith("/") else ""
         if _first_slash_word in _KNOWN_CMDS:
@@ -5959,6 +6184,17 @@ def repl(new_session: bool = False):
                         print(_c(DIM, _tr("  Queda solo en tu cuenta; no se envía a ningún lado.", "  It stays in your account only; it is not sent anywhere.")))
                     except OSError as e:
                         print(_c(RED, _tr(f"  No pude guardar el feedback: {e}", f"  Could not save the feedback: {e}")))
+
+            elif cmd == "/email":
+                if arg.strip():
+                    if _set_user_email(arg):
+                        print(_c(GRN, _tr(f"  Mail guardado: {arg.strip()}", f"  Email saved: {arg.strip()}")))
+                    else:
+                        print(_c(YEL, _tr("  Ese mail no parece válido.", "  That email does not look valid.")))
+                else:
+                    _em = _user_email()
+                    print(_tr(f"  Mail guardado: {_em}" if _em else "  Todavía no hay mail guardado: se pregunta al someter un job.",
+                              f"  Saved email: {_em}" if _em else "  No email saved yet: it is asked when you submit a job."))
 
             elif cmd == "/lang":
                 # i18n fase 1 (8/10) -- cambio en caliente, sin reiniciar la
