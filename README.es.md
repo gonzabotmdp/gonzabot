@@ -169,17 +169,19 @@ copian junto con el envío.
 ## Carga sobre Slurm y el nodo de login
 
 gonzabot es una herramienta interactiva: solo consulta a Slurm cuando una persona escribe algo, nunca en un bucle en segundo plano.
-Aun así, muchos asistentes juntos pueden sumar en un sitio grande, por eso las consultas opcionales están acotadas y se pueden apagar:
+Lo que le importa al controlador es la cantidad de RPCs (cada uno toma sus locks sin importar el tamaño de la respuesta), así que las
+consultas opcionales son pocas, están cacheadas y se pueden apagar:
 
 | `GONZABOT_SLURM_QUERIES` | Qué consulta |
 |---|---|
-| `light` (por defecto) | Los jobs del propio usuario (`squeue -u`), `sinfo`, un `sacct` para fallos recientes y otro para el consejo de recursos (cacheado 10 min), y `sbatch --test-only` solo después de que el usuario confirma un envío. **Nunca el `squeue` global del cluster.** |
+| `light` (por defecto) | Un `squeue -u` de los jobs del propio usuario al arrancar; `sinfo` a través de un cache de 60 s **compartido entre todos los usuarios** (N usuarios cuestan más o menos un `sinfo` por minuto, no uno cada uno); `sacct` para fallos recientes y para el consejo de recursos (van a `slurmdbd`, no a `slurmctld`; el consejo se cachea 10 min); y `sbatch --test-only` una vez por envío que el usuario confirma (se desactiva con `GONZABOT_TEST_ONLY=0`). No se usa el `squeue` global del cluster. |
 | `full` | El comportamiento anterior, que además lee el `squeue` global al arrancar y ante preguntas sobre la cola. |
 | `off` | Ninguna consulta opcional (sin contexto en vivo, aviso de jobs fallidos, consejos de cola/recursos ni `--test-only`). Los comandos que el usuario escribe explícitamente siguen funcionando. |
 
-Una sesión típica (arranque, una pregunta sobre la cola y dos envíos) hace unos 8 comandos a Slurm en modo `light`, ninguno un `squeue`
-sin filtrar, contra 10 (3 sin filtrar) antes. La lista de paquetes que se lee al arrancar (`spack find`) se cachea 30 minutos por usuario.
-El modelo de lenguaje corre en su propio nodo GPU (vLLM), no en el nodo de login.
+Medido con un contador de comandos en una sesión típica (arranque, una pregunta sobre la cola y dos envíos): 10 comandos a Slurm por
+usuario antes de la v1.9.1 (3 de ellos `squeue` sin filtrar), 5 por usuario ahora (2 son `sacct`, o sea 3 RPCs a `slurmctld`), con el
+`sinfo` servido desde el cache compartido para todos los usuarios después del primero de cada minuto. La lista de paquetes que se
+lee al arrancar (`spack find`) se cachea 30 minutos por usuario. El modelo de lenguaje corre en su propio nodo GPU (vLLM), no en el nodo de login.
 
 Ejemplo: `GONZABOT_SLURM_QUERIES=off ./gonzabot` (o definirlo una vez para todos los usuarios en un script envoltorio del sitio). En
 modo `light` la línea que se muestra antes de un envío indica la carga de CPUs por partición (por ejemplo `cpu: 10/100 CPUs ocupados`,

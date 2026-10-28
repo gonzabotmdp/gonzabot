@@ -243,18 +243,20 @@ the folder where you started gonzabot are copied along with the submission.
 
 ## Load on Slurm and on the login node
 
-gonzabot is an interactive tool: it only talks to Slurm when a person types something, never in a background loop. Even so, a
-fleet of assistants can add up on a large site, so the optional queries are limited and can be switched off:
+gonzabot is an interactive tool: it only talks to Slurm when a person types something, never in a background loop. What matters
+for the controller is the number of RPCs (each one takes its locks whatever its payload), so the optional queries are few, cached,
+and can be switched off:
 
 | `GONZABOT_SLURM_QUERIES` | What it queries |
 |---|---|
-| `light` (default) | The user's own jobs (`squeue -u`), `sinfo`, one `sacct` for recent failures and one for the resource hint (cached 10 min), and `sbatch --test-only` only after the user confirms a submission. **Never the cluster-wide `squeue`.** |
+| `light` (default) | One `squeue -u` of the user's own jobs at start; `sinfo` through a 60 s cache **shared by all users** (N users cost about one `sinfo` per minute, not one each); `sacct` for recent failures and for the resource hint (these go to `slurmdbd`, not `slurmctld`; the hint is cached 10 min); and `sbatch --test-only` once per submission the user confirms (disable with `GONZABOT_TEST_ONLY=0`). The cluster-wide `squeue` is not used. |
 | `full` | The previous behaviour, which also reads the cluster-wide `squeue` at start and for queue questions. |
 | `off` | No optional queries at all (no live context, failed-job notice, queue/resource hints or `--test-only`). Explicit commands typed by the user still work. |
 
-A typical session (start, one queue question, two submissions) issues about 8 Slurm commands in `light`
-mode, none of them an unfiltered `squeue`, versus 10 (3 unfiltered) before. The package list that is read at start (`spack find`)
-is cached for 30 minutes per user. The language model runs on its own GPU node (vLLM), not on the login node.
+Measured with a command counter on a typical session (start, one queue question, two submissions): 10 Slurm commands per user
+before v1.9.1 (3 of them unfiltered `squeue`), 5 per user now (2 of them `sacct`, so 3 RPCs to `slurmctld`), with the `sinfo` served
+from the shared cache for every user after the first in each minute. The package list read at start (`spack find`) is cached for
+30 minutes per user. The language model runs on its own GPU node (vLLM), not on the login node.
 
 Example: `GONZABOT_SLURM_QUERIES=off ./gonzabot` (or set it once for every user in a site-wide wrapper script). In `light` mode the
 line shown before a submission reports CPU load per partition (for example `cpu: 10/100 CPUs busy`, from `sinfo`) instead of

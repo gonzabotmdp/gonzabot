@@ -112,6 +112,36 @@ DB_PATH      = DB_DIR / "history.db"
 _SLURM_MODE = os.environ.get("GONZABOT_SLURM_QUERIES", "light").strip().lower()
 if _SLURM_MODE not in ("full", "light", "off"):
     _SLURM_MODE = "light"
+_RUN_DIR = Path(os.environ.get("GONZABOT_RUN_DIR") or START_REQUEST.parent)
+
+
+def _shared_ttl_cache(key: str, ttl: int, producer) -> str:
+    """Resultado de una consulta NO privada a Slurm (ej. sinfo) compartido entre todos los usuarios durante `ttl` segundos:
+    N usuarios generan como mucho 1 RPC por ventana. Si el directorio compartido no es escribible, cae a un cache por usuario."""
+    now = time.time()
+    dirs = [_RUN_DIR, DB_DIR]
+    for d in dirs:
+        try:
+            f = d / f"cache-{key}.json"
+            if now - f.stat().st_mtime < ttl:
+                v = json.loads(f.read_text(encoding="utf-8")).get("v", "")
+                if v:
+                    return v
+        except (OSError, ValueError, AttributeError):
+            pass
+    v = producer()
+    if v:
+        for d in dirs:
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                tmp = d / f".cache-{key}.{os.getpid()}.tmp"
+                tmp.write_text(json.dumps({"v": v}), encoding="utf-8")
+                os.chmod(tmp, 0o666)
+                os.replace(tmp, d / f"cache-{key}.json")
+                break
+            except OSError:
+                continue
+    return v
 WORKFLOW_DB_PATH = DB_DIR / "workflows.db"  # mismo patron/NFS que history.db,
 # probado en vivo 1/10 (30/30 escrituras OK en este mismo mount) -- sin la
 # complejidad de disco local+bundle que usa el prototipo aislado, porque acá
@@ -644,10 +674,10 @@ def _queue_hint() -> str:
     if now - _QUEUE_CACHE[0] < 60 and _QUEUE_CACHE[1]:
         return _QUEUE_CACHE[1]
     if _SLURM_MODE == "light":
-        r = _slurm_run(["sinfo", "-h", "-o", "%P|%C"], 3)
-        if not r or r[0] != 0:
-            return ""
-        q2 = _parse_sinfo_load(r[1])
+        def _prod_load() -> str:
+            rr = _slurm_run(["sinfo", "-h", "-o", "%P|%C"], 3)
+            return rr[1] if rr and rr[0] == 0 else ""
+        q2 = _parse_sinfo_load(_shared_ttl_cache("sinfo-load", 60, _prod_load))
         if not q2:
             return ""
         _QUEUE_CACHE = (now, _tr("Carga ahora → ", "Load now → ") + " · ".join(
@@ -667,7 +697,7 @@ def _queue_hint() -> str:
 
 def _sbatch_test_only(name: str, cwd: str) -> "tuple[bool, str] | None":
     """sbatch --test-only: valida partición/QOS/cuenta/gres sin encolar. None si no se pudo correr."""
-    if _SLURM_MODE == "off":
+    if _SLURM_MODE == "off" or os.environ.get("GONZABOT_TEST_ONLY", "1").strip().lower() in ("0", "off", "no", "false"):
         return None
     r = _slurm_run(["sbatch", "--test-only", name], 15, cwd)
     if r is None:
@@ -1991,7 +2021,14 @@ def _run_dynamic_context() -> str:
 
     # Cluster node status (compact)
     if _SLURM_MODE != "off":
-        _run(["sinfo", "-o", "%P %a %D %t", "--noheader"], label="sinfo (particion/nodos/estado)", maxchars=400)
+        def _sinfo_ctx() -> str:
+            return subprocess.run(["sinfo", "-o", "%P %a %D %t", "--noheader"], capture_output=True, text=True, timeout=8).stdout.strip()
+        try:
+            _si = _shared_ttl_cache("sinfo-ctx", 60, _sinfo_ctx)
+        except Exception:
+            _si = ""
+        if _si:
+            sections.append("[sinfo (particion/nodos/estado)]\n" + (_si[:400] + "... [truncado]" if len(_si) > 400 else _si))
 
     # REVERTIDO el mismo día (1/10): se probó sacar este snapshot a pedido de
     # Gonzalo ("prefiero que muestre todo en tiempo real"), confiando en que
@@ -2202,12 +2239,12 @@ def _fresh_queue_snapshot() -> str:
     except Exception:
         pass
     try:
-        r = subprocess.run(["sinfo", "-o", "%P %a %D %t", "--noheader"],
-                            capture_output=True, text=True, timeout=8)
-        out = r.stdout.strip()
+        out = _shared_ttl_cache("sinfo-ctx", 60, lambda: subprocess.run(
+            ["sinfo", "-o", "%P %a %D %t", "--noheader"], capture_output=True, text=True, timeout=8).stdout.strip())
         if len(out) > 500:
             out = out[:500] + "... [truncado]"
-        parts.append(f"[sinfo (particion/nodos/estado), recién consultado]\n{out}")
+        if out:
+            parts.append(f"[sinfo (particion/nodos/estado), recién consultado]\n{out}")
     except Exception:
         pass
     if not parts:
@@ -3809,6 +3846,8 @@ def _selftest() -> int:
 
     globals()["_EXACT_TOKENS_ON"] = False   # el selftest nunca toca la red
     globals()["_STORE_HASH_CACHE"] = {}   # el selftest no depende del store real de Spack (CI no lo tiene)
+    import tempfile as _tf_run
+    globals()["_RUN_DIR"] = Path(_tf_run.mkdtemp(prefix="gonzabot-selftest-run-"))   # nunca escribir datos de prueba en el cache compartido real
 
     _rf = _refence_bare_script("#!/bin/bash\n#SBATCH -n 1\n\noctave x.m\n\nEste script resuelve el sistema con Octave hoy.")
     _t("script sin valla se re-cerca", _rf.startswith("```bash\n#!/bin/bash") and "octave x.m\n```" in _rf and _rf.rstrip().endswith("hoy."))
@@ -4181,6 +4220,27 @@ def _selftest() -> int:
         _t("_parse_sinfo_load interpreta A/I/O/T", _parse_sinfo_load("cpu*|10/90/0/100") == {"cpu": [10, 100]})
     finally:
         globals()["_SLURM_MODE"] = _mode38; globals()["_QUEUE_CACHE"] = _qc38; globals()["_slurm_run"] = _run38
+    import tempfile as _tf39
+    _rd39, _db39 = globals()["_RUN_DIR"], globals()["DB_DIR"]
+    with _tf39.TemporaryDirectory() as _td39:
+        globals()["_RUN_DIR"] = Path(_td39) / "run"; globals()["DB_DIR"] = Path(_td39) / "db"
+        _n39 = []
+        _prod39 = lambda: (_n39.append(1) or "cpu*|1/2/0/3\n")
+        _a39 = _shared_ttl_cache("k", 60, _prod39); _b39 = _shared_ttl_cache("k", 60, _prod39)
+        _t("cache compartido: dos consultas seguidas hacen un solo RPC", len(_n39) == 1 and _a39 == _b39 == "cpu*|1/2/0/3\n")
+        _shared_ttl_cache("k", 0, _prod39)
+        _t("cache compartido: vencido el TTL vuelve a consultar", len(_n39) == 2)
+        globals()["_RUN_DIR"] = Path("/proc/no-escribible"); _n39.clear()
+        _shared_ttl_cache("k2", 60, _prod39); _shared_ttl_cache("k2", 60, _prod39)
+        _t("cache compartido: si el directorio común no es escribible, usa el del usuario", len(_n39) == 1 and (Path(_td39) / "db" / "cache-k2.json").exists())
+    globals()["_RUN_DIR"], globals()["DB_DIR"] = _rd39, _db39
+    _to39 = os.environ.pop("GONZABOT_TEST_ONLY", None); os.environ["GONZABOT_TEST_ONLY"] = "0"
+    try:
+        _t("GONZABOT_TEST_ONLY=0 desactiva sbatch --test-only", _sbatch_test_only("x.sbatch", ".") is None)
+    finally:
+        os.environ.pop("GONZABOT_TEST_ONLY", None)
+        if _to39 is not None:
+            os.environ["GONZABOT_TEST_ONLY"] = _to39
     _t("si YA está sourceado numpy.env, no se duplica la línea",
        r.count("source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env") == 1)
     r = _fix_sbatch(B.format("python3 script_sin_numpy.py"))

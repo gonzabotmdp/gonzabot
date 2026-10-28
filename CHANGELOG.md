@@ -6,6 +6,15 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.9.2] - 2026-10-28
+
+### Changed
+- Fewer RPCs to `slurmctld`: the non-private `sinfo` queries (queue/load hint and live context) go through a 60 s cache shared by
+  all users (`run/` directory, override with `GONZABOT_RUN_DIR`), so N users cost about one `sinfo` per minute. Per-user caches are
+  the fallback when the shared directory is not writable.
+- New `GONZABOT_TEST_ONLY=0` switch to skip `sbatch --test-only` (the heaviest optional RPC). The README section on Slurm load now
+  talks about RPC count (not payload size) and lists exactly what each mode sends.
+
 ## [1.9.1] - 2026-10-28
 
 ### Changed
