@@ -1127,6 +1127,8 @@ def _is_readonly_query(code: str) -> bool:
     """Nombre historico (ver comentario arriba) -- hoy es en realidad
     'es seguro auto-ejecutar sin pedir confirmacion', decidido por
     denylist, no por una lista de comandos permitidos."""
+    if os.environ.get("GONZABOT_AUTORUN", "1").strip().lower() in ("0", "off", "no", "false"):
+        return False   # el administrador del sitio apagó la ejecución automática de comandos locales
     lines = [ln.strip() for ln in code.strip().splitlines() if ln.strip()]
     if not lines:
         return False
@@ -4241,6 +4243,15 @@ def _selftest() -> int:
         os.environ.pop("GONZABOT_TEST_ONLY", None)
         if _to39 is not None:
             os.environ["GONZABOT_TEST_ONLY"] = _to39
+    _ar40 = os.environ.pop("GONZABOT_AUTORUN", None)
+    try:
+        _t("auto-ejecución activa por defecto: 'squeue -u x' pasa", _is_readonly_query("squeue -u gonzalo"))
+        os.environ["GONZABOT_AUTORUN"] = "0"
+        _t("GONZABOT_AUTORUN=0 apaga la ejecución automática de comandos locales", not _is_readonly_query("squeue -u gonzalo") and not _is_readonly_query("sinfo"))
+    finally:
+        os.environ.pop("GONZABOT_AUTORUN", None)
+        if _ar40 is not None:
+            os.environ["GONZABOT_AUTORUN"] = _ar40
     _t("si YA está sourceado numpy.env, no se duplica la línea",
        r.count("source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env") == 1)
     r = _fix_sbatch(B.format("python3 script_sin_numpy.py"))

@@ -6,6 +6,14 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.9.3] - 2026-10-28
+
+### Added
+- `GONZABOT_AUTORUN=0` disables the automatic execution of read-only shell commands suggested by the model, for sites that want no local
+  execution at all.
+- README section "Deployment model and admin controls": central deployment, the model endpoint as the control point, every environment switch,
+  what is executed automatically (denylist-based) and what always needs a confirmation.
+
 ## [1.9.2] - 2026-10-28
 
 ### Changed

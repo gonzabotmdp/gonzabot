@@ -187,6 +187,35 @@ Ejemplo: `GONZABOT_SLURM_QUERIES=off ./gonzabot` (o definirlo una vez para todos
 modo `light` la línea que se muestra antes de un envío indica la carga de CPUs por partición (por ejemplo `cpu: 10/100 CPUs ocupados`,
 sale de `sinfo`) y no la cantidad de jobs corriendo/esperando, porque eso requeriría el `squeue` global del cluster.
 
+## Modelo de despliegue y controles del administrador
+
+gonzabot está pensado para que lo despliegue **el sitio**, no para que lo instale cada usuario por su cuenta: una copia en almacenamiento
+compartido y un endpoint de modelo que vos controlás. No necesita root, ni setuid, ni demonios; corre con los permisos del usuario que lo invoca.
+
+| Control | Qué hace |
+|---|---|
+| `GONZABOT_URL` | El endpoint compatible con OpenAI (nosotros usamos vLLM en un nodo GPU, no en el nodo de login). **Es el principal punto de control**: vos decidís quién puede llegar a él (firewall o autenticación en el puerto del modelo). Sin endpoint solo funcionan los chequeos locales por reglas de un script (`/load`). |
+| `GONZABOT_SLURM_QUERIES` | `light` (por defecto), `full` u `off`: qué consultas opcionales a Slurm puede mandar. Ver "Carga sobre Slurm" más arriba. |
+| `GONZABOT_TEST_ONLY` | `0` omite `sbatch --test-only`. |
+| `GONZABOT_AUTORUN` | `0` desactiva la ejecución automática de comandos locales (abajo). |
+| `GONZABOT_RUN_DIR` | Directorio del cache compartido entre todos los usuarios (por defecto, `run/` junto al script). |
+
+Qué ejecuta por sí solo y qué no:
+- Los comandos de shell que sugiere el modelo y que parecen consultas de solo lectura (por ejemplo `squeue -u`, `sinfo`) se ejecutan sin preguntar.
+  La decisión se toma con una **lista de comandos prohibidos** (sin encadenar, sin redirecciones, sin comandos peligrosos), no con una lista de comandos
+  permitidos. Los sitios que no quieren ninguna ejecución local ponen `GONZABOT_AUTORUN=0`.
+- Todo lo demás requiere un comando explícito **y** una confirmación (respuesta por defecto: No): enviar un job, aplicar una edición a un archivo
+  (`/edit`, con `.bak` automático), guardar archivos.
+- Los bloques de código en otros lenguajes (Python, C, LaTeX...) nunca se ejecutan.
+
+Quién puede usarlo: es un único archivo de Python, así que valen los controles habituales de Unix. Por ejemplo, `chmod 750` con un grupo dedicado sobre
+el archivo (o sobre un pequeño script envoltorio) lo limita a las personas que elijas. Nada de gonzabot puede impedir que un usuario corra su propio código en
+otro lado de un nodo de envío; para eso se usa lo que ya usás (montajes `noexec`, límites de cgroups, [arbiter2](https://github.com/CHPC-UofU/arbiter2), listas de permitidos).
+Nosotros lo corremos bajo arbiter2 en nuestro nodo de login.
+
+Datos: los prompts y las respuestas van solo al endpoint que configuraste. El historial de conversación queda en el `~/.gonzabot` del propio usuario, y el
+feedback de `/good` / `/bad` se escribe ahí solo cuando el usuario lo escribe.
+
 ## Configuración
 
 `context/core.txt` (siempre cargado) más los segmentos por familia de

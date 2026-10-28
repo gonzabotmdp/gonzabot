@@ -262,6 +262,35 @@ Example: `GONZABOT_SLURM_QUERIES=off ./gonzabot` (or set it once for every user 
 line shown before a submission reports CPU load per partition (for example `cpu: 10/100 CPUs busy`, from `sinfo`) instead of
 running/waiting job counts, because those would need the cluster-wide `squeue`.
 
+## Deployment model and admin controls
+
+gonzabot is meant to be deployed **by the site**, not self-installed by each user: one copy on shared storage, one model endpoint
+that you control. It needs no root, no setuid and no daemon; it runs with the invoking user's own rights.
+
+| Control | What it does |
+|---|---|
+| `GONZABOT_URL` | The OpenAI-compatible endpoint (we use vLLM on a GPU node, not on the login node). **This is the main control point**: you decide who can reach it (firewall or auth on the model port). Without an endpoint only the local rule-based checks of a script (`/load`) work. |
+| `GONZABOT_SLURM_QUERIES` | `light` (default), `full` or `off`: which optional Slurm queries it may send. See "Load on Slurm" above. |
+| `GONZABOT_TEST_ONLY` | `0` skips `sbatch --test-only`. |
+| `GONZABOT_AUTORUN` | `0` disables the automatic execution of local commands (below). |
+| `GONZABOT_RUN_DIR` | Directory for the cache shared by all users (default: `run/` next to the script). |
+
+What it executes by itself, and what it does not:
+- Shell commands suggested by the model that look like read-only queries (for example `squeue -u`, `sinfo`) are run without asking.
+  The decision is made with a **denylist** (no chaining, redirection or dangerous commands), not a whitelist of allowed commands.
+  Sites that want no local execution at all set `GONZABOT_AUTORUN=0`.
+- Anything else needs an explicit command **and** a confirmation (default answer: No): submitting a job, applying an edit
+  to a file (`/edit`, with an automatic `.bak`), saving files.
+- Code blocks in other languages (Python, C, LaTeX...) are never executed.
+
+Who can run it: it is a single Python file, so the usual Unix controls apply. For example `chmod 750` with a dedicated group
+on the file (or on a small wrapper script) limits it to the people you choose. Nothing in gonzabot can stop a user from running
+their own code elsewhere on a submit host; for that, use what you already use (`noexec` mounts, cgroup limits, [arbiter2](https://github.com/CHPC-UofU/arbiter2),
+allowlists). We run it under arbiter2 on our login node.
+
+Data: prompts and answers go only to the endpoint you configured. The conversation history stays in the user's own `~/.gonzabot`,
+and `/good` / `/bad` feedback is written there only when the user types it.
+
 ## Configuration
 
 `context/core.txt` (always loaded) plus the per-software-family segments
