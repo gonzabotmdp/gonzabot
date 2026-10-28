@@ -4245,9 +4245,9 @@ def _selftest() -> int:
             os.environ["GONZABOT_TEST_ONLY"] = _to39
     _ar40 = os.environ.pop("GONZABOT_AUTORUN", None)
     try:
-        _t("auto-ejecución activa por defecto: 'squeue -u x' pasa", _is_readonly_query("squeue -u gonzalo"))
+        _t("auto-ejecución activa por defecto: 'date' pasa", _is_readonly_query("date"))
         os.environ["GONZABOT_AUTORUN"] = "0"
-        _t("GONZABOT_AUTORUN=0 apaga la ejecución automática de comandos locales", not _is_readonly_query("squeue -u gonzalo") and not _is_readonly_query("sinfo"))
+        _t("GONZABOT_AUTORUN=0 apaga la ejecución automática de comandos locales", not _is_readonly_query("date") and not _is_readonly_query("whoami"))
     finally:
         os.environ.pop("GONZABOT_AUTORUN", None)
         if _ar40 is not None:
