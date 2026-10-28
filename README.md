@@ -241,6 +241,21 @@ with `/lang en`. `/email` shows or sets the address used for Slurm notices (it
 is asked once and remembered per user), and files the script uses that sit in
 the folder where you started gonzabot are copied along with the submission.
 
+## Load on Slurm and on the login node
+
+gonzabot is an interactive tool: it only talks to Slurm when a person types something, never in a background loop. Even so, a
+fleet of assistants can add up on a large site, so the optional queries are limited and can be switched off:
+
+| `GONZABOT_SLURM_QUERIES` | What it queries |
+|---|---|
+| `light` (default) | The user's own jobs (`squeue -u`), `sinfo`, one `sacct` for recent failures and one for the resource hint (cached 10 min), and `sbatch --test-only` only after the user confirms a submission. **Never the cluster-wide `squeue`.** |
+| `full` | The previous behaviour, which also reads the cluster-wide `squeue` at start and for queue questions. |
+| `off` | No optional queries at all (no live context, failed-job notice, queue/resource hints or `--test-only`). Explicit commands typed by the user still work. |
+
+A typical session (start, one queue question, two submissions) issues about 8 Slurm commands in `light`
+mode, none of them an unfiltered `squeue`, versus 10 (3 unfiltered) before. The package list that is read at start (`spack find`)
+is cached for 30 minutes per user. The language model runs on its own GPU node (vLLM), not on the login node.
+
 ## Configuration
 
 `context/core.txt` (always loaded) plus the per-software-family segments

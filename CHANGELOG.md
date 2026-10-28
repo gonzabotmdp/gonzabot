@@ -6,6 +6,26 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-10-28
+
+### Changed
+- Less load on Slurm: new `GONZABOT_SLURM_QUERIES` setting (`light` by default, `full`, `off`). In `light` mode gonzabot never runs the
+  cluster-wide `squeue`; the load hint comes from `sinfo`, the resource-hint history is cached for 10 minutes and the package list read at
+  start is cached for 30. `off` disables every optional query. See "Load on Slurm and on the login node" in the README.
+
+### Added
+- Warning for a duplicated `spack load spack load ...` and for `spack load lammps` without a hash.
+- Warning when a Spack hash does not exist in the store or belongs to a different package than the one requested (for
+  example an invented `plumed@.../hash` that is really another package's hash).
+- `/load` suggests asking gonzabot to adapt the script after listing the problems it found.
+
+### Fixed
+- `cp -r ../* .` (copying the whole parent directory into the working directory) is removed.
+- A script that creates `WORKDIR` but never enters it gets `cd $WORKDIR`.
+- Placeholders inside comments no longer stop gonzabot from offering to submit.
+- `/diagnose` answers in the session language and explains the missing-numpy fix; common automatic warnings and the goodbye message are
+  translated when the interface is in English; durations in the resource hint use seconds/minutes.
+
 ## [1.9.0] - 2026-10-20
 
 ### Added

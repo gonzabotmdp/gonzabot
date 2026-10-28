@@ -166,6 +166,21 @@ avisos de Slurm (se pregunta una vez y queda guardado por usuario), y los
 archivos que usa el script y están en la carpeta donde iniciaste gonzabot se
 copian junto con el envío.
 
+## Carga sobre Slurm y el nodo de login
+
+gonzabot es una herramienta interactiva: solo consulta a Slurm cuando una persona escribe algo, nunca en un bucle en segundo plano.
+Aun así, muchos asistentes juntos pueden sumar en un sitio grande, por eso las consultas opcionales están acotadas y se pueden apagar:
+
+| `GONZABOT_SLURM_QUERIES` | Qué consulta |
+|---|---|
+| `light` (por defecto) | Los jobs del propio usuario (`squeue -u`), `sinfo`, un `sacct` para fallos recientes y otro para el consejo de recursos (cacheado 10 min), y `sbatch --test-only` solo después de que el usuario confirma un envío. **Nunca el `squeue` global del cluster.** |
+| `full` | El comportamiento anterior, que además lee el `squeue` global al arrancar y ante preguntas sobre la cola. |
+| `off` | Ninguna consulta opcional (sin contexto en vivo, aviso de jobs fallidos, consejos de cola/recursos ni `--test-only`). Los comandos que el usuario escribe explícitamente siguen funcionando. |
+
+Una sesión típica (arranque, una pregunta sobre la cola y dos envíos) hace unos 8 comandos a Slurm en modo `light`, ninguno un `squeue`
+sin filtrar, contra 10 (3 sin filtrar) antes. La lista de paquetes que se lee al arrancar (`spack find`) se cachea 30 minutos por usuario.
+El modelo de lenguaje corre en su propio nodo GPU (vLLM), no en el nodo de login.
+
 ## Configuración
 
 `context/core.txt` (siempre cargado) más los segmentos por familia de

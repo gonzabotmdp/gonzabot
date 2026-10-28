@@ -107,6 +107,11 @@ HEARTBEAT       = (Path("/mnt/gpu-data/gonzalo/ifimar-ai/run/.vllm-dev-heartbeat
 STATS_LOG       = Path("/mnt/gpu-data/shared/ifimar-ai/stats/usage.log")
 DB_DIR       = Path.home() / ".gonzabot"
 DB_PATH      = DB_DIR / "history.db"
+# Consultas OPCIONALES a Slurm (contexto al arrancar, consejos antes de enviar): "light" (default: solo sinfo y los jobs del
+# propio usuario, nunca el squeue global), "full" (comportamiento anterior) u "off" (ninguna; para sitios grandes).
+_SLURM_MODE = os.environ.get("GONZABOT_SLURM_QUERIES", "light").strip().lower()
+if _SLURM_MODE not in ("full", "light", "off"):
+    _SLURM_MODE = "light"
 WORKFLOW_DB_PATH = DB_DIR / "workflows.db"  # mismo patron/NFS que history.db,
 # probado en vivo 1/10 (30/30 escrituras OK en este mismo mount) -- sin la
 # complejidad de disco local+bundle que usa el prototipo aislado, porque acá
@@ -390,7 +395,7 @@ def _project_ready(blocks: "list[tuple[str,str,str]]") -> bool:
     """Hay un sbatch real y ningún archivo/valor pendiente de completar por el usuario."""
     files = _project_blocks(blocks)
     return (any(_looks_like_real_sbatch(b[1]) for b in files)
-            and not any(_RE_PLACEHOLDER.search(b[1]) for b in files))
+            and not any(_RE_PLACEHOLDER.search(re.sub(r"(?m)^[ \t]*#(?!SBATCH).*$", "", b[1])) for b in files))
 
 
 def _project_blocks(blocks: "list[tuple[str,str,str]]") -> "list[tuple[str,str,str]]":
@@ -461,6 +466,8 @@ def _parse_bad_jobs(text: str) -> "list[tuple[str, str, str]]":
 def _recent_failed_jobs(limit: int = 3) -> "list[tuple[str, str, str]]":
     """Jobs del usuario que fallaron en las últimas 24 h. sacct si anda (hoy solo responde en
     ql-head: AccountingStorageHost=localhost); si no, squeue -t all (MinJobAge=24 h)."""
+    if _SLURM_MODE == "off":
+        return []
     r = _slurm_run(["sacct", "-u", _USERNAME, "-S", "now-1days", "-X", "-n", "-P", "-o", "JobID,JobName,State"], 2)
     if r and r[0] == 0:
         rows = _parse_bad_jobs(r[1])
@@ -549,6 +556,15 @@ def _parse_usage(text: str, name: str) -> "list[tuple[int, float]]":
             if j["name"] == name and j["st"] == "COMPLETED" and j["el"]]
 
 
+def _fmt_dur(sec: float) -> str:
+    """Duración legible: segundos, minutos u horas según el orden de magnitud."""
+    if sec < 90:
+        return f"{sec:.0f} s"
+    if sec < 5400:
+        return f"{sec/60:.0f} min"
+    return f"{sec/3600:.1f} h"
+
+
 def _resource_tip(req: dict, hist: "list[tuple[int, float]]") -> str:
     """Aviso de una línea si lo pedido supera >3x lo observado en jobs parecidos; '' si no."""
     if len(hist) < 1:
@@ -560,8 +576,8 @@ def _resource_tip(req: dict, hist: "list[tuple[int, float]]") -> str:
                         f"you request {req['mem_mb']/1024:.0f} GB of memory and they used at most {rss/1024:.1f} GB"))
     el = max(h[0] for h in hist)
     if req.get("time_s") and el > 0 and req["time_s"] > 3 * el:
-        msgs.append(_tr(f"pedís {req['time_s']/3600:.1f} h y duraron como máximo {el/3600:.1f} h",
-                        f"you request {req['time_s']/3600:.1f} h and they lasted at most {el/3600:.1f} h"))
+        msgs.append(_tr(f"pedís {_fmt_dur(req['time_s'])} y duraron como máximo {_fmt_dur(el)}",
+                        f"you request {_fmt_dur(req['time_s'])} and they lasted at most {_fmt_dur(el)}"))
     if not msgs:
         return ""
     return _tr(f"💡 Según {len(hist)} job(s) tuyos parecidos: ", f"💡 Based on {len(hist)} similar job(s) of yours: ") + "; ".join(msgs)
@@ -572,13 +588,22 @@ def _resource_estimate_tip(sb_text: str, fallback_name: str = "") -> str:
     name = req.get("name") or fallback_name
     if not name or not (req.get("mem_mb") or req.get("time_s")):
         return ""
-    r = _slurm_run(["sacct", "-u", _USERNAME, "-S", "now-30days", "-n", "-P", "-o", "JobID,JobName,State,Elapsed,MaxRSS"], 3)
-    if not r or r[0] != 0:
+    global _SACCT_HIST_CACHE
+    if _SLURM_MODE == "off":
         return ""
-    return _resource_tip(req, _parse_usage(r[1], name))
+    if time.time() - _SACCT_HIST_CACHE[0] < 600 and _SACCT_HIST_CACHE[1]:
+        txt = _SACCT_HIST_CACHE[1]
+    else:
+        r = _slurm_run(["sacct", "-u", _USERNAME, "-S", "now-30days", "-n", "-P", "-o", "JobID,JobName,State,Elapsed,MaxRSS"], 3)
+        if not r or r[0] != 0:
+            return ""
+        txt = r[1]
+        _SACCT_HIST_CACHE = (time.time(), txt)
+    return _resource_tip(req, _parse_usage(txt, name))
 
 
 _QUEUE_CACHE: "tuple[float, str]" = (0.0, "")
+_SACCT_HIST_CACHE: "tuple[float, str]" = (0.0, "")
 
 
 def _parse_queue(text: str) -> "dict[str, list[int]]":
@@ -597,11 +622,36 @@ def _parse_queue(text: str) -> "dict[str, list[int]]":
     return out
 
 
+def _parse_sinfo_load(text: str) -> "dict[str, list[int]]":
+    """Líneas partición|A/I/O/T (sinfo -o '%P|%C') -> {partición: [CPUs ocupados, CPUs totales]}."""
+    out: dict = {}
+    for ln in text.splitlines():
+        f = ln.strip().split("|")
+        if len(f) < 2:
+            continue
+        m = re.match(r"^(\d+)/(\d+)/(\d+)/(\d+)$", f[1].strip())
+        if m:
+            out[f[0].strip().rstrip("*")] = [int(m.group(1)), int(m.group(4))]
+    return out
+
+
 def _queue_hint() -> str:
-    """Resumen por partición de la cola (cacheado 60 s); '' si squeue falla."""
+    """Carga por partición (cacheado 60 s); '' si Slurm falla. En modo light usa sinfo (liviano), en full el squeue global."""
     global _QUEUE_CACHE
+    if _SLURM_MODE == "off":
+        return ""
     now = time.time()
     if now - _QUEUE_CACHE[0] < 60 and _QUEUE_CACHE[1]:
+        return _QUEUE_CACHE[1]
+    if _SLURM_MODE == "light":
+        r = _slurm_run(["sinfo", "-h", "-o", "%P|%C"], 3)
+        if not r or r[0] != 0:
+            return ""
+        q2 = _parse_sinfo_load(r[1])
+        if not q2:
+            return ""
+        _QUEUE_CACHE = (now, _tr("Carga ahora → ", "Load now → ") + " · ".join(
+            _tr(f"{p}: {v[0]}/{v[1]} CPUs ocupados", f"{p}: {v[0]}/{v[1]} CPUs busy") for p, v in sorted(q2.items())))
         return _QUEUE_CACHE[1]
     r = _slurm_run(["squeue", "-h", "-o", "%P|%T"], 3)
     if not r or r[0] != 0:
@@ -617,6 +667,8 @@ def _queue_hint() -> str:
 
 def _sbatch_test_only(name: str, cwd: str) -> "tuple[bool, str] | None":
     """sbatch --test-only: valida partición/QOS/cuenta/gres sin encolar. None si no se pudo correr."""
+    if _SLURM_MODE == "off":
+        return None
     r = _slurm_run(["sbatch", "--test-only", name], 15, cwd)
     if r is None:
         return None
@@ -1928,15 +1980,18 @@ def _run_dynamic_context() -> str:
 
     # Info del usuario actual
     _run(["id", _USERNAME], label=f"grupos de {_USERNAME}", maxchars=200)
-    _run(["squeue", "-u", _USERNAME, "-o", "%i %j %P %C %m %T %R", "--noheader"],
-         label=f"jobs actuales de {_USERNAME} (vacío = sin jobs en cola)", maxchars=300)
+    if _SLURM_MODE != "off":
+        _run(["squeue", "-u", _USERNAME, "-o", "%i %j %P %C %m %T %R", "--noheader"],
+             label=f"jobs actuales de {_USERNAME} (vacío = sin jobs en cola)", maxchars=300)
 
     # Todos los jobs del cluster (para responder squeue sin inventar)
-    _run(["squeue", "-o", "%i %P %j %u %T %.10M %D %R", "--noheader"],
-         label="squeue completo del cluster (todos los usuarios, al inicio de sesión)", maxchars=800)
+    if _SLURM_MODE == "full":
+        _run(["squeue", "-o", "%i %P %j %u %T %.10M %D %R", "--noheader"],
+             label="squeue completo del cluster (todos los usuarios, al inicio de sesión)", maxchars=800)
 
     # Cluster node status (compact)
-    _run(["sinfo", "-o", "%P %a %D %t", "--noheader"], label="sinfo (particion/nodos/estado)", maxchars=400)
+    if _SLURM_MODE != "off":
+        _run(["sinfo", "-o", "%P %a %D %t", "--noheader"], label="sinfo (particion/nodos/estado)", maxchars=400)
 
     # REVERTIDO el mismo día (1/10): se probó sacar este snapshot a pedido de
     # Gonzalo ("prefiero que muestre todo en tiempo real"), confiando en que
@@ -1954,8 +2009,23 @@ def _run_dynamic_context() -> str:
 
     # Spack: paquetes instalados explícitamente con versión y hash corto
     # -x = solo explícitos (no deps automáticas), ~90 paquetes vs 1400 del árbol completo
-    _run(["spack", "find", "-x", "--format", "{name}@{version}/{hash:8}"], timeout=12,
-         label="spack packages instalados — para usar en sbatch ver PATRÓN A/B en core.txt; NUNCA eval $(spack load --sh) sin SPACK_USER_CACHE_PATH", maxchars=2500)
+    # El listado de paquetes cambia muy de vez en cuando: cache de 30 min por usuario (evita un 'spack find' en cada arranque).
+    _sp_cache = DB_DIR / "spack-find.cache"
+    try:
+        if time.time() - _sp_cache.stat().st_mtime < 1800 and _sp_cache.read_text(encoding="utf-8").strip():
+            sections.append(_sp_cache.read_text(encoding="utf-8"))
+    except OSError:
+        pass
+    if not any(sec.startswith("[spack packages instalados") for sec in sections):
+        _n_before = len(sections)
+        _run(["spack", "find", "-x", "--format", "{name}@{version}/{hash:8}"], timeout=12,
+             label="spack packages instalados — para usar en sbatch ver PATRÓN A/B en core.txt; NUNCA eval $(spack load --sh) sin SPACK_USER_CACHE_PATH", maxchars=2500)
+        if len(sections) > _n_before:
+            try:
+                DB_DIR.mkdir(parents=True, exist_ok=True)
+                _sp_cache.write_text(sections[-1], encoding="utf-8")
+            except OSError:
+                pass
 
     # Disk usage (solo las columnas esenciales)
     _run(["df", "-h", "--output=target,used,avail,pcent",
@@ -2117,7 +2187,11 @@ def _fresh_queue_snapshot() -> str:
     de hace rato) — liviano a propósito, solo para la regla de optimización
     según estado real de la cola (ver core.txt)."""
     parts = []
+    if _SLURM_MODE == "off":
+        return ""
     try:
+        if _SLURM_MODE != "full":
+            raise OSError("modo light: sin squeue global")
         r = subprocess.run(
             ["squeue", "-o", "%i %P %j %u %T %.10M %D %R", "--noheader"],
             capture_output=True, text=True, timeout=8)
@@ -2299,7 +2373,8 @@ _CORE_SPANISH_DIRECTIVE = 'Español rioplatense informal — "vos", "dale", "che
 # recencia, no alcanza con decirlo una sola vez al principio.
 _LANG_REMINDER_SUFFIX = (
     "\n\nREMINDER: respond in English. This whole conversation and all context "
-    "above is in Spanish, but you must still answer in English."
+    "above is in Spanish, but you must still answer in English, including the "
+    "comments inside code blocks (translate any Spanish comment you copy)."
 )
 
 
@@ -2351,6 +2426,49 @@ def _sources_report(probe: str, reply: str) -> "tuple[list[tuple[str, int]], dic
             continue
         hashes[h] = found
     return segs, hashes
+
+
+_WARN_EN = [
+    (r"^'module (\S+)(?: (\S+))?' no existe en este cluster \(sin Lmod\) — usar spack: (.*)$",
+     lambda m: f"'module {m.group(1)}{(' ' + m.group(2)) if m.group(2) else ''}' does not exist on this cluster (no Lmod) — use spack: {m.group(3)}"),
+    (r"^'spack load spack load \.\.\.'.*$",
+     lambda m: "'spack load spack load ...': the second 'spack load' is taken as a package name and fails (\"Spec 'spack' matches no installed packages\"); the job keeps going and the program (lmp, python...) comes from the user's PATH: it can be a DIFFERENT binary, with extra threads. Keep a single 'spack load' (better with the exact hash)"),
+    (r"^'spack load lammps' sin hash.*$",
+     lambda m: "'spack load lammps' without a hash is ambiguous (there are CPU and GPU builds: \"matches multiple packages\") and if it fails the program comes from elsewhere in the PATH — use the exact hash (spack location -i /hash, see the LAMMPS hashes in the context)"),
+    (r"^'SPACK' se usa pero nunca se define en el script — falta (.*)$",
+     lambda m: f"'SPACK' is used but never defined in the script — missing {m.group(1)}"),
+    (r"^'(.+)' no existe en el filesystem — verificar la ruta antes de sourcearla$",
+     lambda m: f"'{m.group(1)}' does not exist on the filesystem — check the path before sourcing it"),
+    (r"^'location -i (\S+)' sin '/' — es un hash de spack.*$",
+     lambda m: f"'location -i {m.group(1)}' without '/' — it is a spack hash; without the slash spack reads it as a package name and fails: use '/{m.group(1)}'"),
+    (r"^create_atoms random genera átomos solapados.*$",
+     lambda m: "create_atoms random produces overlapping atoms → 'Lost atoms' — use lattice fcc + create_atoms N box"),
+    (r"^thermo/thermo_style después del último run no tiene efecto.*$",
+     lambda m: "thermo/thermo_style after the last run has no effect — it goes BEFORE the run"),
+    (r"^compute msd con 'com yes' resta el centro de masa.*$",
+     lambda m: "compute msd with 'com yes' subtracts the center of mass — it does NOT measure center-of-mass diffusion (use it without com yes)"),
+    (r"^'(\w+)' es una app GUI.*$",
+     lambda m: f"'{m.group(1)}' is a GUI app (it opens a graphical interface) inside a regular batch sbatch — it will NOT work like this, it needs an interactive session with a display"),
+    (r"^'(.+)' NO está instalado en este cluster \(ningún paquete con ese nombre en el store; el hash /(\w+) es de '(.+)'\) — .*$",
+     lambda m: f"'{m.group(1)}' is NOT installed on this cluster (no package with that name in the store; the hash /{m.group(2)} belongs to '{m.group(3)}') — do not use that command; say it is not available and ask Gonzalo"),
+    (r"^el hash /(\w+) es de '(.+)', no de '(.+)': .*$",
+     lambda m: f"the hash /{m.group(1)} belongs to '{m.group(2)}', not to '{m.group(3)}': spack load will not load what you asked for — check with 'spack find -L {m.group(3)}'; if it does not show up, '{m.group(3)}' is not installed"),
+    (r"^el hash /(\w+) no existe en el store de Spack.*$",
+     lambda m: f"the hash /{m.group(1)} does not exist in the Spack store (nor is it documented in the context): it may be made up — check it with 'spack find -L <package>' before using it; if the package does not show up, it is not installed"),
+    (r"^'create_box' sin 'create_atoms' después.*$",
+     lambda m: "'create_box' without 'create_atoms' afterwards — the box stays empty, velocity/run fail (or run on 0 atoms) — add 'create_atoms N box' or 'read_data <file>'"),
+]
+
+
+def _tr_warn(w: str) -> str:
+    """Traduce al inglés las alertas automáticas más comunes cuando la interfaz está en inglés; el resto queda igual."""
+    if _LANG != "en":
+        return w
+    for rx, fn in _WARN_EN:
+        m = re.match(rx, w)
+        if m:
+            return fn(m)
+    return w
 
 
 FEEDBACK_PATH = DB_DIR / "feedback.jsonl"
@@ -2553,6 +2671,27 @@ _KNOWN_SLASH_COMMANDS = {"diagnose", "branch", "load", "save", "saveall",
                          "edit", "diff", "help", "audit", "queue",
                          "compact", "history", "new", "model", "run",
                          "workflow", "segments", "lang", "sources", "good", "bad", "email"}
+
+_STORE_HASH_CACHE = None
+
+
+def _store_hashes() -> dict:
+    """{prefijo de 7 caracteres del hash: nombre del paquete} del store real de Spack (una vez por sesión). Vacío si no hay spack."""
+    global _STORE_HASH_CACHE
+    if _STORE_HASH_CACHE is None:
+        _STORE_HASH_CACHE = {}
+        try:
+            env = dict(os.environ, SPACK_USER_CONFIG_PATH="/apps/local/spack/spack-2026b/user-config")
+            r = subprocess.run(["/apps/local/spack/spack-2026b/spack/bin/spack", "--disable-locks", "find", "-L"],
+                               capture_output=True, text=True, timeout=25, env=env)
+            for ln in r.stdout.splitlines():
+                m = re.match(r"^([a-z0-9]{32})\s+([\w.+-]+)@", ln)
+                if m:
+                    _STORE_HASH_CACHE[m.group(1)[:7]] = m.group(2)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return _STORE_HASH_CACHE
+
 
 def _known_hash_prefixes() -> set:
     """Hashes de spack documentados en context/*.txt (siempre escritos como '/xxxxxxx',
@@ -2942,6 +3081,48 @@ def _fix_sbatch(text: str) -> str:
                              f"'source /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env' "
                              f"(ya incluye numpy+scipy+matplotlib) o el hash exacto de cada uno")
                 break
+        # Bug real 26/10 (eval plumed): el modelo inventa hashes ("plumed@2.9.3/2a6kmkkm") de un paquete que NO está instalado.
+        # Se verifica contra los hashes documentados y, solo si hace falta, contra el store real (sin spack: no avisa).
+        _bad_hashes: "list[tuple[str, str, str]]" = []
+        for _ln in block.split("\n"):
+            if not _re.search(r'\bspack\b|\$SPACK', _ln) or not _re.search(r'\b(?:load|location)\b', _ln) or _ln.lstrip().startswith("#"):
+                continue
+            for _hm in _re.finditer(r'(?<![\w./@-])([\w.+~-]+(?:@[\w.+~-]+)?)?/([a-z0-9]{7,32})(?![\w/.-])', _ln):
+                _h = _hm.group(2)[:7]
+                _nm = _re.split(r'[@+~]', _hm.group(1) or "")[0]
+                if any(b[0] == _h for b in _bad_hashes):
+                    continue
+                _st = _store_hashes()
+                if not _st:
+                    continue
+                _mixed = any(c.isdigit() for c in _h) and any(c.isalpha() for c in _h)
+                if _h in _st:
+                    if _nm and _nm != _st[_h] and not _nm.startswith(("$", "-")):
+                        _bad_hashes.append((_h, _nm, _st[_h]))
+                elif _mixed and _h not in _known_hash_prefixes():
+                    _bad_hashes.append((_h, _nm, ""))
+        for _h, _nm, _owner in _bad_hashes:
+            if _owner and _nm not in set(_store_hashes().values()):
+                warns.append(f"'{_nm}' NO está instalado en este cluster (ningún paquete con ese nombre en el store; el hash /{_h} es de '{_owner}') — "
+                             f"no uses ese comando; avisá que no está disponible y que se lo pida a Gonzalo")
+            elif _owner:
+                warns.append(f"el hash /{_h} es de '{_owner}', no de '{_nm}': spack load no va a cargar lo que pedís — verificá con "
+                             f"'spack find -L {_nm}'; si no aparece, '{_nm}' no está instalado")
+            else:
+                warns.append(f"el hash /{_h} no existe en el store de Spack (ni está documentado en el contexto): puede estar inventado, "
+                             f"verificalo con 'spack find -L <paquete>' antes de usarlo; si el paquete no aparece, no está instalado")
+        # Bug real 21/10 (ales, ~40 jobs de Heat-Capacity): "spack load spack load lammps@..." -> el 2do
+        # 'spack load' se toma como NOMBRE de paquete y falla; el job sigue y 'lmp' sale del PATH del
+        # usuario (un lmp de DeePMD con TensorFlow en cada rank -> 134% CPU, mas cores que los pedidos).
+        if _re.search(r'\bspack\s+load\s+(?:--?\w[\w-]*\s+)*spack\s+load\b', block):
+            warns.append("'spack load spack load ...': el segundo 'spack load' se toma como nombre de paquete "
+                         "y falla (\"Spec 'spack' matches no installed packages\"); el job sigue igual y el "
+                         "programa (lmp, python...) sale del PATH del usuario: puede ser OTRO binario, con "
+                         "hilos de más. Dejar un solo 'spack load' (mejor con el hash exacto)")
+        if _re.search(r'\bspack\s+load\s+(?:--sh\s+)?lammps(?:@[\w.]+)?(?=\s|$|\))', block):
+            warns.append("'spack load lammps' sin hash es ambiguo (hay builds de CPU y de GPU: \"matches multiple "
+                         "packages\") y si falla el programa sale de otro lado del PATH — usar el hash exacto "
+                         "(spack location -i /hash, ver los hashes de LAMMPS en el contexto)")
         # Bug real 15/9 (probado en vivo con "pamware"→pamguard): apps GUI metidas
         # en un #SBATCH batch normal, sin avisar que necesitan pantalla. El contexto
         # solo (bioacustica.txt/casa.txt) no alcanzó para que el modelo lo evitara
@@ -3256,6 +3437,26 @@ def _fix_sbatch(text: str) -> str:
             block = _re.sub(r'(?m)^[ \t]*eval[ \t]+\$\(spack[ \t]+load[ \t]+--sh[ \t]+python\S*[ \t]*\)[ \t]*\n', '', block)
         return block
 
+    _RE_MASS_CP = _re.compile(
+        r'(?m)^([ \t]*)cp[ \t]+(?:-[\w-]+[ \t]+)*"?(?:\.\./?\*|\.\./?|~/\*|\$\{?HOME\}?/?\*?|/mnt/(?:cpu|gpu)-data/\$\{?USER\}?/?\*)"?[ \t]+\S+[^\n]*$')
+
+    def _fix_mass_copy(block: str) -> str:
+        """El modelo a veces 'trae' los archivos con 'cp -r ../* .': copia TODA la carpeta padre (o el home) al WORKDIR
+        (caso 25/10, job 19812: 1.1 TB copiados). Se quita y se deja un comentario visible."""
+        return _RE_MASS_CP.sub(lambda m: f"{m.group(1)}# gonzabot: se quitó una copia masiva de la carpeta padre/home al WORKDIR (copiá solo los archivos que usa el job)", block)
+
+    def _fix_missing_cd_workdir(block: str) -> str:
+        """Si el script crea WORKDIR (mkdir -p $WORKDIR) pero nunca entra (cd $WORKDIR), el job trabaja en la carpeta del
+        envío y deja WORKDIR vacío (caso demo 26/10). Se agrega '&& cd $WORKDIR'."""
+        if not _re.search(r'(?m)^[ \t]*WORKDIR=', block) or '--chdir' in block:
+            return block
+        if _re.search(r'\bcd[ \t]+"?\$\{?WORKDIR\b', block):
+            return block
+        m = _re.search(r'mkdir[ \t]+-p[ \t]+"?\$\{?WORKDIR\}?"?', block)
+        if not m:
+            return block
+        return block[:m.end()] + " && cd $WORKDIR" + block[m.end():]
+
     _RE_GMX_INVOKE = _re.compile(r'^([ \t]*)(?:mpirun[^\n]*?\s|srun[^\n]*?\s)?gmx(?:_mpi)?\s+\w', _re.M)
     _RE_GMX_ENV = _re.compile(
         r'GROMACS_DIR|spack\s+load\b[^\n]*gromacs|location\s+-i\s+/humbjkf|'
@@ -3448,7 +3649,9 @@ def _fix_sbatch(text: str) -> str:
             body = _fix_dollar_escapes(body)
             body = _fix_module_load(body)
             body = _fix_missing_python_env(body)
+            body = _fix_missing_cd_workdir(body)
             body = _fix_py_script_paths(body)
+            body = _fix_mass_copy(body)
             body = _fix_spack_cache_and_redundant_load(body)
             body = _fix_bare_spack_load_sh(body)
             body = _fix_spack_load_aliases(body)
@@ -3605,6 +3808,7 @@ def _selftest() -> int:
         results.append((name, bool(cond)))
 
     globals()["_EXACT_TOKENS_ON"] = False   # el selftest nunca toca la red
+    globals()["_STORE_HASH_CACHE"] = {}   # el selftest no depende del store real de Spack (CI no lo tiene)
 
     _rf = _refence_bare_script("#!/bin/bash\n#SBATCH -n 1\n\noctave x.m\n\nEste script resuelve el sistema con Octave hoy.")
     _t("script sin valla se re-cerca", _rf.startswith("```bash\n#!/bin/bash") and "octave x.m\n```" in _rf and _rf.rstrip().endswith("hoy."))
@@ -3664,6 +3868,8 @@ def _selftest() -> int:
     _pq = _parse_queue("cpu*|RUNNING\ncpu*|PENDING\ngpu|RUNNING\n")
     _t("cola: cuenta corriendo y esperando por partición", _pq == {"cpu": [1, 1], "gpu": [1, 0]})
     _qc = globals()["_QUEUE_CACHE"]
+    _sm_q = globals()["_SLURM_MODE"]
+    globals()["_SLURM_MODE"] = "full"   # estos tests cubren el camino con squeue global (modo full)
     try:
         globals()["_QUEUE_CACHE"] = (0.0, "")
         globals()["_slurm_run"] = lambda argv, timeout=4, cwd=None: (0, "cpu|RUNNING\ncpu|PENDING\n", "")
@@ -3679,6 +3885,7 @@ def _selftest() -> int:
     finally:
         globals()["_slurm_run"] = _sr_real
         globals()["_QUEUE_CACHE"] = _qc
+        globals()["_SLURM_MODE"] = _sm_q
     _t("/sources /good /bad registrados", all(c in _SLASH_CMDS for c in ("/sources", "/good", "/bad")) and {"sources", "good", "bad"} <= _KNOWN_SLASH_COMMANDS)
     _cx = globals()["_CTX"]
     try:
@@ -3900,6 +4107,80 @@ def _selftest() -> int:
        "spack load --sh python" not in _r25 and "numpy.env" in _r25 and "setup-env.sh" in _r25)
     _r25 = _fix_sbatch(B.format("eval $(spack load --sh python@3.14.5)\npython3 -c 'print(1)'"))
     _t("sin env file, el spack load de python se respeta", "spack load --sh python" in _r25)
+    _r27 = _fix_sbatch(B.format("spack load openmpi@5.0.8\nspack load spack load lammps@20250722.4/mgsqgyo\nmpirun lmp -in in.LJ"))
+    _t("lint: 'spack load spack load' duplicado se avisa (caso ales 21/10, lmp de DeePMD en el PATH)", "spack load spack load" in _r27 and "⚠" in _r27)
+    _r27 = _fix_sbatch(B.format("spack load lammps@20250722.4\nmpirun lmp -in in.LJ"))
+    _t("lint: 'spack load lammps@version' sin hash se avisa como ambiguo", "sin hash es ambiguo" in _r27)
+    _r27 = _fix_sbatch(B.format("spack load lammps@20250722.4/mgsqgyo\nmpirun lmp -in in.LJ"))
+    _t("lint: 'spack load lammps@version/hash' correcto no genera aviso", "ambiguo" not in _r27 and "spack load spack" not in _r27)
+    _r28 = _fix_sbatch(B.format("cd $WORKDIR\ncp \"$SLURM_SUBMIT_DIR\"/a.py .\ncp -r ../* .\ncp -r ../datos .\ncp -a $HOME/* ./\npython3 a.py"))
+    _t("cp masivo de la carpeta padre/home al WORKDIR se elimina (caso 19812, 1.1 TB)", "cp -r ../* ." not in _r28 and "cp -a $HOME/*" not in _r28 and "gonzabot: se quitó" in _r28)
+    _t("cp de un archivo/subcarpeta concreta se respeta", 'cp "$SLURM_SUBMIT_DIR"/a.py .' in _r28 and "cp -r ../datos ." in _r28)
+    _lang_bak29 = globals()["_LANG"]
+    globals()["_LANG"] = "en"
+    try:
+        _t("alerta de 'module load' se traduce al inglés cuando la interfaz está en inglés",
+           _tr_warn("'module load python/3.11' no existe en este cluster (sin Lmod) — usar spack: $SPACK --disable-locks location -i /hash").startswith("'module load python/3.11' does not exist on this cluster"))
+        _t("alerta sin traducción conocida queda igual", _tr_warn("algo raro 123") == "algo raro 123")
+        globals()["_LANG"] = "es"
+        _t("en español la alerta no se toca", _tr_warn("'module load x' no existe en este cluster (sin Lmod) — usar spack: y").startswith("'module load x' no existe"))
+    finally:
+        globals()["_LANG"] = _lang_bak29
+    _t("_fmt_dur: segundos, minutos y horas", _fmt_dur(2) == "2 s" and _fmt_dur(600) == "10 min" and _fmt_dur(7200) == "2.0 h")
+    _t("_resource_tip: un job de segundos no dice '0.0 h'", "0.0 h" not in _resource_tip({"time_s": 3600}, [(2, 0.0)]) and "2 s" in _resource_tip({"time_s": 3600}, [(2, 0.0)]))
+    _sh_bak31 = globals()["_STORE_HASH_CACHE"]
+    globals()["_STORE_HASH_CACHE"] = {"humbjkf": "gromacs", "abc1234": "gromacs", "2a6kmkk": "admixture"}
+    try:
+        _r31 = _fix_sbatch(B.format("eval $(spack load --sh plumed@2.9.3/2a6kmkkm gromacs@2024.3/humbjkf)\ngmx_mpi mdrun -plumed plumed.dat"))
+        _t("hash de OTRO paquete en 'spack load name@ver/hash' se avisa (caso plumed 26/10: /2a6kmkkm es de admixture)",
+           "'plumed' NO está instalado en este cluster" in _r31 and "/2a6kmkk" in _r31 and "/humbjkf" not in _r31.split("⚠")[-1])
+        _r31 = _fix_sbatch(B.format("SPACK=/x/spack\nG=$($SPACK location -i /abc1234)\n$G/bin/gmx --version"))
+        _t("hash que sí está en el store real no genera aviso", "no existe en el store" not in _r31 and " es de " not in _r31)
+        _r31 = _fix_sbatch(B.format("eval $(spack load --sh gromacs@2024.3+mpi/humbjkf)"))
+        _t("nombre con variantes (gromacs@ver+mpi/hash) coincide con el dueño: sin aviso", "⚠" not in _r31)
+        _r31 = _fix_sbatch(B.format("eval $(spack load --sh foo@1.0/zzz9999)"))
+        _t("hash que no está en el store ni en el contexto se avisa como inexistente", "/zzz9999 no existe en el store" in _r31)
+        globals()["_STORE_HASH_CACHE"] = {}
+        _r31 = _fix_sbatch(B.format("eval $(spack load --sh plumed@2.9.3/2a6kmkkm)"))
+        _t("sin spack (store vacío) no se puede verificar: no avisa", "⚠" not in _r31)
+    finally:
+        globals()["_STORE_HASH_CACHE"] = _sh_bak31
+    _sh2_31 = globals()["_STORE_HASH_CACHE"]
+    globals()["_STORE_HASH_CACHE"] = {"2a6kmkk": "admixture", "humbjkf": "gromacs"}
+    try:
+        _r31 = _fix_sbatch(B.format("eval $(spack load --sh plumed@2.9.3/2a6kmkkm)"))
+        _t("paquete que no existe en el store (plumed) con hash de otro: avisa que NO está instalado", "'plumed' NO está instalado en este cluster" in _r31)
+        _r31 = _fix_sbatch(B.format("eval $(spack load --sh admixture@1.4.0/humbjkf)"))
+        _t("paquete que sí existe pero con hash de otro: avisa del hash equivocado", "es de 'gromacs', no de 'admixture'" in _r31)
+    finally:
+        globals()["_STORE_HASH_CACHE"] = _sh2_31
+    _r36 = _fix_sbatch(B.format("WORKDIR=/mnt/cpu-data/$USER/x_$SLURM_JOB_ID; mkdir -p $WORKDIR\npython3 a.py"))
+    _t("WORKDIR creado pero sin cd: se agrega '&& cd $WORKDIR' (demo 26/10)", "mkdir -p $WORKDIR && cd $WORKDIR" in _r36)
+    _r36 = _fix_sbatch(B.format("WORKDIR=/mnt/cpu-data/$USER/x_$SLURM_JOB_ID\nmkdir -p $WORKDIR\ncd $WORKDIR\npython3 a.py"))
+    _t("WORKDIR con cd propio: no se duplica", _r36.count("cd $WORKDIR") == 1)
+    _r36 = _fix_sbatch(B.format("WORKDIR=/mnt/cpu-data/$USER/x\nmkdir -p $WORKDIR && cd $WORKDIR\npython3 a.py"))
+    _t("'mkdir && cd' en la misma línea: no se toca", _r36.count("cd $WORKDIR") == 1)
+    _t("placeholder solo dentro de un comentario no bloquea el envío (demo 26/10)",
+       _project_ready([("bash", "#!/bin/bash\n#SBATCH -n 1\n# $PYTHON /path/to/your/script.py\npython3 a.py", "")]))
+    _t("placeholder en una línea de código sí lo bloquea",
+       not _project_ready([("bash", "#!/bin/bash\n#SBATCH -n 1\npython3 /path/to/your/script.py", "")]))
+    _mode38 = globals()["_SLURM_MODE"]; _qc38 = globals()["_QUEUE_CACHE"]; _run38 = globals()["_slurm_run"]; _calls38: list = []
+    try:
+        globals()["_slurm_run"] = lambda argv, timeout=4, cwd=None: (_calls38.append(argv[0]) or (0, "cpu*|10/90/0/100\ngpu|1/3/0/4\n", ""))
+        for _m38 in ("light", "full", "off"):
+            globals()["_SLURM_MODE"] = _m38; globals()["_QUEUE_CACHE"] = (0.0, ""); _calls38.clear()
+            _h38 = _queue_hint()
+            if _m38 == "light":
+                _t("modo light: la carga sale de sinfo (nunca del squeue global)", _calls38 == ["sinfo"] and "cpu: 10/100 CPUs" in _h38)
+            elif _m38 == "full":
+                _t("modo full: se conserva el squeue global anterior", _calls38 == ["squeue"])
+            else:
+                _t("modo off: no consulta Slurm", _calls38 == [] and _h38 == "")
+        globals()["_SLURM_MODE"] = "off"; _calls38.clear()
+        _t("modo off: sin aviso de jobs fallidos ni --test-only", _recent_failed_jobs() == [] and _sbatch_test_only("x.sbatch", ".") is None and _calls38 == [])
+        _t("_parse_sinfo_load interpreta A/I/O/T", _parse_sinfo_load("cpu*|10/90/0/100") == {"cpu": [10, 100]})
+    finally:
+        globals()["_SLURM_MODE"] = _mode38; globals()["_QUEUE_CACHE"] = _qc38; globals()["_slurm_run"] = _run38
     _t("si YA está sourceado numpy.env, no se duplica la línea",
        r.count("source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env") == 1)
     r = _fix_sbatch(B.format("python3 script_sin_numpy.py"))
@@ -5793,9 +6074,9 @@ def stream_response(messages: list[dict], max_tokens: int = 8000, silent: bool =
     if _pp_warns and not silent:
         for _w in dict.fromkeys(_pp_warns):
             if _console is not None:
-                _console.print(f" ⚠ {_w}", style="yellow", markup=False)
+                _console.print(f" ⚠ {_tr_warn(_w)}", style="yellow", markup=False)
             else:
-                print(_c(YEL, f" ⚠ {_w}"))
+                print(_c(YEL, f" ⚠ {_tr_warn(_w)}"))
         if _console is not None:
             _console.print()
         else:
@@ -6883,7 +7164,8 @@ def repl(new_session: bool = False):
                         "cluster (el python de `spack load python` pelado no trae numpy/scipy/"
                         "pandas/matplotlib). La corrección es agregar, antes de llamar a python3, "
                         "la línea `source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env`. "
-                        "NO propongas cambiar python3 por python ni instalar con pip.")
+                        "NO propongas cambiar python3 por python ni instalar con pip. Explicá en 2 frases por qué "
+                        "falla y mostrá la línea a agregar en un bloque de código.")
                 # Bug real 5/9: "CANCELLED ... DUE TO SIGNAL" en el log es Slurm matando
                 # el job desde AFUERA (casi siempre preempción real de scavenger, o un
                 # scancel manual) — NO tiene relación con warnings benignos del programa
@@ -6937,9 +7219,11 @@ def repl(new_session: bool = False):
                 # (un job fallado no necesita reglas de numpy/pandas).
                 _diag_probe = log_content + "\n" + original_script
                 _diag_sys = {"role": "system", "content":
-                             "Sos un asistente de HPC. Analizá logs de Slurm y respondé en español, "
-                             "directo y corto. Las soluciones DEBEN respetar las reglas de este cluster:\n"
-                             + _ctx_for_probe(_diag_probe, include_python=False)}
+                             "Sos un asistente de HPC. Analizá logs de Slurm y respondé en "
+                             + ("español" if _LANG == "es" else "inglés (English)")
+                             + ", directo y corto. Las soluciones DEBEN respetar las reglas de este cluster:\n"
+                             + _ctx_for_probe(_diag_probe, include_python=False)
+                             + (_LANG_REMINDER_SUFFIX if _LANG != "es" else "")}
                 messages_diag = [_diag_sys, {"role": "user", "content": diag_msg}]
                 save_message(con, session_id, "user", diag_msg)
                 try:
@@ -7616,7 +7900,8 @@ def repl(new_session: bool = False):
                         if _load_warns:
                             print(_c(YEL, _tr("\nDetección automática (sin esperar al modelo):", "\nAutomatic detection (without waiting for the model):")))
                             for w in dict.fromkeys(_load_warns):
-                                print(_c(YEL, f"  {w}"))
+                                print(_c(YEL, f"  ⚠ {_tr_warn(w[2:])}"))
+                            print(_c(DIM, _tr("  Pedile «arreglalo para este cluster» y te lo adapta.", "  Ask «fix it for this cluster» and it will adapt it.")))
                 except RuntimeError as e:
                     print(_c(RED, f"Error: {e}"))
 
@@ -8147,7 +8432,7 @@ def repl(new_session: bool = False):
     # contexto de la conversación, eso ya lo hace /clear) antes del mensaje final.
     sys.stdout.write("\x1b[2J\x1b[H")
     sys.stdout.flush()
-    print(_c(DIM, "Hasta luego."))
+    print(_c(DIM, _tr("Hasta luego.", "Goodbye.")))
     con.close()
 
 
