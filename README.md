@@ -256,6 +256,10 @@ A typical session (start, one queue question, two submissions) issues about 8 Sl
 mode, none of them an unfiltered `squeue`, versus 10 (3 unfiltered) before. The package list that is read at start (`spack find`)
 is cached for 30 minutes per user. The language model runs on its own GPU node (vLLM), not on the login node.
 
+Example: `GONZABOT_SLURM_QUERIES=off ./gonzabot` (or set it once for every user in a site-wide wrapper script). In `light` mode the
+line shown before a submission reports CPU load per partition (for example `cpu: 10/100 CPUs busy`, from `sinfo`) instead of
+running/waiting job counts, because those would need the cluster-wide `squeue`.
+
 ## Configuration
 
 `context/core.txt` (always loaded) plus the per-software-family segments

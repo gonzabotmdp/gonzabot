@@ -181,6 +181,10 @@ Una sesión típica (arranque, una pregunta sobre la cola y dos envíos) hace un
 sin filtrar, contra 10 (3 sin filtrar) antes. La lista de paquetes que se lee al arrancar (`spack find`) se cachea 30 minutos por usuario.
 El modelo de lenguaje corre en su propio nodo GPU (vLLM), no en el nodo de login.
 
+Ejemplo: `GONZABOT_SLURM_QUERIES=off ./gonzabot` (o definirlo una vez para todos los usuarios en un script envoltorio del sitio). En
+modo `light` la línea que se muestra antes de un envío indica la carga de CPUs por partición (por ejemplo `cpu: 10/100 CPUs ocupados`,
+sale de `sinfo`) y no la cantidad de jobs corriendo/esperando, porque eso requeriría el `squeue` global del cluster.
+
 ## Configuración
 
 `context/core.txt` (siempre cargado) más los segmentos por familia de
