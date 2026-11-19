@@ -1714,30 +1714,62 @@ def _yn_line(prompt_text: str) -> bool:
     return line in ("s", "y", "si", "sí", "yes")
 
 
+_PROBE_HOSTS = True   # el selftest lo apaga: nunca toca la red
+
+
+def _health_ok(host: str, timeout: float = 1.5) -> bool:
+    try:
+        with urlopen(Request(f"http://{host}/health", method="GET"), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def _resolve_vllm_host() -> str:
-    """Bug real 8/10 (Gonzalo: "ayer no cargaba"): desde que inference corre
-    en cualquiera de los dos chasis (gpu-01 O gpu-02, fix 1/10), VLLM_BASE
-    seguia hardcodeado a gpu-01 en el health check Y en las requests reales
-    de chat. Cuando Slurm agendaba el job real en gpu-02 (le paso a los
-    jobs 17546/17549 el 6/10, confirmado en sus .err: "JOB ... ON gpu-02"),
-    el cliente esperaba salud en el nodo EQUIVOCADO los 5 minutos completos
-    y tiraba timeout -- aunque el servicio real arrancaba bien y rapido
-    (<1 min) en el otro nodo. sacct estaba caido ese dia (bug ya conocido,
-    ver otra nota en este archivo), el unico rastro quedo en el .err del
-    job mismo. Por eso se usa squeue (al controlador, no a slurmdbd) para
-    encontrar el nodo real antes de cada chequeo de salud."""
+    """Nodo donde corre vLLM (puede ser gpu-01 o gpu-02; el job se agenda donde haya lugar).
+
+    Bug real 18/11 (usuaria nueva: "timeout, el cliente reintentaba cada 10 s" con el servicio sano desde 9 min antes): el nodo se
+    descubría solo con squeue, pero el cluster tiene PrivateData=jobs y el job vllm-service es de otra cuenta: un usuario común NO lo
+    ve, squeue devuelve vacío y el cliente caía a gpu-01 aunque el servicio estuviera en gpu-02. Ahora se prueba la salud de cada
+    candidato (squeue, el configurado, gpu-01, gpu-02) y se usa el primero que contesta; si ninguno contesta se devuelve el primero
+    (igual que antes). En dev no se toca nada."""
+    default = urlparse(VLLM_BASE).netloc
     if _DEV_MODE:
-        return urlparse(VLLM_BASE).netloc
+        return default
+    cands = []
     try:
         out = subprocess.run(
             ["squeue", "-h", "-n", "vllm-service", "-t", "RUNNING", "-o", "%N"],
             capture_output=True, text=True, timeout=3).stdout.strip()
         node = out.splitlines()[0].strip() if out else ""
         if node:
-            return f"{node}:8000"
+            cands.append(f"{node}:8000")
     except Exception:
         pass
-    return urlparse(VLLM_BASE).netloc
+    for h in (default, "gpu-01:8000", "gpu-02:8000"):
+        if h not in cands:
+            cands.append(h)
+    if not _PROBE_HOSTS:
+        return cands[0]
+    for h in cands:
+        if _health_ok(h):
+            return h
+    return cands[0]
+
+
+def _vllm_start_state(path=None):
+    """(job, minutos) si vllm-service arrancó hace poco y todavía no contesta, o None. Lo escribe el propio job al empezar
+    (vllm.jobid, legible por todos), así que sirve a cualquier usuario aunque squeue no le muestre el job."""
+    import time as _tm
+    p = Path(path) if path else START_REQUEST.parent.parent / "vllm.jobid"
+    try:
+        age = _tm.time() - p.stat().st_mtime
+        job = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if job.isdigit() and age < 25 * 60:
+        return job, int(age // 60)
+    return None
 
 
 def _check_online() -> bool:
@@ -1768,7 +1800,7 @@ _TIPS = [
     "/load ~/scripts/*.sh carga todos los archivos de un directorio de una vez",
     "/history muestra tus últimas conversaciones para retomar donde las dejaste",
     "el bot recuerda los últimos 30 mensajes (~15 turnos) de la sesión actual",
-    "si el servicio no responde: squeue -p inference  para ver si está corriendo",
+    "si el servicio no responde, esperá 2-3 min: arranca a pedido y se apaga solo tras 30 min sin uso",
     "¿no te acordás de un comando? escribí /help y te los muestro todos",
 ]
 
@@ -2338,6 +2370,18 @@ _RE_SPACK = re.compile(
 # Registro de segmentos de contexto: (nombre_archivo, regex_trigger|None).
 # "core" (trigger=None) se carga siempre. El resto solo si su regex matchea
 # el mensaje actual + historial reciente (o los logs, para /diagnose).
+# transferencia.txt: subir/bajar datos grandes y entrar a la wiki/Nextcloud (pedido real 6/11/2026: el bot recomendaba scp/rsync
+# a ql-front, que llena la caché del cgroup y arbiter2 la cuenta como memoria -> penalización).
+_RE_TRANSFER = re.compile(
+    r'\bscp\b|\brsync\b|\bsftp\b|filezilla|winscp|\bfastq|datos\s+grandes|nextcloud|\bwiki\b|\barbiter2?\b|'
+    r'uso\s+excesivo|\bpenalty\d?\b|penalizaci[oó]n|http[.\s]?server|cl-externos|\bsoy\s+externo|'
+    r'srun.{0,40}(?:no\s+arranca|se\s+congela|congelad|suspendid)|sesi[oó]n.{0,30}(?:congela|suspend)|'
+    r'(?:subir|subo|pasar|pasarle|mandar|enviar|copiar|cargar|llevar)\s+(?:los\s+|mis\s+|unos\s+|\d+\s*[gmt]b\s+(?:de\s+)?)?'
+    r'(?:archivos?|datos|carpetas?|im[aá]genes|muestras|resultados|trayectorias|secuencias|fastq)|'
+    r'transferi(?:r|rlos)|transferencia\s+de\s+(?:archivos|datos)|'
+    r'(?:descargar|bajar)\s+(?:los\s+|mis\s+)?(?:datos|archivos)\s+(?:al|en\s+el|a\s+la)\s+(?:cluster|servidor)',
+    re.IGNORECASE
+)
 _SEGMENTS: list[tuple[str, "re.Pattern[str] | None"]] = [
     ("core", None),
     ("spack", _RE_SPACK),
@@ -2354,6 +2398,7 @@ _SEGMENTS: list[tuple[str, "re.Pattern[str] | None"]] = [
     ("sci-tools", _RE_SCITOOLS),
     ("power-save", _RE_POWERSAVE),
     ("benchmarks", _RE_BENCHMARKS),
+    ("transferencia", _RE_TRANSFER),
 ]
 
 
@@ -3110,9 +3155,13 @@ def _fix_sbatch(text: str) -> str:
         # así que hace falta atraparlo determinísticamente, no confiar en que
         # siempre elija bien.
         _bare_ambiguous = {"py-numpy", "py-scipy", "py-matplotlib", "py-pandas"}
-        for m in _re.finditer(r'\bspack\s+load\s+(?:--sh\s+)?([\w\s.-]+)', block):
-            _pkgs = set(m.group(1).split())
+        for m in _re.finditer(r'\bspack\s+load\s+(?:--sh\s+)?([^\n;&|]+)', block):
+            _pkgs = set(m.group(1).split())          # "py-pandas@3.0.5" y "%gcc@14.2.0" NO coinciden: solo el nombre pelado
             _hit = _pkgs & _bare_ambiguous
+            if _hit == {"py-pandas"}:
+                warns.append("'spack load py-pandas' bare falla (\"matches multiple packages\": builds aocc/gcc y varias versiones) — usar "
+                             "'spack load py-pandas@3.0.5 %gcc@14.2.0' (hash /mfspuva); pandas NO está en numpy.env/scipy.env/matplotlib.env")
+                break
             if _hit:
                 warns.append(f"'spack load {' '.join(sorted(_hit))}' bare falla o es "
                              f"ambiguo (py-numpy/py-scipy dan 'matches multiple packages', "
@@ -3432,6 +3481,44 @@ def _fix_sbatch(text: str) -> str:
         r'\$\{?SPACK\}?\s+load\b.*(?:numpy|scipy|matplotlib|pandas)|'
         r'conda\s+activate|source\s+\S*/bin/activate', _re.M | _re.I)
 
+    _RE_IMPORTS_PANDAS = _re.compile(r'(?:^|[\s"\';])(?:import|from)\s+pandas\b', _re.M)
+    _RE_IMPORTS_MPL = _re.compile(r'(?:^|[\s"\';])(?:import|from)\s+matplotlib\b', _re.M)
+    _RE_IMPORTS_SCIPY = _re.compile(r'\bscipy\b')   # cualquier mención: caso no verificado, no se toca
+
+    def _fix_pandas_env(block: str) -> str:
+        """Verificado el 16/11 con jobs reales: pandas NO está en numpy.env/scipy.env/matplotlib.env (ModuleNotFoundError). Un script que
+        importa pandas se arregla con `spack load py-pandas@3.0.5 %gcc@14.2.0` (+ py-matplotlib@3.10.9 si usa matplotlib; no elegir numpy
+        a mano). Reemplaza el `source .../envs/*.env` o lo agrega antes del primer python, y cambia $PYTHON por python3. Si el script
+        también importa scipy no se toca (ese caso no está verificado)."""
+        txts = [block]
+        for m in _RE_PY_SCRIPT_ARG.finditer(block):
+            sp = _resolve_py_script(m.group(1))
+            if sp is not None:
+                try:
+                    txts.append(sp.read_text(encoding='utf-8', errors='ignore')[:50000])
+                except OSError:
+                    pass
+        allt = "\n".join(txts)
+        if not _RE_IMPORTS_PANDAS.search(allt) or _RE_IMPORTS_SCIPY.search(allt):
+            return block
+        if _re.search(r'spack\s+load\b[^\n]*py-pandas', block):
+            return block
+        load = "spack load py-pandas@3.0.5 %gcc@14.2.0" + (" py-matplotlib@3.10.9 %gcc@14.2.0" if _RE_IMPORTS_MPL.search(allt) else "")
+        setup = "source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh"
+        has_setup = bool(_re.search(r'spack/share/spack/setup-env\.sh', block))
+        env_line = _re.compile(r'^([ \t]*)source\s+\S*/envs/(?:numpy|scipy|matplotlib)\.env[^\n]*\n', _re.M)
+        m = env_line.search(block)
+        if m:
+            ind = m.group(1)
+            block = block[:m.start()] + ("" if has_setup else f"{ind}{setup}\n") + f"{ind}{load}\n" + block[m.end():]
+        else:
+            m2 = _RE_PYTHON_INVOKE.search(block)
+            if not m2:
+                return block
+            ind = m2.group(1)
+            block = block[:m2.start()] + ("" if has_setup else f"{ind}{setup}\n") + f"{ind}{load}\n" + block[m2.start():]
+        return _re.sub(r'\$\{?PYTHON\}?(?=\s)', 'python3', block)
+
     def _fix_missing_python_env(block: str) -> str:
         """Bug real 8/10 (caso real: multiplicacion_matrices.sbatch, job 17750):
         el modelo genera "python3 << EOF\\nimport numpy as np..." sin activar
@@ -3687,6 +3774,7 @@ def _fix_sbatch(text: str) -> str:
             body = _fix_heredoc_quotes(body)
             body = _fix_dollar_escapes(body)
             body = _fix_module_load(body)
+            body = _fix_pandas_env(body)
             body = _fix_missing_python_env(body)
             body = _fix_missing_cd_workdir(body)
             body = _fix_py_script_paths(body)
@@ -3847,10 +3935,59 @@ def _selftest() -> int:
         results.append((name, bool(cond)))
 
     globals()["_EXACT_TOKENS_ON"] = False   # el selftest nunca toca la red
+    globals()["_PROBE_HOSTS"] = False       # idem: no probar la salud de gpu-01/gpu-02
     globals()["_STORE_HASH_CACHE"] = {}   # el selftest no depende del store real de Spack (CI no lo tiene)
     import tempfile as _tf_run
     globals()["_RUN_DIR"] = Path(_tf_run.mkdtemp(prefix="gonzabot-selftest-run-"))   # nunca escribir datos de prueba en el cache compartido real
 
+    # CONTRATO CON LA WEB (Open WebUI): la función "GonzaBot" de la web carga este archivo como módulo y usa estos nombres.
+    # Si se renombra o cambia la firma de alguno, la web se rompe sin aviso: este chequeo lo hace fallar acá primero.
+    import inspect as _insp
+    _web_funcs = ["_user_email", "_fit_messages", "_system_prompt_for", "_strip_fake_system_notes", "_run_dynamic_context",
+                  "_resolve_vllm_host", "_lint_ntasks", "_init_context", "_html_to_text", "_fix_sbatch",
+                  "_extract_code_blocks_from_text", "_diag_system_message", "_diag_build_message", "_build_request", "_ThinkFilter"]
+    _web_vars = ["_USERNAME", "_CTX_DYNAMIC", "START_REQUEST", "_MODEL_CTX_TOKENS", "VLLM_BASE"]
+    _t("contrato web: existen y son invocables " + str(len(_web_funcs)) + " funciones que usa la web",
+       all(callable(globals().get(_n)) for _n in _web_funcs))
+    _t("contrato web: existen las " + str(len(_web_vars)) + " variables que usa la web", all(_n in globals() for _n in _web_vars))
+    def _params(_f):
+        return list(_insp.signature(globals()[_f]).parameters)
+    _t("contrato web: firma de _fit_messages(messages, max_tokens, ctx_tokens)", _params("_fit_messages")[:3] == ["messages", "max_tokens", "ctx_tokens"])
+    _t("contrato web: firma de _system_prompt_for(user_message, history)", _params("_system_prompt_for")[:2] == ["user_message", "history"])
+    _t("contrato web: firma de _diag_build_message(job_id, logs, original_script, job_qos, fail_flags)",
+       _params("_diag_build_message") == ["job_id", "logs", "original_script", "job_qos", "fail_flags"])
+    _t("contrato web: firma de _diag_system_message(log_content, original_script)", _params("_diag_system_message") == ["log_content", "original_script"])
+    _t("contrato web: firma de _build_request(messages, max_tokens)", _params("_build_request")[:2] == ["messages", "max_tokens"])
+    _t("contrato web: _ThinkFilter.feed/flush devuelven (contenido, razonamiento)",
+       _ThinkFilter().feed("hola") == ("hola", "") and _ThinkFilter().flush() == ("", ""))
+    _t("contrato web: _extract_code_blocks_from_text devuelve (lang, líneas, título)",
+       (lambda _r: len(_r) == 1 and len(_r[0]) == 3 and _r[0][0] == "bash" and isinstance(_r[0][1], list) and "echo 1" in "\n".join(_r[0][1]))(
+           _extract_code_blocks_from_text("```bash\necho 1\n```")))
+    _t("contrato web: _init_context(), _CTX_DYNAMIC y _user_email() se pueden reemplazar sin romper (la web los parchea)",
+       isinstance(globals().get("_CTX_DYNAMIC"), str) and isinstance(_user_email(), str))
+    _PB = "```bash\n#!/bin/bash\n#SBATCH -n 1\n{}\n```"
+    _r = _fix_sbatch(_PB.format("source /mnt/cpu-data/shared/ifimar-ai/envs/matplotlib.env\n$PYTHON -c \"import pandas as pd; print(pd.__version__)\""))
+    _t("pandas: se reemplaza matplotlib.env por spack load py-pandas verificado y $PYTHON por python3",
+       "spack load py-pandas@3.0.5 %gcc@14.2.0" in _r and "matplotlib.env" not in _r and "$PYTHON" not in _r and "setup-env.sh" in _r)
+    _r = _fix_sbatch(_PB.format("python3 << 'EOF'\nimport pandas as pd\nimport matplotlib.pyplot as plt\nEOF"))
+    _t("pandas+matplotlib sin entorno: se agregan setup de spack y los dos spack load verificados",
+       "py-pandas@3.0.5 %gcc@14.2.0 py-matplotlib@3.10.9 %gcc@14.2.0" in _r and "numpy.env" not in _r)
+    _r = _fix_sbatch(_PB.format("source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh\nspack load py-pandas@3.0.5 %gcc@14.2.0\npython3 -c \"import pandas\""))
+    _t("pandas: si ya carga py-pandas con versión no se duplica ni se avisa como bare",
+       _r.count("spack load py-pandas") == 1 and "bare falla" not in _r)
+    _r = _fix_sbatch(_PB.format("python3 << 'EOF'\nimport numpy as np\nprint(np.zeros(3))\nEOF"))
+    _t("numpy solo sigue usando numpy.env (el arreglo de pandas no lo toca)", "numpy.env" in _r and "py-pandas" not in _r)
+    _r = _fix_sbatch(_PB.format("source /mnt/cpu-data/shared/ifimar-ai/envs/scipy.env\n$PYTHON -c \"import pandas, scipy\""))
+    _t("pandas+scipy no se reescribe (caso no verificado)", "scipy.env" in _r and "py-pandas@3.0.5" not in _r)
+    _dm, _dl = _diag_build_message("1", ["### a.err (stderr)\nslurmstepd: error: Detected 1 oom_kill event"], "", "normal", {"oom_kill"})
+    _t("_diag_build_message: OOM -> advertencia determinística obligatoria", "DETECCIÓN AUTOMÁTICA" in _dm and "oom_kill" in _dm and "NUNCA digas" in _dm)
+    _dm, _ = _diag_build_message("2", ["### a.out\nslurmstepd: error: *** JOB 2 ON n1 CANCELLED AT 2026-10-30T10:00:00 DUE TO SIGNAL Terminated ***"], "", "scavenger", set())
+    _t("_diag_build_message: preempción scavenger no se atribuye a un bug", "PREEMPCIÓN" in _dm)
+    _dm, _ = _diag_build_message("3", ["### a.err\nModuleNotFoundError: No module named 'numpy'"], "#!/bin/bash\npython3 x.py", "normal", set())
+    _t("_diag_build_message: numpy -> pide cargar numpy.env y el script va en el mensaje", "numpy.env" in _dm and "Script sbatch original" in _dm)
+    _dm, _ = _diag_build_message("4", ["### a.out\nterminó"], "", "normal", set())
+    _t("_diag_build_message: log limpio -> sin advertencias", "DETECCIÓN AUTOMÁTICA" not in _dm and "Logs del job 4" in _dm)
+    _t("_diag_system_message: incluye reglas del cluster", _diag_system_message("x", "")["content"].startswith("Sos un asistente de HPC"))
     _rf = _refence_bare_script("#!/bin/bash\n#SBATCH -n 1\n\noctave x.m\n\nEste script resuelve el sistema con Octave hoy.")
     _t("script sin valla se re-cerca", _rf.startswith("```bash\n#!/bin/bash") and "octave x.m\n```" in _rf and _rf.rstrip().endswith("hoy."))
     _t("respuesta con valla intacta", _refence_bare_script("a\n```bash\n#!/bin/bash\n```") == "a\n```bash\n#!/bin/bash\n```")
@@ -4957,6 +5094,15 @@ def _selftest() -> int:
 
     # benchmarks (1/10): extraído de core.txt -- antes se mandaba SIEMPRE,
     # ahora solo si preguntan por récords/TFLOPS puntualmente.
+    for _q in ("¿cómo subo 50 GB de fastq.gz al cluster?", "¿puedo usar scp?", "me llegó un aviso de uso excesivo de arbiter2 subiendo archivos",
+               "no puedo entrar a la wiki con mi mail", "quiero pasar mis datos al cluster con rsync", "cómo entro a nextcloud",
+               "hay que transferir unas carpetas grandes", "mandar los archivos de la PC"):
+        _t("_RE_TRANSFER matchea: " + _q, bool(_RE_TRANSFER.search(_q)))
+    for _q in ("soy externo, el srun cpu no arranca", "mi sesión srun en scavenger se congela", "¿dónde abro el http.server?"):
+        _t("_RE_TRANSFER matchea (caso externos): " + _q, bool(_RE_TRANSFER.search(_q)))
+    for _q in ("armame un sbatch de LAMMPS con 32 cores", "hay que subir el --mem del job", "mi job está en pending",
+               "cómo corro quantum espresso en gpu", "qué es la partición scavenger"):
+        _t("_RE_TRANSFER NO matchea (evita ruido): " + _q, not _RE_TRANSFER.search(_q))
     _t("_RE_BENCHMARKS: 'cuál es el récord de HPL' matchea, una pregunta "
        "normal de sbatch no",
        bool(_RE_BENCHMARKS.search("cuál es el récord de HPL en GPU")) and
@@ -5048,6 +5194,42 @@ def _selftest() -> int:
         _DEV_MODE = _dev_mode_real
         subprocess.run = _orig_run_host
 
+    # Bug real 18/11: un usuario común no ve el job vllm-service en squeue (PrivateData=jobs): hay que probar la salud de los nodos.
+    _orig_run_h2, _orig_hok, _pr_real = subprocess.run, globals()["_health_ok"], globals()["_PROBE_HOSTS"]
+    _dev_h2 = _DEV_MODE
+    try:
+        _DEV_MODE = False
+        globals()["_PROBE_HOSTS"] = True
+        subprocess.run = lambda *a, **k: _types_host.SimpleNamespace(stdout="")          # squeue vacío = usuario sin permiso
+        globals()["_health_ok"] = lambda h, timeout=1.5: h == "gpu-02:8000"
+        _t("_resolve_vllm_host: usuario común (squeue vacío) con el servicio en gpu-02 -> encuentra gpu-02 por la salud, no cae a gpu-01",
+           _resolve_vllm_host() == "gpu-02:8000")
+        _calls = []
+        globals()["_health_ok"] = lambda h, timeout=1.5: (_calls.append(h), h == "gpu-02:8000")[1]
+        subprocess.run = lambda *a, **k: _types_host.SimpleNamespace(stdout="gpu-02\n")
+        _t("_resolve_vllm_host: si squeue dice gpu-02 y contesta, no prueba ningún otro nodo", _resolve_vllm_host() == "gpu-02:8000" and _calls == ["gpu-02:8000"])
+        globals()["_health_ok"] = lambda h, timeout=1.5: False
+        subprocess.run = lambda *a, **k: _types_host.SimpleNamespace(stdout="")
+        _t("_resolve_vllm_host: si ningún nodo contesta, devuelve el configurado (igual que antes)", _resolve_vllm_host() == urlparse(VLLM_BASE).netloc)
+        _DEV_MODE = True
+        globals()["_health_ok"] = lambda h, timeout=1.5: h == "gpu-02:8000"
+        _t("_resolve_vllm_host: en dev no prueba nada y devuelve el configurado", _resolve_vllm_host() == urlparse(VLLM_BASE).netloc)
+    finally:
+        _DEV_MODE = _dev_h2
+        subprocess.run, globals()["_health_ok"], globals()["_PROBE_HOSTS"] = _orig_run_h2, _orig_hok, _pr_real
+    import tempfile as _tf_st, os as _os_st, time as _tm_st
+    with _tf_st.TemporaryDirectory() as _dst:
+        _jp = Path(_dst) / "vllm.jobid"
+        _t("_vllm_start_state: sin archivo -> None", _vllm_start_state(_jp) is None)
+        _jp.write_text("23879\n")
+        _t("_vllm_start_state: job recién arrancado -> (job, minutos)", _vllm_start_state(_jp) == ("23879", 0))
+        _old = _tm_st.time() - 40 * 60
+        _os_st.utime(_jp, (_old, _old))
+        _t("_vllm_start_state: archivo viejo (>25 min, job viejo o muerto) -> None", _vllm_start_state(_jp) is None)
+        _jp.write_text("basura")
+        _os_st.utime(_jp, None)
+        _t("_vllm_start_state: contenido que no es un número -> None", _vllm_start_state(_jp) is None)
+    _t("consejo de arranque: ya no manda a un usuario común a mirar squeue (no ve el job)", not any("squeue -p inference" in _x for _x in _TIPS))
     # i18n fase 1 (8/10, pedido explícito: "no me quiero encerrar en
     # español"): detección por consola, sin preguntarle nada al usuario.
     _env_real = dict(os.environ)
@@ -5308,17 +5490,22 @@ def _auto_start_service() -> bool:
     if fuera:
         print(_c(YEL, f"\n▶ {fuera}"))
         return False
-    print(_c(YEL, _tr("\n▶ El servicio no está corriendo.", "\n▶ The service is not running.")))
-    resp = _yn_raw(_c(BOLD, _tr("  ¿Pedirle al sistema que lo inicie? (demora ~2 min) [s/N]: ", "  Ask the system to start it? (takes ~2 min) [y/N]: ")))
-    if not resp:
-        return False
-    try:
-        START_REQUEST.write_text(f"{_USERNAME}\n")
-        _log_event("service_request")
-    except OSError as e:
-        print(_c(RED, _tr(f"  No se pudo crear el pedido: {e}", f"  Could not create the request: {e}")))
-        return False
-    print(_c(DIM, _tr("  Pedido enviado. Esperando que el servicio levante...", "  Request sent. Waiting for the service to come up...")))
+    _st = _vllm_start_state()
+    if _st:
+        print(_c(YEL, _tr(f"\n▶ El servicio ya se está iniciando (job {_st[0]}, hace {_st[1]} min). Suele tardar 2-3 min; esperá.",
+                          f"\n▶ The service is already starting (job {_st[0]}, {_st[1]} min ago). It usually takes 2-3 min; please wait.")))
+    else:
+        print(_c(YEL, _tr("\n▶ El servicio no está corriendo.", "\n▶ The service is not running.")))
+        resp = _yn_raw(_c(BOLD, _tr("  ¿Pedirle al sistema que lo inicie? (demora ~2 min) [s/N]: ", "  Ask the system to start it? (takes ~2 min) [y/N]: ")))
+        if not resp:
+            return False
+        try:
+            START_REQUEST.write_text(f"{_USERNAME}\n")
+            _log_event("service_request")
+        except OSError as e:
+            print(_c(RED, _tr(f"  No se pudo crear el pedido: {e}", f"  Could not create the request: {e}")))
+            return False
+        print(_c(DIM, _tr("  Pedido enviado. Esperando que el servicio levante...", "  Request sent. Waiting for the service to come up...")))
 
     spinner = itertools.cycle(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
     for i in range(30):  # hasta 5 min
@@ -5331,7 +5518,8 @@ def _auto_start_service() -> bool:
             _touch_heartbeat()
             print(_c(GRN, _tr(f"  ✓ Listo en {label}. Respondiendo...", f"  ✓ Ready in {label}. Responding...")))
             return True
-    print(_c(RED, _tr("  Timeout esperando el servicio. Intentar más tarde.", "  Timed out waiting for the service. Try again later.")))
+    print(_c(RED, _tr("  El servicio sigue iniciándose (a veces tarda más de 5 min). Probá de nuevo en unos minutos: no hace falta volver a pedirlo.",
+                      "  The service is still starting (sometimes it takes over 5 min). Try again in a few minutes: no need to request it again.")))
     return False
 
 
@@ -6331,6 +6519,99 @@ Model:    {MODEL}
 """
 
 
+def _diag_build_message(job_id, logs, original_script, job_qos, fail_flags):
+    """Mensaje de diagnóstico de un job: logs + script + detecciones determinísticas (OOM, preempción, numpy, Munge).
+    Compartido por /diagnose de la terminal y de la web. Devuelve (mensaje, texto_de_logs)."""
+    import re as _re_diag2
+    _diag_fail_flags = fail_flags
+    _job_qos = job_qos
+    log_content = "\n\n".join(logs)
+    script_section = (f"\n\nScript sbatch original:\n```bash\n{original_script}\n```"
+                      if original_script else "")
+    _fail_warning = ""
+    if _diag_fail_flags:
+        _fail_warning = (
+            "\n\n⚠ DETECCIÓN AUTOMÁTICA (determinística, no ignorar): se encontraron "
+            f"en el log las señales de fallo real: {', '.join(sorted(_diag_fail_flags))}. "
+            "El job NO terminó bien — estas señales indican un proceso matado por el "
+            "kernel/OOM killer o un crash real, incluso si el resto del log parece "
+            "normal. Tu respuesta TIENE que mencionar esto explícitamente y explicar "
+            "la causa probable (ej. --mem insuficiente para OOM) — NUNCA digas 'el job "
+            "terminó bien' cuando aparece esta detección.")
+    # Bug real 17/10 (job 18819): "No module named 'numpy'" -- /diagnose proponía
+    # cambiar python3 por python; la causa real es no cargar el env file.
+    _m_mod = _re_diag2.search(
+        r"No module named ['\"](numpy|scipy|pandas|matplotlib)\b", log_content)
+    if _m_mod:
+        _fail_warning += (
+            f"\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene \"No module named '{_m_mod.group(1)}'\". "
+            "La causa es que el script NO activó el entorno de Python científico del "
+            "cluster (el python de `spack load python` pelado no trae numpy/scipy/"
+            "pandas/matplotlib). La corrección es agregar, antes de llamar a python3, "
+            "la línea `source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env`. "
+            "NO propongas cambiar python3 por python ni instalar con pip. Explicá en 2 frases por qué "
+            "falla y mostrá la línea a agregar en un bloque de código.")
+    # Bug real 5/9: "CANCELLED ... DUE TO SIGNAL" en el log es Slurm matando
+    # el job desde AFUERA (casi siempre preempción real de scavenger, o un
+    # scancel manual) — NO tiene relación con warnings benignos del programa
+    # (ej. "(ignored)" de CUDA/MPI en nodos sin GPU). Sin esta aclaración el
+    # modelo conecta cosas sueltas del log y alucina una causa técnica falsa.
+    _cancelled_by_signal = bool(_re_diag2.search(
+        r'CANCELLED AT .* DUE TO SIGNAL', log_content, _re_diag2.IGNORECASE))
+    if _cancelled_by_signal:
+        if _job_qos == "scavenger" or "scavenger" in log_content.lower()[:200]:
+            _fail_warning += (
+                "\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene \"CANCELLED ... DUE TO "
+                "SIGNAL\" y el job es QOS scavenger — esto es Slurm matando el job "
+                "DESDE AFUERA, casi siempre PREEMPCIÓN real (otro job de mayor "
+                "prioridad necesitó el nodo), NO un bug del programa. Los warnings "
+                "marcados \"(ignored)\" en el log (ej. CUDA/MPI en nodos sin GPU) "
+                "son benignos y NO causan esta cancelación — NO inventar una causa "
+                "técnica conectándolos con la señal. Explicar que es preempción de "
+                "scavenger (esperable, prioridad 50, oportunista) y no un error a "
+                "corregir en el script.")
+        else:
+            _fail_warning += (
+                "\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene \"CANCELLED ... DUE TO "
+                "SIGNAL\" — Slurm mató el job desde afuera (scancel manual, límite "
+                "de tiempo/memoria excedido, o similar). NO inventar una causa "
+                "técnica del programa (ej. warnings benignos marcados 'ignored') "
+                "para esto sin evidencia real en el log.")
+    # Bug real 16/9 (reporte de usuario real): "Munge encode failed... 108 bytes"
+    # + "REQUEST_HET_JOB_ALLOC_INFO" es un límite de path de socket UNIX (108
+    # bytes, límite del kernel), NO algo que necesite intervención de un admin —
+    # sin esto el modelo puede alucinar que hay que "reiniciar algo" (ya pasó:
+    # el usuario recibió justo esa sugerencia incorrecta de otra fuente).
+    if _re_diag2.search(r'Munge encode failed.*108 bytes|'
+                        r'REQUEST_HET_JOB_ALLOC_INFO', log_content):
+        _fail_warning += (
+            "\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene el error de Munge de "
+            "\"108 bytes\"/REQUEST_HET_JOB_ALLOC_INFO — es el límite del kernel "
+            "Linux para el path de un socket UNIX (sockaddr_un.sun_path), que se "
+            "supera cuando la sesión interactiva (salloc/srun/mpirun) se pide desde "
+            "un directorio muy profundo/largo. Fix real y confirmado por un usuario "
+            "afectado: pedir la sesión desde un directorio más corto (el home, o "
+            "cerca de la raíz de /mnt/cpu-data/<usuario>). NO requiere que ningún "
+            "admin reinicie nada — NUNCA sugerir eso.")
+    diag_msg = (f"Logs del job {job_id}:{script_section}\n\n"
+                f"{log_content}\n\n"
+                f"Analizá los logs. Si hay errores explicá qué falló y cómo corregirlo. "
+                f"Si el job terminó bien decilo en una línea."
+                f"{_fail_warning}")
+    return diag_msg, log_content
+
+
+def _diag_system_message(log_content, original_script):
+    """Prompt de sistema del diagnóstico (reglas del cluster relevantes al log y al script)."""
+    _diag_probe = log_content + "\n" + original_script
+    return {"role": "system", "content":
+            "Sos un asistente de HPC. Analizá logs de Slurm y respondé en "
+            + ("español" if _LANG == "es" else "inglés (English)")
+            + ", directo y corto. Las soluciones DEBEN respetar las reglas de este cluster:\n"
+            + _ctx_for_probe(_diag_probe, include_python=False)
+            + (_LANG_REMINDER_SUFFIX if _LANG != "es" else "")}
+
+
 def repl(new_session: bool = False):
     global _CURRENT_CTX_CHARS
     con = init_db()
@@ -7210,91 +7491,11 @@ def repl(new_session: bool = False):
                             encoding="utf-8", errors="replace")[:3000]
                     except OSError:
                         pass
-                log_content = "\n\n".join(logs)
-                script_section = (f"\n\nScript sbatch original:\n```bash\n{original_script}\n```"
-                                  if original_script else "")
                 print(_c(DIM, _tr(f"Cargados {len(logs)} log(s) del job {job_id} — consultando al bot...", f"Loaded {len(logs)} log(s) of job {job_id} — asking the bot...")))
-                _fail_warning = ""
-                if _diag_fail_flags:
-                    _fail_warning = (
-                        "\n\n⚠ DETECCIÓN AUTOMÁTICA (determinística, no ignorar): se encontraron "
-                        f"en el log las señales de fallo real: {', '.join(sorted(_diag_fail_flags))}. "
-                        "El job NO terminó bien — estas señales indican un proceso matado por el "
-                        "kernel/OOM killer o un crash real, incluso si el resto del log parece "
-                        "normal. Tu respuesta TIENE que mencionar esto explícitamente y explicar "
-                        "la causa probable (ej. --mem insuficiente para OOM) — NUNCA digas 'el job "
-                        "terminó bien' cuando aparece esta detección.")
-                # Bug real 17/10 (job 18819): "No module named 'numpy'" -- /diagnose proponía
-                # cambiar python3 por python; la causa real es no cargar el env file.
-                _m_mod = _re_diag2.search(
-                    r"No module named ['\"](numpy|scipy|pandas|matplotlib)\b", log_content)
-                if _m_mod:
-                    _fail_warning += (
-                        f"\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene \"No module named '{_m_mod.group(1)}'\". "
-                        "La causa es que el script NO activó el entorno de Python científico del "
-                        "cluster (el python de `spack load python` pelado no trae numpy/scipy/"
-                        "pandas/matplotlib). La corrección es agregar, antes de llamar a python3, "
-                        "la línea `source /mnt/cpu-data/shared/ifimar-ai/envs/numpy.env`. "
-                        "NO propongas cambiar python3 por python ni instalar con pip. Explicá en 2 frases por qué "
-                        "falla y mostrá la línea a agregar en un bloque de código.")
-                # Bug real 5/9: "CANCELLED ... DUE TO SIGNAL" en el log es Slurm matando
-                # el job desde AFUERA (casi siempre preempción real de scavenger, o un
-                # scancel manual) — NO tiene relación con warnings benignos del programa
-                # (ej. "(ignored)" de CUDA/MPI en nodos sin GPU). Sin esta aclaración el
-                # modelo conecta cosas sueltas del log y alucina una causa técnica falsa.
-                _cancelled_by_signal = bool(_re_diag2.search(
-                    r'CANCELLED AT .* DUE TO SIGNAL', log_content, _re_diag2.IGNORECASE))
-                if _cancelled_by_signal:
-                    if _job_qos == "scavenger" or "scavenger" in log_content.lower()[:200]:
-                        _fail_warning += (
-                            "\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene \"CANCELLED ... DUE TO "
-                            "SIGNAL\" y el job es QOS scavenger — esto es Slurm matando el job "
-                            "DESDE AFUERA, casi siempre PREEMPCIÓN real (otro job de mayor "
-                            "prioridad necesitó el nodo), NO un bug del programa. Los warnings "
-                            "marcados \"(ignored)\" en el log (ej. CUDA/MPI en nodos sin GPU) "
-                            "son benignos y NO causan esta cancelación — NO inventar una causa "
-                            "técnica conectándolos con la señal. Explicar que es preempción de "
-                            "scavenger (esperable, prioridad 50, oportunista) y no un error a "
-                            "corregir en el script.")
-                    else:
-                        _fail_warning += (
-                            "\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene \"CANCELLED ... DUE TO "
-                            "SIGNAL\" — Slurm mató el job desde afuera (scancel manual, límite "
-                            "de tiempo/memoria excedido, o similar). NO inventar una causa "
-                            "técnica del programa (ej. warnings benignos marcados 'ignored') "
-                            "para esto sin evidencia real en el log.")
-                # Bug real 16/9 (reporte de usuario real): "Munge encode failed... 108 bytes"
-                # + "REQUEST_HET_JOB_ALLOC_INFO" es un límite de path de socket UNIX (108
-                # bytes, límite del kernel), NO algo que necesite intervención de un admin —
-                # sin esto el modelo puede alucinar que hay que "reiniciar algo" (ya pasó:
-                # el usuario recibió justo esa sugerencia incorrecta de otra fuente).
-                if _re_diag2.search(r'Munge encode failed.*108 bytes|'
-                                    r'REQUEST_HET_JOB_ALLOC_INFO', log_content):
-                    _fail_warning += (
-                        "\n\n⚠ DETECCIÓN AUTOMÁTICA: el log tiene el error de Munge de "
-                        "\"108 bytes\"/REQUEST_HET_JOB_ALLOC_INFO — es el límite del kernel "
-                        "Linux para el path de un socket UNIX (sockaddr_un.sun_path), que se "
-                        "supera cuando la sesión interactiva (salloc/srun/mpirun) se pide desde "
-                        "un directorio muy profundo/largo. Fix real y confirmado por un usuario "
-                        "afectado: pedir la sesión desde un directorio más corto (el home, o "
-                        "cerca de la raíz de /mnt/cpu-data/<usuario>). NO requiere que ningún "
-                        "admin reinicie nada — NUNCA sugerir eso.")
-                diag_msg = (f"Logs del job {job_id}:{script_section}\n\n"
-                            f"{log_content}\n\n"
-                            f"Analizá los logs. Si hay errores explicá qué falló y cómo corregirlo. "
-                            f"Si el job terminó bien decilo en una línea."
-                            f"{_fail_warning}")
-                # Incluir reglas del cluster (segmentos relevantes + core): sin
-                # ellas el diagnóstico receta soluciones genéricas inválidas acá
-                # (module load, pip install). Sondea logs + script, no python
-                # (un job fallado no necesita reglas de numpy/pandas).
-                _diag_probe = log_content + "\n" + original_script
-                _diag_sys = {"role": "system", "content":
-                             "Sos un asistente de HPC. Analizá logs de Slurm y respondé en "
-                             + ("español" if _LANG == "es" else "inglés (English)")
-                             + ", directo y corto. Las soluciones DEBEN respetar las reglas de este cluster:\n"
-                             + _ctx_for_probe(_diag_probe, include_python=False)
-                             + (_LANG_REMINDER_SUFFIX if _LANG != "es" else "")}
+                diag_msg, log_content = _diag_build_message(job_id, logs, original_script, _job_qos, _diag_fail_flags)
+                # Incluir reglas del cluster (segmentos relevantes + core): sin ellas el diagnóstico receta
+                # soluciones genéricas inválidas acá (module load, pip install). Ver _diag_system_message.
+                _diag_sys = _diag_system_message(log_content, original_script)
                 messages_diag = [_diag_sys, {"role": "user", "content": diag_msg}]
                 save_message(con, session_id, "user", diag_msg)
                 try:

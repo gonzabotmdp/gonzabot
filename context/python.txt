@@ -97,8 +97,13 @@ py-dask 2026.7.1 (python 3.14, cómputo paralelo+datos grandes): eval $(spack lo
   Si falla dask.dataframe (bug viejo, pyarrow ssl, no reverificado tras el último rebuild),
   usar dask.array (da.arange/from_array/mean/std/etc.).
 py-xarray 2025.7.1 (python 3.14, datos multidimensionales): eval $(spack load --sh py-xarray); $PYTHON script.py. Deps: pandas, numpy. Partición cpu.
-py-pandas 2.3.3 (python 3.14, dataframes): eval $(spack load --sh py-pandas); $PYTHON script.py. Partición cpu.
-  ALTERNATIVA si falla: cargar scipy.env (incluye numpy) y agregar pandas con spack load --sh.
+py-pandas 3.0.5 (python 3.14.5, dataframes) — verificado el 16/11 con jobs reales en cpu como cl-users:
+  ⚠ pandas NO está en numpy.env / scipy.env / matplotlib.env (esos .env dan ModuleNotFoundError: No module named 'pandas'). Si el script importa pandas, NO usar esos .env.
+  Con spack (sbatch): `source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh` y `spack load py-pandas@3.0.5 %gcc@14.2.0` (hash /mfspuva), después `python3 script.py` (NO $PYTHON). Trae su propio numpy 2.3.5.
+  pandas + matplotlib: `spack load py-pandas@3.0.5 %gcc@14.2.0 py-matplotlib@3.10.9 %gcc@14.2.0` (PNG con backend Agg verificado). NO elegir numpy a mano en el mismo load: rompe pandas.
+  `spack load py-pandas` a secas FALLA ("matches multiple packages": builds aocc/gcc y varias versiones): dar SIEMPRE @versión y %gcc@14.2.0, o el hash. NO usar `eval $(spack load --sh py-pandas)`.
+  Paquetes Python que no estén en esta lista (tqdm, etc.): no inventar hashes ni `spack load py-nombre` sin probarlo (py-tqdm@4.67.3 es ambiguo y pide hash). Camino verificado: venv con pip, los nodos tienen internet: `python3 -m venv --system-site-packages ~/venvs/mi_env && source ~/venvs/mi_env/bin/activate && pip install tqdm` (también anda pip install pandas matplotlib, versiones de PyPI).
+  Wiki con la guía: https://docs.ifimar-conicet.gob.ar/hpc/software/stack#python-con-spack — pasar el link. Usuarios cl-externos: --partition=scavenger --qos=scavenger. NO probado todavía en GPU, TensorFlow ni JAX: no prometer que anden.
 PyTorch: `spack load py-torch` da py-torch@2.13.0 **CPU-only** (~cuda, sin soporte GPU) — sí
   disponible para uso general, avisar que es CPU-only si lo piden para GPU. PyTorch con
   GPU/CUDA real NO tiene instalación de uso general en el cluster (solo instalaciones privadas
@@ -120,6 +125,11 @@ cómputo real en A100 (gpu-01), `cp.cuda.Device(0).compute_capability` → 80.
   Después de activar: `python3` normal, `import cupy as cp` — API casi idéntica a numpy
   (cp.array, cp.sum, etc.), corre en GPU en vez de CPU. NO se carga con "spack load" (no es
   un paquete de Spack a propósito).
+  Trucos verificados el 5/11 (video/fractales con CuPy en A100, jobs reales): (1) en scripts con pipes o ffmpeg poner `set -eo pipefail` al principio: sin eso,
+  si un paso falla Slurm igual marca COMPLETED 0:0 y el script imprime "procesado exitosamente". (2) CuPy ElementwiseKernel: la variable `i` está RESERVADA (índice interno), usar otro
+  nombre (ej. `it`). (3) NO hacer `source numpy.env` en un job con CuPy: cambia a un Python sin CuPy. (4) py-torch de Spack es ~cuda (solo CPU). (5) Patrón de video en GPU:
+  `spack load ffmpeg/jftyden` (SIEMPRE con hash: `spack load ffmpeg` pelado falla con "matches no installed packages"), `source /apps/local/spack/opt/gpu-python/activate.sh`,
+  `python3 gen.py | ffmpeg -f rawvideo -pix_fmt rgb24 -s 1920x1080 -r 30 -i - -c:v libx264 salida.mp4` (30 s a 1080p tardaron 51 s en una A100).
   py-numba (spack load py-numba, hash /gahuud2) convive sin conflicto en un venv/entorno
   aparte — no hace falta mezclarlos salvo que el usuario lo pida.
   Deliberadamente AFUERA por ahora (stack mucho más grande, no instalado): RAPIDS/cudf/cuml.

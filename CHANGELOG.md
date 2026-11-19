@@ -6,6 +6,31 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.9.4] - 2026-11-19
+
+### Fixed
+- Model host discovery for regular users: with `PrivateData=jobs` a non-admin user cannot see the vLLM job in `squeue`, so the
+  client assumed the configured node while the service ran on the other one, and waited until the timeout with a healthy
+  service. The client now probes `/health` on each candidate (the `squeue` node, the configured host, `gpu-01`, `gpu-02`) and
+  uses the first one that answers.
+- A `spack load` with `@version`, `%compiler` or `/hash` is no longer reported as a bare (ambiguous) load.
+- Scripts that import pandas but source the numpy/scipy/matplotlib environment files (which do not contain pandas) are rewritten
+  to the verified `spack load py-pandas@... %gcc@...` form (plus matplotlib when it is used).
+
+### Added
+- `transferencia` context segment for large data transfers: never `scp`/`rsync` large data to the login node (the write cache
+  counts as memory for the per-user limit and triggers penalties); pull it from the user's PC with `wget` on a compute node
+  instead, with the caveats for external users (scavenger only) and wiki/Nextcloud login hints. Triggered by transfer keywords.
+- Start-up state: when the service is already starting (the job writes `vllm.jobid`), the client says so instead of asking again,
+  and the timeout message explains that it is still starting.
+
+### Changed
+- Context refreshed: filesystems visible from every node, size of `/tmp` and `/scratch`, `sacct` visibility, login-node limits,
+  pandas/CuPy/video notes; two statements that recommended `scp`/`rsync` for large data were corrected.
+- `/diagnose` message building moved into shared functions (`_diag_build_message`, `_diag_system_message`) so other front ends
+  reuse the same deterministic detections.
+- `--selftest` now includes contract checks for the internal names and signatures that external front ends rely on.
+
 ## [1.9.3] - 2026-10-28
 
 ### Added

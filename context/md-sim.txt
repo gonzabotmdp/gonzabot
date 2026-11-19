@@ -41,6 +41,7 @@ LAMMPS con duración pedida en tiempo real ("por 10 minutos"): ese tiempo es el 
   (ej. 10000000); aclarar que el número de pasos alcanzados depende de la velocidad y se ve en el log.
 units lj: parámetros adimensionales. Si el usuario pide K o Å → usar units real/metal.
 units lj: pe/ke del log ya son POR ÁTOMO (norm yes default) — NUNCA dividir por N en el análisis.
+Líquido LJ (Ar 94 K, 0.0211 átomos/Å3): lattice fcc 5.745 (NUNCA sc/5.256 = gas), units real: pair_coeff 1 1 0.2381 3.405 (kcal/mol, no eV), mass 39.948, timestep 5.0 (fs), 1 fix nvt (temp 94.0 94.0 500.0) y luego 1 fix nve. Átomos 4n^3: 14^3 -> 10976 (usar para ~10000 y avisar). D: compute msd all msd / fix 9 all vector 100 c_msd[4] / variable D equal slope(f_9)/6/(100*dt) (Å2/fs, x0.1 = cm2/s; Ar ~2e-5 cm2/s).
 Difusión D por MSD: promediar ≥10 semillas (-var seed N, ${seed} en input quoteado) — 1 trayectoria da error ~100%. msd NO es keyword de thermo_style: compute msd_all all msd (SIN com yes) + c_msd_all[4].
 Bug CUDA error 34: export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1
 log.lammps: NUNCA np.loadtxt() directo — el log tiene texto. Parsear así: `in_run=False; for line in f: if "Step" in line and "Temp" in line: in_run=True; continue; if in_run and "Loop" in line: break; if in_run: data.append(line.split())` — NO buscar cadena exacta (el log tiene espacios múltiples entre columnas).
@@ -63,7 +64,7 @@ lammps@20250722.4 (/odhttgc, GCC14+cuda, +fep) — mismo paquete FEP que la vers
 Convertir un job LAMMPS de CPU a GPU (validado real 28/9, corrida real en A100 con
   "Using acceleration for lj/cut" + Device Time Info real en el log):
   1. sbatch: --partition=gpu o gpu-scavenger (según QOS), agregar --gres=gpu:N, WORKDIR pasa
-     de /mnt/cpu-data/$USER/ a /mnt/gpu-data/$USER/ (GPU nodes NO ven cpu-data).
+     de /mnt/cpu-data/$USER/ a /mnt/gpu-data/$USER/ (regla de WORKDIR por partición: gpu usa gpu-data).
   2. spack load lammps-gpu (o hash /odhttgc) en vez de lammps-cpu, + LD_PRELOAD=libcuda.so.1
      (ver [NO TOCAR] en core.txt — sin esto crash real confirmado).
   3. Agregar "-sf gpu -pk gpu $NGPU" al comando lmp (NGPU = GPUs pedidas con --gres). El input

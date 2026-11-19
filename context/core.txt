@@ -93,7 +93,7 @@ Gonzalo: sysadmin, acceso root, puede --qos=admin. Usuarios normales: cl-users. 
 
 cl-users: investigadores IFIMAR/UNMDP. Particiones cpu/gpu/scavenger, QoS normal/express/scavenger. WORKDIR /mnt/cpu-data/$USER/ y /mnt/gpu-data/$USER/.
 cl-externos: SOLO QoS scavenger, en CUALQUIERA de las dos particiones scavenger (CPU: --partition=scavenger --qos=scavenger; GPU: --partition=gpu-scavenger --qos=scavenger — confirmado 28/9, es justo la filosofía de scavenger: aprovechar GPUs que están idle). AMBAS líneas (--partition Y --qos) siempre, sin cualquiera → rechazo. NUNCA --nodes>1. WORKDIR según partición, igual que cl-users: /mnt/cpu-data/$USER/ para CPU, /mnt/gpu-data/$USER/ para GPU (la carpeta se autocrea sola con "mkdir -p $WORKDIR" — /mnt/gpu-data/ tiene sticky bit, no hace falta que un admin la cree a mano).
-Acceso: VPN IFIMAR/UNMDP → ssh usuario@ql-front. NUNCA dar otros hostnames. Transferir: scp archivo.txt usuario@ql-front:/data/home/usuario/
+Acceso: VPN IFIMAR/UNMDP → ssh usuario@ql-front. NUNCA dar otros hostnames. Guía paso a paso para conectarse (Linux/Konsole/GNOME, Windows con Bitvise o PowerShell, byobu: `byobu-enable` una sola vez y las teclas F): https://docs.ifimar-conicet.gob.ar/hpc/usuarios/conectarse — pasar ese link a quien pregunte cómo conectarse. Transferir archivos CHICOS (inputs, scripts, documentos de pocos MB): scp archivo.txt usuario@ql-front:/data/home/usuario/ . Datos GRANDES (más de ~1 GB): NUNCA scp/rsync a ql-front (penaliza con arbiter2): usar el método del segmento de transferencia (wiki: https://docs.ifimar-conicet.gob.ar/hpc/usuarios/subir-datos).
 
 --- HARDWARE ---
 
@@ -117,10 +117,10 @@ Prioridad: FairShare×5000 (domina, vida media 7d) > QoS×2000 > Edad×1000 > Ta
 
 Preemption: cpu(Tier=100) desaloja scavenger(Tier=50) → SIGSTOP (congelado, retoma con SIGCONT sin pérdida de estado). inference/gpu desalojan gpu-scavenger en gpu-01 o gpu-02 (ambos nodos, 1/10) → REQUEUE (cancelado y re-encolado; GraceTime=120s → #SBATCH --signal=B:SIGTERM@120 para checkpoint). PreemptType=preempt/partition_prio: quién preemptea a quién depende de la PARTICIÓN (Tier), no del QoS -- normal y express preemptean igual dentro de "gpu", la diferencia entre ellos es solo orden de cola. Confirmado 1/10 con sacctmgr: TODOS los usuarios de cl-externos tienen únicamente QoS=scavenger (sin excepciones), así que cualquier cl-users que someta a --partition=gpu --qos=normal libera automáticamente la GPU de un invitado, sin pausar nada a mano.
 
-Filesystems (AISLADOS — GPU nodes NO ven cpu-data y viceversa):
+Filesystems (visibles desde TODOS los nodos CPU y GPU, desde 19/10/2026):
   /data/home/$USER      95GB, visible desde TODOS los nodos → logs y scripts
-  /mnt/cpu-data/$USER   98TB, solo nodos CPU
-  /mnt/gpu-data/$USER   88TB, solo nodos GPU
+  /mnt/cpu-data/$USER   98TB, nodos CPU y GPU
+  /mnt/gpu-data/$USER   88TB, nodos CPU y GPU (flujo CPU->GPU: un solo directorio de proyecto sirve para ambas etapas, sin copiar)
 
 WORKDIR en sbatch (OBLIGATORIO para scripts NUEVOS, cualquier software):
   cpu/scavenger → WORKDIR=/mnt/cpu-data/$USER/nombre_$SLURM_JOB_ID; mkdir -p $WORKDIR; cd $WORKDIR
@@ -175,8 +175,11 @@ Intel/MKL/oneAPI: fuera de política — usar AMD BLIS/AOCL.
 - Un directorio por job: WORKDIR con $SLURM_JOB_ID evita pisar resultados (SOLO sbatch nuevos).
 - --time realista: el scheduler usa el tiempo declarado para backfill; --time=7d bloquea huecos.
 - No guardar datos en /data/home (95GB compartidos). Outputs → /mnt/gpu-data o /mnt/cpu-data.
-- /tmp se borra al terminar el job — datos persistentes a /mnt/cpu-data o /mnt/gpu-data.
+- /tmp se borra al terminar el job — datos persistentes a /mnt/cpu-data o /mnt/gpu-data. /tmp y /scratch en los nodos son un tmpfs de 1 GB EN RAM (verificado 19/10/2026, CPU y GPU): NO escribir ahi archivos grandes ni temporales pesados; usar WORKDIR en /mnt/cpu-data o /mnt/gpu-data.
 - FAIRSHARE: usar todos los cores que escalen bien, el scheduler maneja equidad automáticamente.
+- sacct funciona en el front y en los nodos. Cada usuario ve solo SUS jobs (sacct -u $USER, o sacct -j <jobid>); los admins (root, gonzalo, softadm) ven todos.
+- En ql-front (login) arbiter2 limita a cada usuario a 2 nucleos y 8 GB de RAM sostenidos; pasarse unos 10 minutos lo penaliza (cuota reducida 10 a 40 min). scp, rsync, ssh, wget, curl, git, tar, gzip, xz, zstd, pigz, unzip, rm, du, find y los clientes de Slurm (srun, salloc, sbatch, squeue, scancel, sacct, scontrol) están exentos de la medición de procesos y no requieren salloc, PERO escribir muchos GB en ql-front (scp/rsync/wget de datos grandes) llena la caché de archivos del cgroup, que arbiter2 SÍ cuenta como memoria (cuota 8 GB): aviso de uso excesivo y penalización. Datos grandes: método de la wiki (segmento de transferencia), no scp/rsync a ql-front.
+- El calculo (python, a.out, compilaciones largas, analisis) va SIEMPRE por sbatch o salloc, nunca en el front, aunque "solo sea una prueba".
 
 --- DIAGNÓSTICO RÁPIDO DE SCRIPTS ---
 
