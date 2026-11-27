@@ -5,7 +5,7 @@
 
 --- LAMMPS CPU ---
 
-lammps@20250722.4 (/mgsqgyo, AOCC, ~cuda, +fep) — recomendado, MPI puro. Paquete FEP (Free
+lammps@20250722.4 (/6k42sz5, AOCC, ~cuda, +fep, +ML-PACE desde 26/11: pair_style pace) — recomendado, MPI puro. Paquete FEP (Free
   Energy Perturbation) disponible para cálculos de energía libre por perturbación.
   RECOMENDADO (actualizado 7/9): "spack load lammps-cpu" — alias ESTABLE en preferred-hashes.conf
   que no cambia aunque el hash real sí cambie en el próximo rebuild (softadm solo actualiza esa
@@ -15,7 +15,7 @@ lammps@20250722.4 (/mgsqgyo, AOCC, ~cuda, +fep) — recomendado, MPI puro. Paque
   nunca se aplicó del todo), no confiar en que siga así — usar SIEMPRE lammps-cpu/lammps-gpu
   explícito, o el hash si hace falta:
   SPACK=/apps/local/spack/spack-2026b/spack/bin/spack
-  LAMMPS_DIR=$($SPACK location -i /mgsqgyo 2>/dev/null)
+  LAMMPS_DIR=$($SPACK location -i /6k42sz5 2>/dev/null)
   OMPI_DIR=$($SPACK location -i /2cgnkug 2>/dev/null)
   export PATH=${LAMMPS_DIR}/bin:${OMPI_DIR}/bin:$PATH
   POT=${LAMMPS_DIR}/share/lammps/potentials   # 256 potenciales ya incluidos, ej: pair_coeff * * ${POT}/Al_jnp.eam
@@ -48,12 +48,12 @@ log.lammps: NUNCA np.loadtxt() directo — el log tiene texto. Parsear así: `in
 
 --- LAMMPS GPU ---
 
-lammps@20250722.4 (/odhttgc, GCC14+cuda, +fep) — mismo paquete FEP que la versión CPU.
+lammps@20250722.4 (/3z7zdg3, GCC14+cuda, +fep, +ML-PACE desde 26/11) — mismo paquete FEP que la versión CPU.
   RECOMENDADO: "spack load lammps-gpu" (alias estable, ver nota completa en la sección CPU de
   arriba). GCC14 acá es CORRECTO Y DEFINITIVO, NO una regresión pendiente (confirmado con
   softadm 24/9): nvcc exige gcc14 como host compiler, %aocc+cuda nunca fue técnicamente
   alcanzable — el split CPU=AOCC/GPU=GCC14 es la excepción ya cerrada, no tocar:
-  LAMMPS_DIR=$($SPACK location -i /odhttgc 2>/dev/null)
+  LAMMPS_DIR=$($SPACK location -i /3z7zdg3 2>/dev/null)
   CUDA_DIR=$($SPACK location -i /okkjtu2 2>/dev/null)
   export PATH=${LAMMPS_DIR}/bin:${CUDA_DIR}/bin:$PATH
   export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libcuda.so.1
@@ -65,7 +65,7 @@ Convertir un job LAMMPS de CPU a GPU (validado real 28/9, corrida real en A100 c
   "Using acceleration for lj/cut" + Device Time Info real en el log):
   1. sbatch: --partition=gpu o gpu-scavenger (según QOS), agregar --gres=gpu:N, WORKDIR pasa
      de /mnt/cpu-data/$USER/ a /mnt/gpu-data/$USER/ (regla de WORKDIR por partición: gpu usa gpu-data).
-  2. spack load lammps-gpu (o hash /odhttgc) en vez de lammps-cpu, + LD_PRELOAD=libcuda.so.1
+  2. spack load lammps-gpu (o hash /3z7zdg3) en vez de lammps-cpu, + LD_PRELOAD=libcuda.so.1
      (ver [NO TOCAR] en core.txt — sin esto crash real confirmado).
   3. Agregar "-sf gpu -pk gpu $NGPU" al comando lmp (NGPU = GPUs pedidas con --gres). El input
      .lmp NO necesita editarse — "-sf gpu" auto-sufija los pair_style compatibles en runtime,
@@ -103,3 +103,9 @@ Dos hashes %gcc@14.2.0 hoy, con distinto estado (confirmado con softadm 24/9):
 ⚠ NO INSTALADO — borrado del store a propósito por Gonzalo (confirmado 24/9, no es un bug ni
   una limpieza accidental: spack find amber no devuelve ni el recipe). Avisar al usuario que no
   está disponible, no inventar el comando ni generar el sbatch como si funcionara.
+
+--- ACE/ML-PACE (potenciales de aprendizaje automático, verificado 26/11/2026) ---
+LAMMPS trae ML-PACE: pair_style pace y pace/extrapolation. En sesión interactiva: spack load lammps-cpu (AOCC, MPI) o lammps-gpu (gcc14+cuda). DENTRO DE UN SBATCH los alias NO existen (solo los resuelve el wrapper del login): usar el hash, spack load /6k42sz5 (CPU) o spack load /3z7zdg3 (GPU), después de hacer source del setup-env.sh. Lanzar con mpirun (srun falla con 'Invalid MPI type pmix'). Chequear: lmp -h | grep pace.
+Para AJUSTAR potenciales ACE (pacemaker), verificado 27/11 en un nodo: source /apps/local/spack/ace-fit/activate.sh y después pacemaker input.yaml (vale en sesión y en sbatch; Python 3.13 con pyace y tensorpotential; sin GPU: export CUDA_VISIBLE_DEVICES=''). Convertir a .yace: pace_yaml2yace -o potencial.yace output_potential.yaml. Ajuste en CPU: export CUDA_VISIBLE_DEVICES='' (partición cpu); en GPU: --partition=gpu --gres=gpu:1. En nodos cpu el aviso 'failed call to cuInit UNKNOWN ERROR (303)' es inofensivo. NO instalar otro numpy: anda con el 2.3.5 del entorno, con 2.5 falla. Correr siempre en un nodo de cómputo (sbatch/salloc), no en el de acceso; el activate.sh carga por hash, sirve dentro de sbatch. El entorno ace-fit trae TensorFlow 2.20 (CPU y GPU A100), tensorpotential y NumPy 2.3.5. Recursos probados para el ajuste en CPU: --partition=cpu --cpus-per-task=8 --mem=32G --time=00:30:00 (job completo 31 s). input.yaml de pacemaker: data: filename con un DataFrame de pandas guardado como .pckl.gzip (columnas ase_atoms, energy, energy_corrected, forces, name), potential con elements/embeddings/bonds/functions, fit con optimizer BFGS y backend evaluator: tensorpot; el ejemplo completo está en la wiki (hpc/software/stack#lammps-con-ace-ml-pace), no inventar los parámetros. Probado por softadm y PROX3: ajuste en CPU 15-17,6 s y en A100 11 s, y el .yace corre en lammps-cpu con pair_style pace. NO usar spack load /54gvcfu para ajustar (Python 3.14 no sirve con TensorFlow: pacemaker falla; ese hash se retira). Hace falta un archivo de potencial: LAMMPS lee .yace (formato actual) y también .ace (anterior). Ejemplo probado el 26/11 (wiki, hpc/software/stack#lammps-con-ace-ml-pace): E=/apps/local/spack/softadm/spack-lammps-flags/lammps-stable_22Jul2025_update4/examples/PACKAGES/pace; copiar Cu-PBE-core-rep.ace e in.pace.product; sbatch partition cpu, 4 tareas, spack load /6k42sz5, mpirun -np $SLURM_NTASKS lmp -in in.pace.product; E_pair paso 0 = -945.9873 (igual al log de referencia). En pair_coeff el archivo y los elementos van en el orden de los tipos de átomo: pair_coeff * * potencial.yace Cu. Los avisos de Open MPI 'unable to open mca_rcache_gpusm: libcuda.so.1 (ignored)' son normales en nodos cpu. ajustar y probar imports dentro de un job (sbatch/salloc), nunca en el nodo de acceso. Licencia: Academic Software License, solo uso académico NO comercial (python-ace y tensorpotential). Probado: pair_style pace en partición cpu e import pyace en un job. Probado también pair_style pace en lammps-gpu (gpu-02, 1 proceso y mpirun -np 4: PotEng -1,2210499, igual que en CPU). NO probado: un ajuste con datos reales (el ejemplo de la wiki usa datos sintéticos de cobre calculados con EMT; para un potencial real hacen falta datos de referencia, por ejemplo de DFT) (la versión GPU sí incluye ML-PACE según lmp -h): no prometer resultados.
+Ejemplo listo para copiar (datos sintéticos de cobre): cp -r /apps/local/spack/ace-fit/ejemplo ~/ace-ejemplo; cd ~/ace-ejemplo; sbatch run.sbatch (trae README.txt, make_data.py, input.yaml, run.sbatch; genera output_potential.yaml y Cu.yace). En sbatch, para mpirun -np N hay que pedir --ntasks=N: con --cpus-per-task=N y un solo task, mpirun dice que no hay slots.
+REGLAS DE RESPUESTA ACE (obligatorias, verificadas en pruebas de usuario 27/11): (1) pacemaker NO es MPI: una sola tarea, #SBATCH --ntasks=1 --cpus-per-task=8 --mem=32G --time=00:30:00 y sin mpirun. (2) Si el usuario copia el ejemplo (cp -r /apps/local/spack/ace-fit/ejemplo ~/ace-ejemplo) ya trae run.sbatch listo: decirle que lo use tal cual (cd ~/ace-ejemplo; sbatch run.sbatch), no reescribirlo ni inventar nombres de archivos. Nombres exactos: datos cu_emt.pckl.gzip (extensión .pckl.gzip, NO .pkl.gz), salida output_potential.yaml (en inglés, NO 'potencial') y el .yace con pace_yaml2yace -o Cu.yace output_potential.yaml. (3) '¿puedo usar spack load lammps-cpu dentro de mi sbatch?' → responder NO (los alias solo existen en sesión interactiva) y dar spack load /6k42sz5 (CPU) o /3z7zdg3 (GPU) tras el source de setup-env.sh; no armar un sbatch de 256 tareas para contestar esto. (4) LAMMPS con pair_style pace: la línea es mpirun -np $SLURM_NTASKS lmp -in input.in, SIN -sf pace y SIN -pk gpu (no existen para este estilo); en el input: pair_style pace y pair_coeff * * potencial.yace Cu. MEDIDO el 27/11: pair_style pace corre solo en CPU, aun con lammps-gpu: 1000 átomos de Cu, 10000 pasos, 4 tareas MPI tardaron 55 s en cpu y 55 s en gpu con resultados idénticos; pedir GPU para pace no acelera nada, recomendar la versión CPU (/6k42sz5) salvo que el usuario ya use otros estilos de GPU. CPU: --partition=cpu y hash /6k42sz5; GPU (solo si hace falta): --partition=gpu --gres=gpu:1, hash /3z7zdg3 y WORKDIR en /mnt/gpu-data. Para un cálculo de prueba son 1 a 32 tareas MPI y minutos u horas, no 256 tareas ni 24 h. (5) NUNCA inventar /mnt/cpu-data/$USER/.spack ni un SPACK_USER_CONFIG_PATH propio: el activate.sh de ace-fit se carga solo, sin nada más. En GPU para ajustar: --partition=gpu --gres=gpu:1 y se quita el export CUDA_VISIBLE_DEVICES=''. (6) 'failed call to cuInit UNKNOWN ERROR (303)' al ajustar en un nodo cpu: NO es grave, es solo el aviso de TensorFlow de que ese nodo no tiene GPU; el ajuste sigue y termina bien; se puede ignorar (no hay que quitar nada ni cambiar de LAMMPS). (7) 'ajustar con mis datos de DFT' (o formato de datos para ajustar) se refiere al ajuste del potencial ACE con pacemaker: el formato es un DataFrame de pandas guardado como .pckl.gzip con columnas ase_atoms (objeto ase.Atoms), energy, energy_corrected, forces (array N×3) y name, que se arma con ase a partir de los cálculos de DFT; el ejemplo make_data.py de /apps/local/spack/ace-fit/ejemplo muestra cómo. No son los archivos de Quantum ESPRESSO.

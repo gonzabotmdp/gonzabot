@@ -6,6 +6,21 @@ into production on the IFIMAR cluster.
 
 ## [Unreleased]
 
+## [1.9.5] - 2026-11-27
+
+### Fixed
+- Answers about ML-PACE / ACE potentials, checked with seven simulated user sessions and then by running the generated scripts on the cluster:
+  the `md-sim` segment now also loads for `pacemaker`, `.yace`, `cuInit`, `.pckl`, "ACE potential" and "fit with my DFT data"
+  (before, two of the seven questions never saw the ACE context and one got Quantum ESPRESSO file formats).
+- New deterministic fixes: a `pacemaker` script that does not source the fitting environment gets it, and invented Spack setup lines are removed;
+  with `pair_style pace`, `-sf gpu` and `-pk gpu` are dropped from the `lmp` line (that style does not use the GPU package).
+- The selftest no longer depends on the real `preferred-hashes.conf` of the cluster, which changes when packages are rebuilt.
+
+### Changed
+- Context: LAMMPS with ML-PACE (new CPU and GPU builds), an ACE section (fitting, converting, running, licence, data format, measured times), rules for
+  answering about aliases versus hashes inside `sbatch`, and the measured fact that `pair_style pace` runs on CPU only (same time and energies on GPU).
+- Personal data removed from the public context (contact e-mail, a user name, a user's home path).
+
 ## [1.9.4] - 2026-11-19
 
 ### Fixed

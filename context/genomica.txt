@@ -32,7 +32,7 @@ masurca@4.1.4: spack load --sh masurca (bare, resuelve solo). Ensamblado alterna
   headers vía -include en CXXFLAGS/CFLAGS + renombrar una variable global que chocaba con
   std::prev) ya está en el package.py local, documentado con el historial completo — NO
   hace falta reinstalar ni reinvestigar si alguien más lo pide, ya anda.
-  Segundo bug real DISTINTO, encontrado por Alejandro Ales corriendo de verdad (3 jobs
+  Segundo bug real DISTINTO, encontrado por un usuario corriendo de verdad (3 jobs
   completos + reruns, siempre fallaba en la misma etapa de unitigging): segfault en
   OverlapCache::computeErateMaps() — para el primer índice (i=0), log(0) da -infinity, y
   castear eso a entero sin signo es comportamiento indefinido que produce un índice basura

@@ -2288,7 +2288,7 @@ def _fresh_queue_snapshot() -> str:
             + "\n--- FIN ESTADO ACTUAL DE LA COLA ---")
 
 
-_RE_MDSIM = re.compile(r'lammps|gromacs|amber(?!bar)', re.IGNORECASE)
+_RE_MDSIM = re.compile(r'lammps|gromacs|amber(?!bar)|ml-pace|pacemaker|python-ace|\.yace\b|\bpace/extrapolation|cuinit|pckl|ace-fit|tensorpotential|potencial(?:es)?\s+ace|ace\s+potential|pace_yaml2yace|ajust\w*\s+(?:con\s+)?(?:mis\s+)?datos\s+de\s+dft', re.IGNORECASE)
 _RE_DFTQE = re.compile(
     r'espresso|pw\.x|ph\.x|abinit|siesta|elk\b|wannier90', re.IGNORECASE)
 _RE_PARTICLE = re.compile(r'geant4?|cern|potfit', re.IGNORECASE)
@@ -2712,7 +2712,7 @@ def _warmup():
 
 
 _LAMMPS_BIN = ("/apps/local/spack/spack-2026b/spack/opt/spack/linux-zen4/"
-               "lammps-20250722.4-mgsqgyo42lix7gd3xn5ltak6efd6idgs/bin/lmp")
+               "lammps-20250722.4-6k42sz5cgyzypedqsyl752bsfpxoirsr/bin/lmp")
 _OMPI_DIR   = ("/apps/local/spack/spack-2026b/spack/opt/spack/linux-zen4/"
                "openmpi-5.0.8-2cgnkugxdchje4kznxdftkaqwapdebri")
 
@@ -3485,6 +3485,22 @@ def _fix_sbatch(text: str) -> str:
     _RE_IMPORTS_MPL = _re.compile(r'(?:^|[\s"\';])(?:import|from)\s+matplotlib\b', _re.M)
     _RE_IMPORTS_SCIPY = _re.compile(r'\bscipy\b')   # cualquier mención: caso no verificado, no se toca
 
+    def _fix_ace(block: str, full: str) -> str:
+        """Pruebas de usuario 27/11: (1) un sbatch de pacemaker salió con SPACK_USER_CONFIG_PATH inventado (/mnt/cpu-data/$USER/.spack...) y
+        spack load de LAMMPS en vez de /apps/local/spack/ace-fit/activate.sh: se sacan esas líneas y se pone el activate.sh antes del primer
+        pacemaker (solo si el script no corre lmp). (2) pair_style pace no usa el paquete GPU: se quitan -sf gpu y -pk gpu N de la línea lmp."""
+        out = block
+        if _re.search(r'^\s*pacemaker\b', out, _re.M) and "ace-fit/activate.sh" not in out and not _re.search(r'\blmp\b', out):
+            keep = [ln for ln in out.split("\n")
+                    if not _re.match(r'\s*(export\s+SPACK_USER_CONFIG_PATH=|source\s+\S*setup-env\.sh|spack\s+load\b|eval\s+\$\(spack\s+load)', ln)]
+            i = next(k for k, ln in enumerate(keep) if _re.match(r'\s*pacemaker\b', ln))
+            keep.insert(i, "source /apps/local/spack/ace-fit/activate.sh")
+            out = "\n".join(keep)
+        if _re.search(r'pair_style\s+pace', full):
+            out = "\n".join(_re.sub(r'\s+-pk\s+gpu\s+\d+', '', _re.sub(r'\s+-sf\s+gpu\b', '', ln)) if _re.search(r'\blmp\b', ln) else ln
+                            for ln in out.split("\n"))
+        return out
+
     def _fix_pandas_env(block: str) -> str:
         """Verificado el 16/11 con jobs reales: pandas NO está en numpy.env/scipy.env/matplotlib.env (ModuleNotFoundError). Un script que
         importa pandas se arregla con `spack load py-pandas@3.0.5 %gcc@14.2.0` (+ py-matplotlib@3.10.9 si usa matplotlib; no elegir numpy
@@ -3775,6 +3791,7 @@ def _fix_sbatch(text: str) -> str:
             body = _fix_dollar_escapes(body)
             body = _fix_module_load(body)
             body = _fix_pandas_env(body)
+            body = _fix_ace(body, text)
             body = _fix_missing_python_env(body)
             body = _fix_missing_cd_workdir(body)
             body = _fix_py_script_paths(body)
@@ -4607,12 +4624,12 @@ def _selftest() -> int:
     r = _fix_sbatch(B.format("source /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh\neval $(spack load --sh bwa)\nbwa mem"))
     _t("spack: eval $(spack load --sh X) ya correcto → intacto",
        r.count("eval $(spack load --sh bwa)") == 1 and r.split("```")[1].count("setup-env.sh") == 1)
-    if not os.path.exists("/apps/local/spack/spack-2026b/site/preferred-hashes.conf"):
-        import tempfile as _tf
-        _pc = _tf.NamedTemporaryFile("w", suffix=".conf", delete=False)
-        _pc.write("lammps-cpu mgsqgyo42lix7gd3xn5ltak6efd6idgs\nlammps-gpu odhttgc2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n")
-        _pc.close()
-        os.environ["GONZABOT_PREFERRED_HASHES"] = _pc.name
+    # Siempre un conf de prueba: el real cambia cuando softadm migra hashes (26/11) y el test no debe depender del cluster.
+    import tempfile as _tf
+    _pc = _tf.NamedTemporaryFile("w", suffix=".conf", delete=False)
+    _pc.write("lammps-cpu mgsqgyo42lix7gd3xn5ltak6efd6idgs\nlammps-gpu odhttgc2xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n")
+    _pc.close()
+    os.environ["GONZABOT_PREFERRED_HASHES"] = _pc.name
     r = _fix_sbatch(B.format("eval $(spack load --sh lammps-cpu)\neval $(spack load --sh lammps-gpu)\nlmp -in x"))
     _t("spack: alias lammps-cpu/gpu en sbatch → /hash (no hay wrapper en batch)",
        "--sh /mgsqgyo)" in r and "--sh /odhttgc)" in r and "lammps-cpu" not in r)
@@ -5230,6 +5247,19 @@ def _selftest() -> int:
         _os_st.utime(_jp, None)
         _t("_vllm_start_state: contenido que no es un número -> None", _vllm_start_state(_jp) is None)
     _t("consejo de arranque: ya no manda a un usuario común a mirar squeue (no ve el job)", not any("squeue -p inference" in _x for _x in _TIPS))
+    _t("segmento md-sim: se activa con pacemaker / .yace / ML-PACE (potenciales ACE) sin decir lammps",
+       all(_RE_MDSIM.search(x) for x in ("ajustar con pacemaker", "tengo un potencial.yace", "ML-PACE", "me sale failed call to cuInit 303", "quiero ajustar con mis datos de DFT", "un potencial ACE para cobre")) and not _RE_MDSIM.search("hola, quiero correr bwa"))
+    _AC = "Aquí va:\n```bash\n#!/bin/bash\n#SBATCH --partition=gpu\n#SBATCH --gres=gpu:1\n#SBATCH --ntasks=1\n#SBATCH --time=00:30:00\nWORKDIR=/mnt/gpu-data/$USER/pm_$SLURM_JOB_ID\nmkdir -p $WORKDIR\ncd $WORKDIR\nexport SPACK_USER_CONFIG_PATH=/mnt/cpu-data/$USER/.spack_user_config\nsource /apps/local/spack/spack-2026b/spack/share/spack/setup-env.sh\nspack load /3z7zdg3\npacemaker input.yaml\n```"
+    _r = _fix_sbatch(_AC)
+    _t("pacemaker: sin activate.sh y con SPACK_USER_CONFIG_PATH inventado -> se arregla con ace-fit/activate.sh",
+       "source /apps/local/spack/ace-fit/activate.sh" in _r and ".spack_user_config" not in _r and "spack load" not in _r
+       and _r.index("activate.sh") < _r.index("pacemaker input.yaml"))
+    _r = _fix_sbatch(_AC.replace("pacemaker input.yaml", "pacemaker input.yaml\nmpirun -np 4 lmp -in in.lmp"))
+    _t("pacemaker + lmp en el mismo script: no se tocan las líneas de spack de LAMMPS", "spack load /3z7zdg3" in _r)
+    _r = _fix_sbatch("Con pair_style pace:\n```bash\n#!/bin/bash\n#SBATCH --partition=gpu\n#SBATCH --gres=gpu:1\n#SBATCH --ntasks=1\n${LAMMPS_DIR}/bin/lmp -sf gpu -pk gpu 1 -in input.in\n```")
+    _t("pair_style pace: se quitan -sf gpu y -pk gpu de la línea lmp", "-sf gpu" not in _r and "-pk gpu" not in _r and "-in input.in" in _r)
+    _r = _fix_sbatch("Normal:\n```bash\n#!/bin/bash\n#SBATCH --partition=gpu\n#SBATCH --gres=gpu:1\n#SBATCH --ntasks=1\n${LAMMPS_DIR}/bin/lmp -sf gpu -pk gpu 1 -in input.in\n```")
+    _t("sin pair_style pace, -sf gpu -pk gpu de LAMMPS normal se respetan", "-sf gpu -pk gpu 1" in _r)
     # i18n fase 1 (8/10, pedido explícito: "no me quiero encerrar en
     # español"): detección por consola, sin preguntarle nada al usuario.
     _env_real = dict(os.environ)
